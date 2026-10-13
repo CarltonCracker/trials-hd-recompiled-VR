@@ -60,6 +60,23 @@ endif()
 
 rexglue_setup_target(trials_hd GPU_PLUGINS xenos)
 
+# A fresh checkout has no generated code when CMake configures, so there is
+# nothing to compile the game from yet (CMake only lists generated sources that
+# exist at configure time). The first build then only runs codegen and marks
+# the configuration stale; the next build re-runs CMake and compiles it all.
+if(NOT REXGLUE_ENTRYPOINT_GENERATED_SOURCES)
+    set(TRIALSHD_CODEGEN_READY "${CMAKE_BINARY_DIR}/trials_hd_codegen_ready.stamp")
+    file(WRITE "${TRIALSHD_CODEGEN_READY}" "")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${TRIALSHD_CODEGEN_READY}")
+    set_target_properties(trials_hd PROPERTIES EXCLUDE_FROM_ALL ON)
+    add_custom_target(trials_hd_first_codegen ALL
+        COMMAND "${CMAKE_COMMAND}" -E touch "${TRIALSHD_CODEGEN_READY}"
+        COMMAND "${CMAKE_COMMAND}" -E echo
+                "trials_hd: game code generated - run the same build command again to compile it"
+        VERBATIM)
+    add_dependencies(trials_hd_first_codegen trials_hd_codegen)
+endif()
+
 # The SDK builds its shared libraries into its own out/ directory and only
 # stages them next to the executable on Windows (and stages the GPU plugin only
 # when trials_hd relinks). The binary's RPATH is $ORIGIN, so copy them alongside

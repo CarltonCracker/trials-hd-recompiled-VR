@@ -53,10 +53,14 @@ git clone --recursive --shallow-submodules https://github.com/snufflyyy/trials-h
 cd trials-hd-recompiled
 cmake --preset linux-amd64-relwithdebinfo
 cmake --build out/build/linux-amd64-relwithdebinfo -j$(nproc)
+# First build only: that generated the game code; build again to compile it.
+cmake --build out/build/linux-amd64-relwithdebinfo -j$(nproc)
 ```
 
-The first build runs `rexglue codegen` on `assets/default.xex` (a few seconds) and
-then compiles ~110 MB of generated C++, which takes a while and several GB of RAM.
+The first `cmake --build` runs `rexglue codegen` on `assets/default.xex` (a few
+seconds) and asks you to build again: CMake can only add the generated sources once
+they exist. The second build re-runs CMake by itself and compiles ~110 MB of generated
+C++, which takes a while and several GB of RAM. Later builds need a single command.
 
 ## 3. Run
 
