@@ -14,6 +14,8 @@ Script lines (blank lines and # comments ignored):
   axis <axis> <value>    virtual gamepad axis, e.g. `axis rt 32767`
   capture <name>         save the game's own frame to <shot_dir>/<name>.png (works
                          with --vulkan_headless_surface; needs pad_fifo)
+  dump_resolves          dump every resolve of the next game frame (needs
+                         --readback_resolve=full; files go to dump_resolves_dir)
   focus <title>          give input focus to the first window whose title contains
                          <title> (needed under Xvfb: there is no window manager)
 
@@ -79,6 +81,9 @@ def main():
             if not pad:
                 raise SystemExit("pad/axis commands need a pad FIFO")
             pad.write(f"{'btn' if cmd == 'pad' else 'axis'} {args[0]} {args[1]}\n")
+            pad.flush()
+        elif cmd == "dump_resolves":
+            pad.write("dump_resolves\n")
             pad.flush()
         elif cmd == "capture":
             if not pad:

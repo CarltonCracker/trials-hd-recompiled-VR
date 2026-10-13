@@ -96,6 +96,20 @@ class TrialsHdApp : public rex::ReXApp {
     }
     REXLOG_INFO("readback_memexport = {}", rex::cvar::GetFlagByName("readback_memexport"));
 
+    // Auto exposure: the game reads its small luminance resolves (8x8..64x64)
+    // back on the CPU; without readback the exposure never adapts and lit
+    // scenes blow out. Read back only small resolves, one frame late (no GPU
+    // stall) - the large render target copies would cost a lot of bandwidth.
+    if (rex::cvar::GetFlagSource("readback_resolve") == rex::cvar::Source::kDefault) {
+      rex::cvar::SetFlagByName("readback_resolve", "fast");
+    }
+    if (rex::cvar::GetFlagSource("readback_resolve_max_bytes") == rex::cvar::Source::kDefault) {
+      rex::cvar::SetFlagByName("readback_resolve_max_bytes", "65536");
+    }
+    REXLOG_INFO("readback_resolve = {} (max {} bytes)",
+                rex::cvar::GetFlagByName("readback_resolve"),
+                rex::cvar::GetFlagByName("readback_resolve_max_bytes"));
+
     // Replaces the SDK's input gate: the game ignores the controller while the
     // settings menu is open (it navigates the menu instead).
     if (auto* input = static_cast<rex::input::InputSystem*>(runtime()->input_system())) {

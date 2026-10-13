@@ -8,8 +8,10 @@ project(trials_hd LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Local fixes to the ReXGlue SDK live in patches/rexglue-sdk so the submodule can
-# keep tracking upstream. Apply any that are not applied yet.
+# Local changes to the ReXGlue SDK live in patches/rexglue-sdk/trials-hd.patch
+# (regenerated with tools/export_sdk_patch.sh) so the submodule can keep
+# tracking upstream. Apply it to a clean checkout; a tree with other local
+# changes is left alone (SDK development in progress).
 find_package(Git REQUIRED)
 file(GLOB TRIALSHD_SDK_PATCHES "${CMAKE_CURRENT_SOURCE_DIR}/patches/rexglue-sdk/*.patch")
 list(SORT TRIALSHD_SDK_PATCHES)
@@ -18,7 +20,13 @@ foreach(_patch IN LISTS TRIALSHD_SDK_PATCHES)
         COMMAND ${GIT_EXECUTABLE} apply --reverse --check ${_patch}
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/rexglue-sdk
         RESULT_VARIABLE _already_applied OUTPUT_QUIET ERROR_QUIET)
-    if(NOT _already_applied EQUAL 0)
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} status --porcelain --untracked-files=no
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/rexglue-sdk
+        OUTPUT_VARIABLE _sdk_changes OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(NOT _already_applied EQUAL 0 AND NOT _sdk_changes STREQUAL "")
+        message(STATUS "SDK tree has local changes; not re-applying ${_patch}")
+    elseif(NOT _already_applied EQUAL 0)
         execute_process(
             COMMAND ${GIT_EXECUTABLE} apply ${_patch}
             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/rexglue-sdk
@@ -51,21 +59,25 @@ endif()
 rexglue_setup_target(trials_hd GPU_PLUGINS xenos)
 
 # The SDK builds its shared libraries into its own out/ directory and only
-# stages them next to the executable on Windows. The binary's RPATH is $ORIGIN,
-# so copy them alongside it here.
-set(TRIALSHD_RUNTIME_LIBS rexruntime)
+# stages them next to the executable on Windows (and stages the GPU plugin only
+# when trials_hd relinks). The binary's RPATH is $ORIGIN, so copy them alongside
+# it on every build; copy_if_different keeps this cheap.
+set(TRIALSHD_RUNTIME_LIBS $<TARGET_FILE:rexruntime> $<TARGET_FILE:rexgpu-xenos>)
+set(TRIALSHD_RUNTIME_LIB_TARGETS rexruntime rexgpu-xenos)
 if(TARGET TracyClient)
     get_target_property(_tracy_type TracyClient TYPE)
     if(_tracy_type STREQUAL "SHARED_LIBRARY")
-        list(APPEND TRIALSHD_RUNTIME_LIBS TracyClient)
+        list(APPEND TRIALSHD_RUNTIME_LIBS $<TARGET_FILE:TracyClient>)
+        list(APPEND TRIALSHD_RUNTIME_LIB_TARGETS TracyClient)
     endif()
 endif()
-foreach(_lib IN LISTS TRIALSHD_RUNTIME_LIBS)
-    add_custom_command(TARGET trials_hd POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                $<TARGET_FILE:${_lib}> $<TARGET_FILE_DIR:trials_hd>
-        VERBATIM)
-endforeach()
+add_custom_target(trials_hd_stage_libs
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${TRIALSHD_RUNTIME_LIBS}
+            ${CMAKE_CURRENT_BINARY_DIR}
+    DEPENDS ${TRIALSHD_RUNTIME_LIB_TARGETS}
+    COMMENT "Staging runtime libraries next to trials_hd"
+    VERBATIM)
+add_dependencies(trials_hd trials_hd_stage_libs)
 
 # rex_app.cpp (compiled into this target by the SDK) includes imgui.h, but
 # rexruntime links imgui privately, so the header path does not propagate when

@@ -12,6 +12,7 @@
 
 #include <SDL3/SDL.h>
 
+#include <rex/cvar.h>
 #include <rex/logging.h>
 
 namespace trials_hd {
@@ -50,6 +51,12 @@ void Apply(SDL_Joystick* joystick, const std::string& line,
   std::istringstream in(line);
   std::string cmd, name;
   int value = 0;
+  if (line == "dump_resolves") {
+    // Diagnostics: with --readback_resolve=full, dump every resolve of the next
+    // frame (see dump_resolves_frame / dump_resolves_dir in the SDK).
+    rex::cvar::SetFlagByName("dump_resolves_frame", "-2");
+    return;
+  }
   if (line.rfind("capture ", 0) == 0) {
     if (on_capture) {
       on_capture(line.substr(8));

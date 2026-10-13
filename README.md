@@ -163,7 +163,7 @@ so they work with the headless surface) land in `out/run/<name>.png`.
 | `generated/rexglue.cmake` | SDK build glue (from `rexglue init`) |
 | `generated/default/` | Recompiled game code; generated at build time, gitignored |
 | `thirdparty/rexglue-sdk` | ReXGlue SDK (git submodule) |
-| `patches/rexglue-sdk/` | Local SDK changes, applied automatically at configure time: keyboard keystroke events, host presentation FPS cap + guest FPS logging, guest-memory shm cleanup, Vulkan headless surface, quieter per-query GPU logging |
+| `patches/rexglue-sdk/` | Local SDK changes (one patch, regenerated with `tools/export_sdk_patch.sh`), applied automatically at configure time: rendering fixes (16-bit integer resolves, texture exponent bias), small-resolve readback, host FPS cap + guest FPS logging, guest-memory shm cleanup, Vulkan headless surface, diagnostics |
 | `tests/headless/` | Scripted headless test and benchmark runs (`INPUT=… tools/headless_run.sh`) |
 | `tools/stfs_extract.py` | Extracts files from Xbox 360 STFS (LIVE/PIRS/CON) packages |
 | `tools/xex_dump/`, `tools/disasm.py` | Dump the loaded XEX image and disassemble addresses (output stays in `out/`) |
