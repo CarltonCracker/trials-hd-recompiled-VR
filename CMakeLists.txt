@@ -49,6 +49,12 @@ if(TRIALSHD_ASAN)
     add_compile_options(-fsanitize=address -fno-omit-frame-pointer)
     add_link_options(-fsanitize=address)
 endif()
+# ThreadSanitizer build for data race hunting (same setup and exclusions).
+option(TRIALSHD_TSAN "Build with ThreadSanitizer (diagnostics)" OFF)
+if(TRIALSHD_TSAN)
+    add_compile_options(-fsanitize=thread)
+    add_link_options(-fsanitize=thread)
+endif()
 
 include(generated/rexglue.cmake)
 
@@ -57,7 +63,6 @@ set(TRIALSHD_SOURCES
     src/main.cpp
     src/fallback_audio.cpp
     src/graphics_settings.cpp
-    src/main_menu.cpp
     src/gpu_wait.cpp
     src/package_license.cpp
     src/virtual_pad.cpp
@@ -73,6 +78,9 @@ rexglue_setup_target(trials_hd GPU_PLUGINS xenos)
 
 if(TRIALSHD_ASAN AND TARGET trials_hd_recomp)
     target_compile_options(trials_hd_recomp PRIVATE -fno-sanitize=address)
+endif()
+if(TRIALSHD_TSAN AND TARGET trials_hd_recomp)
+    target_compile_options(trials_hd_recomp PRIVATE -fno-sanitize=thread)
 endif()
 
 # The SDK builds its shared libraries into its own out/ directory and only
