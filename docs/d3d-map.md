@@ -76,6 +76,38 @@ present, render targets, shaders, textures/streams — and read the remaining st
 the shadow at draw time. The shadow uses the Xenos register layout, which ReXGlue's GPU
 code already decodes (register file, `draw_util`).
 
-Next: locate the rest of the shadow (render-state / fetch-constant ranges and their
-dirty masks), confirm the draw variants, and build a frame recorder on these hooks
-that dumps one frame's draw list (primitive, counts, streams, textures, constants).
+### Register shadow layout (draft)
+
+From the arguments of the commit functions (sub_82141488/540/AD0/B90/D10/E68: register
+base in r5, shadow base inside the device in r6, count in r7). Context registers are
+kept as contiguous runs, so a register's shadow is its run base + 4 × (register − first).
+
+| Xenos registers | Shadow | Notes |
+| --- | --- | --- |
+| 0x4000–0x43FF (vertex shader ALU constants) | device+0x0780 | 256 × float4; sub-ranges (0x4020, 0x4030, …) committed from the same base |
+| 0x4400–0x47FF (pixel shader ALU constants) | device+0x1780 | |
+| 0x2000 run (RB surface / color / depth info …) | device+0x2880 | ~0x13 registers |
+| 0x2100 run | device+0x28CC | ~0x15 registers (0x2105, 0x210E seen individually) |
+| 0x2180 run (SQ program control …) | device+0x2920 | 5 registers |
+| 0x2200 run (depth / blend / raster control …) | device+0x2934 | ~0x47 registers |
+| 0x2388 run | device+0x2A50 | committed every draw (sub_82141B90) |
+| 0x48BA–0x48BF (vertex fetch constants) | device+0x0764 | 6 dwords, via sub_82141488 |
+
+Other families seen in the same sweep:
+
+| Function | Arguments | Likely role |
+| --- | --- | --- |
+| sub_82141FB8 | r4 = GPU physical address (0xBF…/0xFF…), r5 = object | shader microcode binding |
+| sub_821425E0, sub_82142768, sub_82142B50 | pairs of object pointers | shader / vertex declaration objects |
+| sub_82141008 | physical addresses, count field 0x100103 | command buffer / fence management |
+
+Still to find: texture fetch constants (likely copied from the texture object's embedded
+fetch constant by SetTexture), the remaining context-register runs, and the dirty masks.
+
+## Next: frame recorder
+
+Hook the draw entry points, Resolve, present, SetTexture and SetStreamSource, snapshot
+the shadow ranges above at each draw, and dump one frame's draw list (primitive, counts,
+streams, textures, shaders, constants, render-target registers). Its draw count must
+match the command processor's (~1480/frame). That list is the input the WebGPU renderer
+replays.
