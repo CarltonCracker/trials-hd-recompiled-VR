@@ -49,8 +49,8 @@ as the full game, a trial package runs as a trial.
 ## 2. Build
 
 ```sh
-git clone --recursive --shallow-submodules <this repo>
-cd trails-hd-recomp
+git clone --recursive --shallow-submodules https://github.com/snufflyyy/trials-hd-recompiled.git
+cd trials-hd-recompiled
 cmake --preset linux-amd64-relwithdebinfo
 cmake --build out/build/linux-amd64-relwithdebinfo -j$(nproc)
 ```
