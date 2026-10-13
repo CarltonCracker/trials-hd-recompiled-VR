@@ -93,3 +93,28 @@ if(TRIALSHD_WEBGPU)
     add_executable(webgpu_smoke tools/webgpu_smoke/main.cpp)
     target_link_libraries(webgpu_smoke PRIVATE trials_hd_webgpu)
 endif()
+
+# Reverse-engineering aid: count calls of every recompiled function in an address
+# range (default: the Direct3D runtime) and log them per second to the CSV named
+# by TRIALS_HD_CALL_TRACE_CSV. See docs/d3d-map.md. Needs a codegen'd tree.
+option(TRIALSHD_CALL_TRACE "Build per-function call counters (diagnostics)" OFF)
+set(TRIALSHD_CALL_TRACE_RANGE "0x8212B000;0x82170000" CACHE STRING "Traced address range (lo;hi)")
+if(TRIALSHD_CALL_TRACE)
+    set(_register "${CMAKE_CURRENT_SOURCE_DIR}/generated/default/trials_hd_register.cpp")
+    if(NOT EXISTS "${_register}")
+        message(FATAL_ERROR "TRIALSHD_CALL_TRACE needs generated code: build once without it first")
+    endif()
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    set(_shims "${CMAKE_CURRENT_BINARY_DIR}/diag/call_trace_shims.cpp")
+    list(GET TRIALSHD_CALL_TRACE_RANGE 0 _lo)
+    list(GET TRIALSHD_CALL_TRACE_RANGE 1 _hi)
+    add_custom_command(
+        OUTPUT "${_shims}"
+        COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_trace_shims.py"
+                "${CMAKE_CURRENT_SOURCE_DIR}/generated/default" "${CMAKE_CURRENT_SOURCE_DIR}/src"
+                "${_shims}" ${_lo} ${_hi}
+        DEPENDS "${_register}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_trace_shims.py"
+        VERBATIM)
+    target_sources(trials_hd PRIVATE src/diag/call_trace.cpp "${_shims}")
+    target_compile_definitions(trials_hd PRIVATE TRIALSHD_CALL_TRACE=1)
+endif()

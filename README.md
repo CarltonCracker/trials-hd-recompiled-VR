@@ -174,6 +174,7 @@ so they work with the headless surface) land in `out/run/<name>.png`.
 | `src/webgpu/`, `tools/webgpu_smoke/` | WebGPU renderer foundation (Dawn natively, emdawnwebgpu on the web) and its smoke test |
 | `docs/webgpu-renderer.md`, `docs/d3d-map.md` | WebGPU renderer design/milestones; map of the game's Direct3D runtime |
 | `tools/d3d_survey.py` | Finds the functions that emit GPU command packets (Direct3D runtime survey) |
+| `tools/gen_trace_shims.py`, `src/diag/` | Diagnostic build (`-DTRIALSHD_CALL_TRACE=ON`): per-function call counts and argument samples, for mapping the Direct3D API |
 | `thirdparty/dawn` | Dawn (git submodule), only needed with `-DTRIALSHD_WEBGPU=ON` |
 
 ## Legal
