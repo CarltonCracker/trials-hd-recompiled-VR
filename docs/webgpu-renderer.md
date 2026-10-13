@@ -79,7 +79,8 @@ resolutions. The emulated Vulkan renderer remains the fallback until B covers th
 | M0 | Dawn builds in-tree; `webgpu_smoke` opens a window and presents | done (Dawn `901f57556`, Vulkan/X11) |
 | M1 | Shader pipeline: microcode → SPIR-V → WGSL with cache, validated on the game's shaders | |
 | M2 | Detached-mode integration: WebGPU owns presentation, overlays draw through it | |
-| M3+ | Native renderer (B): Direct3D survey, hooks, state/resource translation | |
+| M3a | Direct3D survey: map the runtime's GPU-facing functions ([d3d-map.md](d3d-map.md)) | static pass done; dynamic pass next |
+| M3+ | Native renderer (B): hooks, state/resource translation | |
 | Web | Emscripten build of the renderer; see the web-port notes below | |
 
 ## Web port notes (outside the renderer)

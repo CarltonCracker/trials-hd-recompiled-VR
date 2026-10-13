@@ -172,7 +172,8 @@ so they work with the headless surface) land in `out/run/<name>.png`.
 | `tools/xsend.py` | Scripted controller/key input for headless runs (`INPUT=script tools/headless_run.sh`, drives a virtual gamepad) |
 | `tools/package.sh` | Assembles a runnable build folder in `dist/` (no game data) |
 | `src/webgpu/`, `tools/webgpu_smoke/` | WebGPU renderer foundation (Dawn natively, emdawnwebgpu on the web) and its smoke test |
-| `docs/webgpu-renderer.md` | WebGPU renderer design and milestones |
+| `docs/webgpu-renderer.md`, `docs/d3d-map.md` | WebGPU renderer design/milestones; map of the game's Direct3D runtime |
+| `tools/d3d_survey.py` | Finds the functions that emit GPU command packets (Direct3D runtime survey) |
 | `thirdparty/dawn` | Dawn (git submodule), only needed with `-DTRIALSHD_WEBGPU=ON` |
 
 ## Legal
