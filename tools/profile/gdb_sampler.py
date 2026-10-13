@@ -1,21 +1,17 @@
 # gdb script: sampling profiler for a running process (no perf needed).
+# Use it through tools/profile/sample.sh, which interrupts the process
+# periodically (a Python timer inside gdb doesn't run while the inferior does).
 #
-#   gdb -p <pid> -batch -x tools/profile/gdb_sampler.py
-#
-# Environment: SAMPLER_COUNT (default 200), SAMPLER_INTERVAL seconds (0.05),
+# Environment: SAMPLER_COUNT (default 200),
 # SAMPLER_DEPTH frames (24), SAMPLER_OUT output file (sampler.txt),
 # SAMPLER_THREADS comma-separated thread name substrings to record (all if unset).
 # Each sample stops the process, records every thread's stack, and resumes it.
 # Output: one line per thread sample: "<thread name>\t<frame0>;<frame1>;...".
 import os
-import signal
-import threading
-import time
 
 import gdb
 
 count = int(os.environ.get("SAMPLER_COUNT", "200"))
-interval = float(os.environ.get("SAMPLER_INTERVAL", "0.05"))
 depth = int(os.environ.get("SAMPLER_DEPTH", "24"))
 out_path = os.environ.get("SAMPLER_OUT", "sampler.txt")
 thread_filter = [t for t in os.environ.get("SAMPLER_THREADS", "").split(",") if t]
@@ -27,8 +23,8 @@ gdb.execute("set confirm off")
 for sig in ("SIGSEGV", "SIGBUS", "SIGUSR1", "SIGUSR2", "SIGPIPE", "SIGALRM", "SIGCHLD"):
     gdb.execute(f"handle {sig} nostop noprint pass")
 gdb.execute("handle SIGINT stop noprint nopass")
+# Count reached: stop recording but keep swallowing interrupts until detached.
 
-pid = gdb.selected_inferior().pid
 
 
 def frame_name(frame):
@@ -38,14 +34,6 @@ def frame_name(frame):
     pc = frame.pc()
     solib = gdb.solib_name(pc)
     return f"0x{pc:x}" + (f"@{os.path.basename(solib)}" if solib else "")
-
-
-def interrupt_later():
-    time.sleep(interval)
-    try:
-        os.kill(pid, signal.SIGINT)
-    except ProcessLookupError:
-        pass
 
 
 with open(out_path, "w") as out:
@@ -69,12 +57,9 @@ with open(out_path, "w") as out:
                     break
             out.write(f"{thread.name or thread.num}\t{';'.join(frames)}\n")
             out.flush()
-        timer = threading.Thread(target=interrupt_later)
-        timer.start()
         try:
             gdb.execute("continue", to_string=True)
         except gdb.error:
             break
-        timer.join()
 
 gdb.execute("detach")
