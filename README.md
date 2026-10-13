@@ -1,5 +1,13 @@
 # Trials HD Recompiled
 
+> [!WARNING]
+> ## ⚠️ Disclaimer: this project was 100% vibe coded
+>
+> **This project was 100% vibe coded, mostly with Claude Opus 5.5 and ChatGPT 6.1
+> Sol. It wasn't actually made by me.** AI models wrote the code, the fixes and
+> this README; I only gave directions and tested the results. Expect rough edges and
+> bugs, and read the code before you trust it.
+
 A static recompilation of **Trials HD** (Xbox 360 / XBLA, title ID `5841095A`) to native
 Linux x86-64, built with the [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk).
 
@@ -200,3 +208,7 @@ also occur with the original loop; no guest access violations occurred in these 
 Trials HD is © RedLynx / Ubisoft. This project is not affiliated with or endorsed by
 them or by Microsoft. It contains no copyrighted game material; you need a legally
 obtained copy of the game to use it.
+
+The code in this repository is released under the [MIT License](LICENSE). The ReXGlue
+SDK (`thirdparty/rexglue-sdk`) and the changes to it in `patches/rexglue-sdk/` fall
+under the SDK's own license (BSD 3-Clause).
