@@ -1,0 +1,34 @@
+# Walks the main menu with D-pad down (checks the removed buttons and navigation).
+# Run: INPUT=tests/headless/main_menu_nav.txt tools/headless_run.sh 36
+wait 24
+shot nav_0
+pad down 1
+wait 0.1
+pad down 0
+wait 0.8
+shot nav_1
+pad down 1
+wait 0.1
+pad down 0
+wait 0.8
+shot nav_2
+pad down 1
+wait 0.1
+pad down 0
+wait 0.8
+shot nav_3
+pad down 1
+wait 0.1
+pad down 0
+wait 0.8
+shot nav_4
+pad down 1
+wait 0.1
+pad down 0
+wait 0.8
+shot nav_5
+pad down 1
+wait 0.1
+pad down 0
+wait 0.8
+shot nav_6

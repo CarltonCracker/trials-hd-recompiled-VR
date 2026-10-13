@@ -1,0 +1,30 @@
+# Opens the graphics settings with the Guide button, opens the Render Resolution
+# dropdown, then closes everything with B. Run: INPUT=tests/headless/settings_menu.txt tools/headless_run.sh 38
+wait 24
+pad guide 1
+wait 0.2
+pad guide 0
+wait 1.5
+shot settings_open
+pad down 1
+wait 0.1
+pad down 0
+wait 0.3
+pad down 1
+wait 0.1
+pad down 0
+wait 0.3
+pad a 1
+wait 0.1
+pad a 0
+wait 0.8
+shot settings_render_combo
+pad b 1
+wait 0.1
+pad b 0
+wait 0.5
+pad b 1
+wait 0.1
+pad b 0
+wait 1.5
+shot settings_closed

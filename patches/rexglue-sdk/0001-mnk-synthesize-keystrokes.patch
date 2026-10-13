@@ -1,0 +1,189 @@
+diff --git a/include/rex/input/mnk/mnk_input_driver.h b/include/rex/input/mnk/mnk_input_driver.h
+index c8751b7..9271ff4 100644
+--- a/include/rex/input/mnk/mnk_input_driver.h
++++ b/include/rex/input/mnk/mnk_input_driver.h
+@@ -60,6 +60,9 @@ class MnkInputDriver final : public InputDriver,
+   bool IsEnabled() const;
+   void SetKeyState(uint16_t vk, bool down);
+   void EnqueueKeystroke(uint16_t vk_pad, bool down);
++  // Pad buttons from the bound keys, plus synthetic bits for the triggers and
++  // left stick directions (see GetDeviceKeystroke). Requires state_mutex_.
++  uint32_t PressedButtonsLocked() const;
+ 
+   // Called from the guest thread. The rest of the capture path stays on the UI
+   // thread, since every Window call in it reaches SDL.
+@@ -101,6 +104,8 @@ class MnkInputDriver final : public InputDriver,
+ 
+   // Keystroke queue
+   std::queue<X_INPUT_KEYSTROKE> keystroke_queue_;
++  // Buttons last reported through keystrokes, diffed on each keystroke poll.
++  uint32_t keystroke_buttons_ = 0;
+ 
+   // Packet number incremented on state change
+   uint32_t packet_number_ = 0;
+diff --git a/src/input/mnk/mnk_input_driver.cpp b/src/input/mnk/mnk_input_driver.cpp
+index 3f9422d..02bcc4b 100644
+--- a/src/input/mnk/mnk_input_driver.cpp
++++ b/src/input/mnk/mnk_input_driver.cpp
+@@ -10,6 +10,8 @@
+  */
+ #include <rex/input/mnk/mnk_input_driver.h>
+ 
++#include <utility>
++
+ #include <rex/cvar.h>
+ #include <rex/input/input.h>
+ #include <rex/logging.h>
+@@ -65,6 +67,39 @@ namespace {
+ // A single device, so its handle is a constant.
+ constexpr rex::input::DeviceId kMnkDevice = static_cast<rex::input::DeviceId>(0x4D4E4B00);
+ 
++// Keystroke-only bits above the 16 XINPUT button bits.
++constexpr uint32_t kSynthLTrigger = 1u << 16;
++constexpr uint32_t kSynthRTrigger = 1u << 17;
++constexpr uint32_t kSynthLThumbUp = 1u << 18;
++constexpr uint32_t kSynthLThumbDown = 1u << 19;
++constexpr uint32_t kSynthLThumbLeft = 1u << 20;
++constexpr uint32_t kSynthLThumbRight = 1u << 21;
++
++// Button bit -> keystroke virtual key, in the order events are sent when
++// several change at once.
++constexpr std::pair<uint32_t, rex::ui::VirtualKey> kKeystrokeMap[] = {
++    {X_INPUT_GAMEPAD_DPAD_UP, rex::ui::VirtualKey::kXInputPadDpadUp},
++    {X_INPUT_GAMEPAD_DPAD_DOWN, rex::ui::VirtualKey::kXInputPadDpadDown},
++    {X_INPUT_GAMEPAD_DPAD_LEFT, rex::ui::VirtualKey::kXInputPadDpadLeft},
++    {X_INPUT_GAMEPAD_DPAD_RIGHT, rex::ui::VirtualKey::kXInputPadDpadRight},
++    {X_INPUT_GAMEPAD_START, rex::ui::VirtualKey::kXInputPadStart},
++    {X_INPUT_GAMEPAD_BACK, rex::ui::VirtualKey::kXInputPadBack},
++    {X_INPUT_GAMEPAD_LEFT_THUMB, rex::ui::VirtualKey::kXInputPadLThumbPress},
++    {X_INPUT_GAMEPAD_RIGHT_THUMB, rex::ui::VirtualKey::kXInputPadRThumbPress},
++    {X_INPUT_GAMEPAD_LEFT_SHOULDER, rex::ui::VirtualKey::kXInputPadLShoulder},
++    {X_INPUT_GAMEPAD_RIGHT_SHOULDER, rex::ui::VirtualKey::kXInputPadRShoulder},
++    {X_INPUT_GAMEPAD_A, rex::ui::VirtualKey::kXInputPadA},
++    {X_INPUT_GAMEPAD_B, rex::ui::VirtualKey::kXInputPadB},
++    {X_INPUT_GAMEPAD_X, rex::ui::VirtualKey::kXInputPadX},
++    {X_INPUT_GAMEPAD_Y, rex::ui::VirtualKey::kXInputPadY},
++    {kSynthLTrigger, rex::ui::VirtualKey::kXInputPadLTrigger},
++    {kSynthRTrigger, rex::ui::VirtualKey::kXInputPadRTrigger},
++    {kSynthLThumbUp, rex::ui::VirtualKey::kXInputPadLThumbUp},
++    {kSynthLThumbDown, rex::ui::VirtualKey::kXInputPadLThumbDown},
++    {kSynthLThumbLeft, rex::ui::VirtualKey::kXInputPadLThumbLeft},
++    {kSynthLThumbRight, rex::ui::VirtualKey::kXInputPadLThumbRight},
++};
++
+ // Bind values are a comma-separated list of alternatives, each optionally
+ // carrying modifier prefixes: "Q,I" or "Shift+W". Modifier matching is exact,
+ // so "Up" stays silent while Shift is held and "Shift+Up" stays silent without
+@@ -274,37 +309,7 @@ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
+ 
+   std::lock_guard lock(state_mutex_);
+ 
+-  uint16_t buttons = 0;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_a)))
+-    buttons |= X_INPUT_GAMEPAD_A;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_b)))
+-    buttons |= X_INPUT_GAMEPAD_B;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_x)))
+-    buttons |= X_INPUT_GAMEPAD_X;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_y)))
+-    buttons |= X_INPUT_GAMEPAD_Y;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_left_shoulder)))
+-    buttons |= X_INPUT_GAMEPAD_LEFT_SHOULDER;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_right_shoulder)))
+-    buttons |= X_INPUT_GAMEPAD_RIGHT_SHOULDER;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_lstick_press)))
+-    buttons |= X_INPUT_GAMEPAD_LEFT_THUMB;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_rstick_press)))
+-    buttons |= X_INPUT_GAMEPAD_RIGHT_THUMB;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_back)))
+-    buttons |= X_INPUT_GAMEPAD_BACK;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_start)))
+-    buttons |= X_INPUT_GAMEPAD_START;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_guide)))
+-    buttons |= X_INPUT_GAMEPAD_GUIDE;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_dpad_up)))
+-    buttons |= X_INPUT_GAMEPAD_DPAD_UP;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_dpad_down)))
+-    buttons |= X_INPUT_GAMEPAD_DPAD_DOWN;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_dpad_left)))
+-    buttons |= X_INPUT_GAMEPAD_DPAD_LEFT;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_dpad_right)))
+-    buttons |= X_INPUT_GAMEPAD_DPAD_RIGHT;
++  uint16_t buttons = uint16_t(PressedButtonsLocked());
+ 
+   uint8_t lt = IsBindPressed(key_down_, REXCVAR_GET(keybind_left_trigger)) ? 0xFF : 0;
+   uint8_t rt = IsBindPressed(key_down_, REXCVAR_GET(keybind_right_trigger)) ? 0xFF : 0;
+@@ -369,12 +374,73 @@ X_RESULT MnkInputDriver::SetDeviceVibration(DeviceId id, X_INPUT_VIBRATION* vibr
+   return X_ERROR_SUCCESS;
+ }
+ 
++uint32_t MnkInputDriver::PressedButtonsLocked() const {
++  uint32_t buttons = 0;
++  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_a)))
++    buttons |= X_INPUT_GAMEPAD_A;
++  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_b)))
++    buttons |= X_INPUT_GAMEPAD_B;
++  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_x)))
++    buttons |= X_INPUT_GAMEPAD_X;
++  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_y)))
++    buttons |= X_INPUT_GAMEPAD_Y;
++  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_left_shoulder)))
++    buttons |= X_INPUT_GAMEPAD_LEFT_SHOULDER;
++  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_right_shoulder)))
++    buttons |= X_INPUT_GAMEPAD_RIGHT_SHOULDER;
++  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_lstick_press)))
++    buttons |= X_INPUT_GAMEPAD_LEFT_THUMB;
++  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_rstick_press)))
++    buttons |= X_INPUT_GAMEPAD_RIGHT_THUMB;
++  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_back)))
++    buttons |= X_INPUT_GAMEPAD_BACK;
++  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_start)))
++    buttons |= X_INPUT_GAMEPAD_START;
++  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_guide)))
++    buttons |= X_INPUT_GAMEPAD_GUIDE;
++  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_dpad_up)))
++    buttons |= X_INPUT_GAMEPAD_DPAD_UP;
++  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_dpad_down)))
++    buttons |= X_INPUT_GAMEPAD_DPAD_DOWN;
++  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_dpad_left)))
++    buttons |= X_INPUT_GAMEPAD_DPAD_LEFT;
++  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_dpad_right)))
++    buttons |= X_INPUT_GAMEPAD_DPAD_RIGHT;
++  // Synthetic bits above the 16 real buttons, keystroke-only.
++  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_left_trigger)))
++    buttons |= kSynthLTrigger;
++  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_right_trigger)))
++    buttons |= kSynthRTrigger;
++  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_lstick_up)))
++    buttons |= kSynthLThumbUp;
++  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_lstick_down)))
++    buttons |= kSynthLThumbDown;
++  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_lstick_left)))
++    buttons |= kSynthLThumbLeft;
++  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_lstick_right)))
++    buttons |= kSynthLThumbRight;
++  return buttons;
++}
++
+ X_RESULT MnkInputDriver::GetDeviceKeystroke(DeviceId id, uint32_t flags,
+                                             X_INPUT_KEYSTROKE* out_keystroke) {
+   if (!IsEnabled() || id != kMnkDevice) {
+     return X_ERROR_DEVICE_NOT_CONNECTED;
+   }
+   std::lock_guard lock(state_mutex_);
++  if (keystroke_queue_.empty()) {
++    // Synthesize keystrokes from button transitions, as the SDL pad driver
++    // does; XUI menus read input only through XamInputGetKeystroke. Inactive
++    // or unfocused reads as all-released, so held keys send their UP events.
++    uint32_t pressed = (is_active() && has_focus_) ? PressedButtonsLocked() : 0;
++    uint32_t changed = pressed ^ keystroke_buttons_;
++    for (const auto& [bit, vk] : kKeystrokeMap) {
++      if (changed & bit) {
++        EnqueueKeystroke(uint16_t(vk), (pressed & bit) != 0);
++      }
++    }
++    keystroke_buttons_ = pressed;
++  }
+   if (keystroke_queue_.empty()) {
+     return X_ERROR_EMPTY;
+   }

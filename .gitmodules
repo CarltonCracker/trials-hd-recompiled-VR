@@ -1,0 +1,8 @@
+[submodule "thirdparty/rexglue-sdk"]
+	path = thirdparty/rexglue-sdk
+	url = https://github.com/rexglue/rexglue-sdk.git
+	ignore = dirty
+[submodule "thirdparty/dawn"]
+	path = thirdparty/dawn
+	url = https://dawn.googlesource.com/dawn
+	shallow = true
