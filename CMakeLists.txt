@@ -38,24 +38,6 @@ foreach(_patch IN LISTS TRIALSHD_SDK_PATCHES)
     endif()
 endforeach()
 
-# AddressSanitizer build for memory-error hunting (SDK, libraries and the app;
-# the generated guest code is excluded below - it only touches guest memory,
-# and instrumenting it makes the build and the game far slower).
-# Configure in its own build dir with its own SDK output dir, e.g.
-#   cmake --preset linux-amd64-relwithdebinfo -B out/build/asan -DTRIALSHD_ASAN=ON \
-#     -DREXGLUE_OUTPUT_DIR=$PWD/out/build/asan/sdk
-option(TRIALSHD_ASAN "Build with AddressSanitizer (diagnostics)" OFF)
-if(TRIALSHD_ASAN)
-    add_compile_options(-fsanitize=address -fno-omit-frame-pointer)
-    add_link_options(-fsanitize=address)
-endif()
-# ThreadSanitizer build for data race hunting (same setup and exclusions).
-option(TRIALSHD_TSAN "Build with ThreadSanitizer (diagnostics)" OFF)
-if(TRIALSHD_TSAN)
-    add_compile_options(-fsanitize=thread)
-    add_link_options(-fsanitize=thread)
-endif()
-
 include(generated/rexglue.cmake)
 
 # Sources
@@ -63,6 +45,7 @@ set(TRIALSHD_SOURCES
     src/main.cpp
     src/fallback_audio.cpp
     src/graphics_settings.cpp
+    src/keyboard_controls.cpp
     src/fps_unlock.cpp
     src/gpu_wait.cpp
     src/package_license.cpp
@@ -76,13 +59,6 @@ else()
 endif()
 
 rexglue_setup_target(trials_hd GPU_PLUGINS xenos)
-
-if(TRIALSHD_ASAN AND TARGET trials_hd_recomp)
-    target_compile_options(trials_hd_recomp PRIVATE -fno-sanitize=address)
-endif()
-if(TRIALSHD_TSAN AND TARGET trials_hd_recomp)
-    target_compile_options(trials_hd_recomp PRIVATE -fno-sanitize=thread)
-endif()
 
 # The SDK builds its shared libraries into its own out/ directory and only
 # stages them next to the executable on Windows (and stages the GPU plugin only

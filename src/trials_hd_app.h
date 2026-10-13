@@ -25,6 +25,7 @@
 
 #include "fallback_audio.h"
 #include "graphics_settings.h"
+#include "keyboard_controls.h"
 #include "package_license.h"
 #include "virtual_pad.h"
 
@@ -72,10 +73,11 @@ class TrialsHdApp : public rex::ReXApp {
     }
   }
 
-  // Graphics settings: F1, the controller's Guide button, or Back + Start.
+  // Settings (controls and graphics): F1, the controller's Guide button, or
+  // Back + Start.
   void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {
     trials_hd::ApplyDisplayMode();
-    rex::ui::RegisterBind("bind_graphics_settings", "F1", "Toggle graphics settings",
+    rex::ui::RegisterBind("bind_graphics_settings", "F1", "Toggle settings",
                           [this] { ToggleGraphicsSettings(); });
     combo_watcher_ = std::jthread([this](std::stop_token stop) { WatchSettingsCombo(stop); });
     (void)drawer;
@@ -113,6 +115,8 @@ class TrialsHdApp : public rex::ReXApp {
     REXLOG_INFO("readback_resolve = {} (max {} bytes)",
                 rex::cvar::GetFlagByName("readback_resolve"),
                 rex::cvar::GetFlagByName("readback_resolve_max_bytes"));
+
+    trials_hd::ApplyKeyboardDefaults();
 
     // Replaces the SDK's input gate: the game ignores the controller while the
     // settings menu is open (it navigates the menu instead). Called from game
@@ -178,8 +182,8 @@ class TrialsHdApp : public rex::ReXApp {
 
   // Polls controllers for the menu shortcut (Guide, or Back + Start) and
   // toggles the menu on the UI thread; also ends the post-close input hold once
-  // every button is up. SDL's gamepad getters lock internally, so this is safe
-  // off the UI thread.
+  // every button and key is up. SDL's gamepad getters lock internally and the
+  // keyboard state is a plain array, so this is safe off the UI thread.
   void WatchSettingsCombo(std::stop_token stop) {
     bool was_down = false;
     while (!stop.stop_requested()) {
@@ -200,6 +204,12 @@ class TrialsHdApp : public rex::ReXApp {
           }
         }
         SDL_free(ids);
+      }
+      int key_count = 0;
+      if (const bool* keys = SDL_GetKeyboardState(&key_count)) {
+        for (int k = 0; k < key_count && !any_button; ++k) {
+          any_button = keys[k];
+        }
       }
       if (shortcut && !was_down) {
         app_context().CallInUIThreadDeferred([this] { ToggleGraphicsSettings(); });

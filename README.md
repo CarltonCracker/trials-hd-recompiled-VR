@@ -10,7 +10,7 @@ against a native runtime (kernel HLE, Vulkan GPU backend, SDL input/audio).
 > your own copy. The C++ in `generated/` is produced on your machine from your own
 > `default.xex` during the build, and must not be redistributed.
 
-Status: **playable with a controller**, with **unlocked real rendering** and the
+Status: **playable with a controller or the keyboard**, with **unlocked real rendering** and the
 original ~60 Hz simulation. Headless RX 6600 gameplay checks pass at 30, 60 and
 120 render FPS — see *Testing* below. Audio output is untested.
 Linux (x86-64) is the only supported target for now.
@@ -80,13 +80,36 @@ xvfb-run -s "-screen 0 1280x720x24" ./out/build/linux-amd64-relwithdebinfo/trial
 tools/headless_run.sh 60
 ```
 
-Play with an Xbox-style controller (SDL gamepad). Keyboard emulation exists in the
-SDK (`--mnk_mode=true`) but is not supported by this port yet.
+Play with an Xbox-style controller (SDL gamepad) or the keyboard; both control
+player one and work at the same time. Default keys:
 
-### Graphics settings
+| Action | Keys | Controller |
+| --- | --- | --- |
+| Throttle | Up / W | RT |
+| Brake | Down / S | LT |
+| Lean back / forward | Left / A, Right / D | Left stick |
+| Return to last checkpoint (menus: back) | Backspace | B |
+| Restart track | R | Back |
+| Pause | Escape | Start |
+| Bailout | Y | Y |
+| Menu navigation | Arrows / WASD | D-pad |
+| Menu select | Return / Space | A |
+| X, LB, RB | X, Q, E | X, LB, RB |
 
-Press the controller's **Guide** button (or **Back + Start**, or **F1**) to open the
-graphics menu. It is navigated with the D-pad / left stick, A and B.
+Keys can be changed in the settings menu (below), or with the `keybind_*` settings in
+`trials_hd.toml`. The keyboard can be turned off there too (`mnk_mode = false`).
+
+### Settings
+
+Press **F1** (or the controller's **Guide** button, or **Back + Start**) to open the
+settings menu. It is navigated with the mouse, the arrow keys / Return / Escape, or the
+D-pad / left stick, A and B.
+
+**Controls** come first: the Keyboard switch and two key slots per action. Select a
+slot, then press the new key (Delete clears the slot, B or selecting the slot again
+cancels); **Reset Keys** restores the default layout. Changes apply immediately.
+
+**Graphics**:
 
 | Setting | What it does |
 | --- | --- |
@@ -97,7 +120,7 @@ graphics menu. It is navigated with the D-pad / left stick, A and B.
 | FPS Limit | Unlimited, 240, 165, 144, 120, 90, 60, 45 or 30 real rendered frames per second; independent of physics with Unlock FPS enabled |
 | VSync | Tear-free presentation (restart to apply) |
 
-**Save** writes the settings to `trials_hd.toml` next to the executable. They are
+**Save** writes the settings (keys included) to `trials_hd.toml` next to the executable. They are
 ordinary settings, so they also work on the command line, e.g.
 `--display_width=1920 --display_height=1080 --draw_resolution_scale_x=2
 --draw_resolution_scale_y=2 --present_fps_limit=60 --host_vsync=false`.
@@ -136,17 +159,22 @@ them back into guest memory forced a full CPU/GPU sync per draw and held gamepla
 
 ## Testing
 
-Headless runs use Xvfb for the window and input, a scriptable virtual controller
-(`tools/xsend.py`, driven through `TRIALS_HD_VIRTUAL_PAD`), and optionally a Vulkan
+Headless runs use Xvfb for the window and keyboard input, a scriptable virtual
+controller (`tools/xsend.py`, driven through `TRIALS_HD_VIRTUAL_PAD`), and optionally a Vulkan
 *headless surface* so the GPU renders at full speed without a display. Scripts live in
 `tests/headless/`; each starts with a comment explaining how to run it.
 
 ```sh
-# 1440p benchmark on the second GPU, logging the game's frame rate once per second:
-LOG_LEVEL=info INPUT=tests/headless/ride_middle_name_danger.txt tools/headless_run.sh 85 \
+# 1440p benchmark on the second GPU, logging the frame rate once per second:
+LOG_LEVEL=info INPUT=tests/headless/bench_fps.txt tools/headless_run.sh 80 \
   --vulkan_device=1 --vulkan_headless_surface=true --log_guest_fps=true \
+  --log_simulation_rate=true --host_vsync=false \
   --draw_resolution_scale_x=2 --draw_resolution_scale_y=2
-grep "guest fps" out/run/trials_hd*.log
+tools/bench_summary.py out/run/trials_hd.log
+
+# Keyboard-only ride (real X key events through the keyboard driver):
+LOG_LEVEL=info INPUT=tests/headless/keyboard_ride.txt tools/headless_run.sh 75 \
+  --vulkan_device=1 --vulkan_headless_surface=true
 
 # Timing regression test: run the same ride at 30, 60, 120 and unlimited FPS.
 # Activate the local Python environment first if Pillow / python-xlib are there.
@@ -170,6 +198,10 @@ host VSync off, and an 85-second scripted ride on *Middle Name: Danger*:
 | 120 | 120.0 | 60.05 |
 | Unlimited | 203.9 | 59.95 |
 
+At the 2560×1440 render resolution (2×) the same RX 6600 run renders about 87 FPS
+uncapped (GPU-bound, 78 FPS median including menus and loading), with fixed updates
+still at 60 Hz; the 120 FPS limit needs the 1× render resolution on this GPU.
+
 These are the last 15 logged samples, with positive game draws and resolves in
 every sample. Gameplay captures show normal race-timer progression, riding,
 explosions and crashes; an original-loop 60-FPS run provides the baseline.
@@ -184,17 +216,18 @@ also occur with the original loop; no guest access violations occurred in these 
 | `trials_hd_manifest.toml` | Codegen manifest |
 | `config/codegen.toml` | Codegen settings (CRT `setjmp`/`longjmp` addresses) |
 | `config/functions.toml` | Function starts the analyzer misses (addresses only) |
-| `src/` | Host-side app code: asset path lookup, GPU plugin default, audio fallback, fixed-tick FPS unlock |
+| `src/` | Host-side app code: asset path lookup, license from your package, GPU plugin default, audio fallback, fixed-tick FPS unlock, GPU-wait sleeping, settings menu, keyboard layout |
 | `generated/rexglue.cmake` | SDK build glue (from `rexglue init`) |
 | `generated/default/` | Recompiled game code; generated at build time, gitignored |
 | `thirdparty/rexglue-sdk` | ReXGlue SDK (git submodule) |
-| `patches/rexglue-sdk/` | Local SDK changes (one patch, regenerated with `tools/export_sdk_patch.sh`), applied automatically at configure time: rendering fixes (16-bit integer resolves, texture exponent bias), small-resolve readback, host FPS cap + guest FPS logging, guest-memory shm cleanup, Vulkan headless surface, diagnostics |
+| `patches/rexglue-sdk/` | Local SDK changes (one patch, regenerated with `tools/export_sdk_patch.sh`), applied automatically at configure time: rendering fixes (16-bit integer resolves, texture exponent bias), render target transfer elision, small-resolve readback, host FPS cap + guest FPS logging, keyboard keystrokes for menus, data race fixes, guest-memory shm cleanup, Vulkan headless surface |
 | `tests/headless/` | Scripted headless test and benchmark runs (`INPUT=… tools/headless_run.sh`) |
 | `tools/stfs_extract.py` | Extracts files from Xbox 360 STFS (LIVE/PIRS/CON) packages |
 | `tools/xex_dump/`, `tools/disasm.py` | Dump the loaded XEX image and disassemble addresses (output stays in `out/`) |
 | `tools/find_missing_funcs.py` | Finds code addresses referenced from data/code that codegen did not register |
 | `tools/headless_run.sh`, `tools/xwd_to_png.py` | Run under Xvfb with logging and periodic screenshots |
-| `tools/xsend.py` | Scripted controller/key input for headless runs (`INPUT=script tools/headless_run.sh`, drives a virtual gamepad) |
+| `tools/xsend.py` | Scripted key and controller input for headless runs (`INPUT=script tools/headless_run.sh`; keys go through X, buttons through a virtual gamepad) |
+| `tools/bench_summary.py`, `tests/check_fps_log.py` | Summarize benchmark logs; check fixed updates stay at 60 Hz |
 | `tools/package.sh` | Assembles a runnable build folder in `dist/` (no game data) |
 
 ## Legal

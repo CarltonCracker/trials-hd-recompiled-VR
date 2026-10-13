@@ -1,0 +1,49 @@
+# Plays with the keyboard only (real X key events, default layout): menus with
+# Return / Down, rides Middle Name: Danger with Up (throttle), leans with
+# Right / Left, then pauses and resumes with Escape, returns to the last
+# checkpoint with Backspace and restarts with R.
+# Run: INPUT=tests/headless/keyboard_ride.txt tools/headless_run.sh 75 \
+#        --vulkan_device=1 --vulkan_headless_surface=true
+wait 21
+focus trials
+wait 1
+tap Return
+wait 3
+tap Return
+wait 3
+tap Down
+wait 0.6
+capture kb_tracklist
+tap Return
+wait 3
+tap Return
+wait 2
+tap Return
+wait 12
+capture kb_ride_0
+down Up
+wait 4
+capture kb_ride_4s
+down Right
+wait 1
+capture kb_lean_fwd
+up Right
+down Left
+wait 1
+capture kb_lean_back
+up Left
+wait 3
+up Up
+capture kb_ride_9s
+tap Escape
+wait 1.5
+capture kb_pause
+tap Escape
+wait 1.5
+capture kb_resume
+tap BackSpace
+wait 2
+capture kb_checkpoint
+tap r
+wait 3
+capture kb_restart

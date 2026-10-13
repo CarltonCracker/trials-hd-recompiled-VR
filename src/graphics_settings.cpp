@@ -1,4 +1,4 @@
-// trials_hd - player-facing graphics settings and the dialog that edits them.
+// trials_hd - player-facing settings and the dialog that edits them.
 
 #include "graphics_settings.h"
 
@@ -15,6 +15,8 @@
 
 #include <rex/cvar.h>
 #include <rex/logging.h>
+
+#include "keyboard_controls.h"
 
 REXCVAR_DEFINE_INT32(display_width, 0, "Display",
                      "Window width, or fullscreen mode width (0 = desktop resolution)")
@@ -101,6 +103,48 @@ constexpr std::array<std::pair<SDL_GamepadButton, ImGuiKey>, 6> kNavButtons = {{
     {SDL_GAMEPAD_BUTTON_EAST, ImGuiKey_GamepadFaceRight},
 }};
 
+// Keys that can be bound, with their SDK names (keybind_* values). Leaves out
+// modifiers (a bare modifier bind never fires) and the overlay keys (F1 and
+// the SDK's F3 / F4 / F7 / backtick).
+const char* BindableKeyName(ImGuiKey key) {
+  static const std::pair<ImGuiKey, const char*> kNames[] = {
+      {ImGuiKey_UpArrow, "Up"}, {ImGuiKey_DownArrow, "Down"}, {ImGuiKey_LeftArrow, "Left"},
+      {ImGuiKey_RightArrow, "Right"}, {ImGuiKey_Enter, "Return"}, {ImGuiKey_Space, "Space"},
+      {ImGuiKey_Backspace, "Backspace"}, {ImGuiKey_Escape, "Escape"}, {ImGuiKey_Tab, "Tab"},
+      {ImGuiKey_Insert, "Insert"}, {ImGuiKey_Home, "Home"}, {ImGuiKey_End, "End"},
+      {ImGuiKey_PageUp, "PageUp"}, {ImGuiKey_PageDown, "PageDown"},
+      {ImGuiKey_Minus, "Minus"}, {ImGuiKey_Equal, "Plus"}, {ImGuiKey_Comma, "Comma"},
+      {ImGuiKey_Period, "Period"}, {ImGuiKey_Semicolon, "Semicolon"},
+      {ImGuiKey_Slash, "Slash"}, {ImGuiKey_Backslash, "Backslash"},
+      {ImGuiKey_LeftBracket, "LBracket"}, {ImGuiKey_RightBracket, "RBracket"},
+      {ImGuiKey_Apostrophe, "Quote"}, {ImGuiKey_KeypadAdd, "NumpadPlus"},
+      {ImGuiKey_KeypadSubtract, "NumpadMinus"}, {ImGuiKey_KeypadMultiply, "NumpadStar"},
+      {ImGuiKey_KeypadDivide, "NumpadSlash"},
+  };
+  static const char* const kLetters[] = {"A", "B", "C", "D", "E", "F", "G", "H", "I",
+                                         "J", "K", "L", "M", "N", "O", "P", "Q", "R",
+                                         "S", "T", "U", "V", "W", "X", "Y", "Z"};
+  static const char* const kDigits[] = {"0", "1", "2", "3", "4", "5", "6", "7", "8", "9"};
+  static const char* const kNumpad[] = {"Numpad0", "Numpad1", "Numpad2", "Numpad3",
+                                        "Numpad4", "Numpad5", "Numpad6", "Numpad7",
+                                        "Numpad8", "Numpad9"};
+  if (key >= ImGuiKey_A && key <= ImGuiKey_Z) {
+    return kLetters[key - ImGuiKey_A];
+  }
+  if (key >= ImGuiKey_0 && key <= ImGuiKey_9) {
+    return kDigits[key - ImGuiKey_0];
+  }
+  if (key >= ImGuiKey_Keypad0 && key <= ImGuiKey_Keypad9) {
+    return kNumpad[key - ImGuiKey_Keypad0];
+  }
+  for (const auto& [k, name] : kNames) {
+    if (k == key) {
+      return name;
+    }
+  }
+  return nullptr;
+}
+
 }  // namespace
 
 void ApplyStartupGraphicsSettings() {
@@ -147,6 +191,7 @@ GraphicsSettingsDialog::GraphicsSettingsDialog(rex::ui::ImGuiDrawer* drawer,
 void GraphicsSettingsDialog::OnClose() {
   // Release any gamepad keys still held so ImGui doesn't keep them pressed.
   ImGuiIO& io = GetIO();
+  io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableKeyboard;
   for (size_t b = 0; b < kNavButtons.size(); ++b) {
     if (gamepad_was_down_[b]) {
       io.AddKeyEvent(kNavButtons[b].second, false);
@@ -159,6 +204,13 @@ void GraphicsSettingsDialog::OnClose() {
 
 void GraphicsSettingsDialog::FeedGamepadNavigation(ImGuiIO& io) {
   io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
+  // Keyboard navigation too, except while waiting for a key to bind (the arrow
+  // keys would move the focus instead).
+  if (capture_binding_ >= 0) {
+    io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableKeyboard;
+  } else {
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+  }
   io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
   bool down[kNavButtons.size()] = {};
   int count = 0;
@@ -189,7 +241,9 @@ void GraphicsSettingsDialog::FeedGamepadNavigation(ImGuiIO& io) {
       gamepad_was_down_[b] = down[b];
     }
   }
-  if (b_pressed && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId)) {
+  if (b_pressed && capture_binding_ >= 0) {
+    capture_binding_ = -1;  // Cancels waiting for a key.
+  } else if (b_pressed && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId)) {
     Close();
   }
 }
@@ -202,10 +256,13 @@ void GraphicsSettingsDialog::OnDraw(ImGuiIO& io) {
   // Sized for reading from a couch: scale with the output height.
   const float ui_scale = std::max(1.0f, io.DisplaySize.y / 720.0f) * 1.6f;
   ImGui::SetNextWindowSize(ImVec2(520 * ui_scale, 0), ImGuiCond_Always);
+  // Taller than small screens with the key list: scroll instead.
+  ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0),
+                                      ImVec2(FLT_MAX, io.DisplaySize.y * 0.92f));
   // Larger text for the whole dialog, combo popups included (1.92 font stack).
   ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * ui_scale);
   bool open = true;
-  if (!ImGui::Begin("Graphics Settings", &open,
+  if (!ImGui::Begin("Settings", &open,
                     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
                         ImGuiWindowFlags_NoSavedSettings)) {
     ImGui::End();
@@ -228,6 +285,72 @@ void GraphicsSettingsDialog::OnDraw(ImGuiIO& io) {
       ImGui::TextDisabled("(restart to apply)");
     }
   };
+
+  // Controls: keyboard emulation of the controller (a real controller keeps
+  // working too) and its keys.
+  ImGui::SeparatorText("Controls");
+  bool keyboard = GetBool("mnk_mode");
+  label("Keyboard");
+  if (ImGui::Checkbox("##keyboard", &keyboard)) {
+    rex::cvar::SetFlagByName("mnk_mode", keyboard ? "true" : "false");
+  }
+  bool key_bound = false;
+  if (capture_binding_ >= 0 && ImGui::GetFrameCount() > capture_frame_) {
+    // A fresh press (not the one that clicked the slot): bind it. Delete
+    // clears the slot.
+    for (ImGuiKey key = ImGuiKey_NamedKey_BEGIN; key < ImGuiKey_NamedKey_END;
+         key = ImGuiKey(key + 1)) {
+      if (!ImGui::IsKeyPressed(key, false)) {
+        continue;
+      }
+      const char* name = key == ImGuiKey_Delete ? "" : BindableKeyName(key);
+      if (name) {
+        SetBindingKey(kKeyboardBindings[capture_binding_].cvar, capture_slot_, name);
+        capture_binding_ = -1;
+        key_bound = true;
+        break;
+      }
+    }
+  }
+  if (keyboard) {
+    const float slot_width =
+        (ImGui::GetContentRegionAvail().x - kLabelWidth - ImGui::GetStyle().ItemSpacing.x) /
+        2;
+    for (size_t i = 0; i < kKeyboardBindingCount; ++i) {
+      const KeyboardBinding& binding = kKeyboardBindings[i];
+      if (binding.action.empty()) {
+        continue;
+      }
+      const std::vector<std::string> keys = GetBindingKeys(binding.cvar);
+      ImGui::AlignTextToFramePadding();
+      ImGui::TextUnformatted(std::string(binding.action).c_str());
+      for (size_t slot = 0; slot < 2; ++slot) {
+        ImGui::SameLine(slot ? 0.0f : kLabelWidth);
+        const bool waiting = capture_binding_ == int(i) && capture_slot_ == slot;
+        const std::string text =
+            waiting ? "Press a key..." : (slot < keys.size() ? keys[slot] : "-");
+        // "###": the ID ignores the label, which changes while waiting.
+        if (ImGui::Button(fmt::format("{}###key{}_{}", text, i, slot).c_str(),
+                          ImVec2(slot_width, 0))) {
+          if (waiting) {
+            capture_binding_ = -1;
+          } else {
+            capture_binding_ = int(i);
+            capture_slot_ = slot;
+            capture_frame_ = ImGui::GetFrameCount();
+          }
+        }
+      }
+    }
+    if (ImGui::Button("Reset Keys")) {
+      ResetKeyboardBindings();
+      capture_binding_ = -1;
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("Select a key, then press the new one (Delete clears)");
+  }
+
+  ImGui::SeparatorText("Graphics");
 
   // Display mode
   const bool fullscreen = GetBool("fullscreen");
@@ -342,6 +465,11 @@ void GraphicsSettingsDialog::OnDraw(ImGuiIO& io) {
   ImGui::End();
   ImGui::PopFont();
 
+  // Escape closes the menu, unless it was just bound to an action.
+  if (capture_binding_ < 0 && !key_bound && ImGui::IsKeyPressed(ImGuiKey_Escape, false) &&
+      !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId)) {
+    open = false;
+  }
   if (!open) {
     Close();
   }

@@ -1,5 +1,5 @@
-// trials_hd - player-facing graphics settings (display mode, resolution,
-// render resolution, FPS limit, VSync) and the dialog that edits them.
+// trials_hd - player-facing settings (keyboard controls, display mode,
+// resolution, render resolution, FPS limit, VSync) and the dialog that edits them.
 //
 // The settings are cvars, so they load from and save to the same config file as
 // the SDK's own settings (<exe dir>/trials_hd.toml) and can also be passed on
@@ -42,6 +42,11 @@ class GraphicsSettingsDialog : public rex::ui::ImGuiDialog {
   std::filesystem::path config_path_;
   std::function<void()> on_closed_;
   bool gamepad_was_down_[8] = {};
+  // Keyboard binding waiting for a key press (index into kKeyboardBindings,
+  // -1 = none), its alternative slot and the frame the wait started.
+  int capture_binding_ = -1;
+  size_t capture_slot_ = 0;
+  int capture_frame_ = 0;
   bool saved_ = false;
 };
 
