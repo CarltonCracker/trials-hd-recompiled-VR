@@ -90,7 +90,7 @@ target_include_directories(trials_hd PRIVATE
 
 # The SDK forces BUILD_TESTING off; keep project tests independent of that cache entry.
 option(TRIALSHD_BUILD_TESTING "Build project regression tests" ON)
-if(TRIALSHD_BUILD_TESTING)
+if(TRIALSHD_BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests")
     enable_testing()
     add_executable(frame_clock_test tests/frame_clock_test.cpp)
     target_include_directories(frame_clock_test PRIVATE src)
@@ -103,5 +103,7 @@ if(TRIALSHD_BUILD_TESTING)
 endif()
 
 # Development tool: dumps the loaded XEX image for writing codegen overrides.
-add_executable(xex_dump EXCLUDE_FROM_ALL tools/xex_dump/xex_dump.cpp)
-target_link_libraries(xex_dump PRIVATE rex::runtime)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/xex_dump")
+    add_executable(xex_dump EXCLUDE_FROM_ALL tools/xex_dump/xex_dump.cpp)
+    target_link_libraries(xex_dump PRIVATE rex::runtime)
+endif()
