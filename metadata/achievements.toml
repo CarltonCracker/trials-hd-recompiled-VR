@@ -1,0 +1,119 @@
+[[achievements]]
+id = 4
+label = "The Challenger"
+description = "Unlock the first tournament."
+unachieved_description = "Unlock the first tournament."
+icon_path = "ach_001.png"
+image_id = 4
+gamerscore = 10
+flags = 0
+
+[[achievements]]
+id = 5
+label = "Leave Nothing in One Piece"
+description = "Completely destroy the bike and break all the bones of your rider in a single crash."
+unachieved_description = "Completely destroy the bike and break all the bones of your rider in a single crash."
+icon_path = "ach_002.png"
+image_id = 5
+gamerscore = 5
+flags = 0
+
+[[achievements]]
+id = 6
+label = "The Creator"
+description = "Create a custom track and save it."
+unachieved_description = "Create a custom track and save it."
+icon_path = "ach_003.png"
+image_id = 6
+gamerscore = 5
+flags = 0
+
+[[achievements]]
+id = 7
+label = "Bling"
+description = "Get at least 5 Gold Medals."
+unachieved_description = "Get at least 5 Gold Medals."
+icon_path = "ach_004.png"
+image_id = 7
+gamerscore = 15
+flags = 0
+
+[[achievements]]
+id = 8
+label = "Full Throttle"
+description = "Complete the track 'Container Rush' without releasing the throttle."
+unachieved_description = "Complete the track 'Container Rush' without releasing the throttle."
+icon_path = "ach_005.png"
+image_id = 8
+gamerscore = 15
+flags = 0
+
+[[achievements]]
+id = 9
+label = "Market Meltdown"
+description = "Skyrocket all the crates in 'Stock Market' skill game."
+unachieved_description = "Skyrocket all the crates in 'Stock Market' skill game."
+icon_path = "ach_006.png"
+image_id = 9
+gamerscore = 15
+flags = 0
+
+[[achievements]]
+id = 10
+label = "Strike!"
+description = "Get a strike in the 'Midnight Bowling' skill game."
+unachieved_description = "Get a strike in the 'Midnight Bowling' skill game."
+icon_path = "ach_007.png"
+image_id = 10
+gamerscore = 15
+flags = 0
+
+[[achievements]]
+id = 11
+label = "Trials Master"
+description = "Unlock all tracks in the game."
+unachieved_description = "Unlock all tracks in the game."
+icon_path = "ach_008.png"
+image_id = 11
+gamerscore = 15
+flags = 0
+
+[[achievements]]
+id = 12
+label = "Unyielding"
+description = "Complete the track 'Groundhog Returns' without changing the posture of the rider."
+unachieved_description = "Complete the track 'Groundhog Returns' without changing the posture of the rider."
+icon_path = "ach_009.png"
+image_id = 12
+gamerscore = 15
+flags = 0
+
+[[achievements]]
+id = 13
+label = "Life is Harsh"
+description = "Complete all Hard tracks."
+unachieved_description = "Complete all Hard tracks."
+icon_path = "ach_010.png"
+image_id = 13
+gamerscore = 20
+flags = 0
+
+[[achievements]]
+id = 14
+label = "Demon on Wheels"
+description = "Complete all Extreme tracks."
+unachieved_description = "Complete all Extreme tracks."
+icon_path = "ach_011.png"
+image_id = 14
+gamerscore = 30
+flags = 0
+
+[[achievements]]
+id = 15
+label = "Marathon"
+description = "Complete the 'Ultimate Endurance' tournament without a single fault."
+unachieved_description = "Complete the 'Ultimate Endurance' tournament without a single fault."
+icon_path = "ach_000.png"
+image_id = 15
+gamerscore = 40
+flags = 0
