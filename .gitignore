@@ -1,0 +1,25 @@
+# Copyrighted game content. Users supply their own copy; never commit these.
+/game/
+/assets/
+/dlc/
+*.xex
+*.pak
+*.xwb
+
+# Code generated from the user's default.xex by `rexglue codegen` at build time.
+# (generated/rexglue.cmake is SDK boilerplate and stays tracked.)
+/generated/*/
+
+# Build output and local tooling
+/out/
+/build/
+/.venv/
+/.pi/
+# The SDK zip originally provided (the SDK is a submodule in thirdparty/)
+/rexglue/
+
+# Logs from local builds and codegen runs
+*.log
+
+# Packaged builds
+/dist/

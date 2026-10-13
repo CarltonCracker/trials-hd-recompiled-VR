@@ -1,0 +1,62 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "linux-base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "REXSDK_DIR": "${sourceDir}/thirdparty/rexglue-sdk",
+        "SDL_X11_XTEST": "OFF",
+        "CMAKE_C_FLAGS": "-march=x86-64-v2",
+        "CMAKE_CXX_FLAGS": "-march=x86-64-v2"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
+      "name": "linux-amd64-debug",
+      "displayName": "Linux AMD64 Debug",
+      "inherits": "linux-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "linux-amd64-release",
+      "displayName": "Linux AMD64 Release",
+      "inherits": "linux-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "linux-amd64-relwithdebinfo",
+      "displayName": "Linux AMD64 RelWithDebInfo",
+      "inherits": "linux-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "linux-amd64-debug",
+      "configurePreset": "linux-amd64-debug"
+    },
+    {
+      "name": "linux-amd64-release",
+      "configurePreset": "linux-amd64-release"
+    },
+    {
+      "name": "linux-amd64-relwithdebinfo",
+      "configurePreset": "linux-amd64-relwithdebinfo"
+    }
+  ]
+}
