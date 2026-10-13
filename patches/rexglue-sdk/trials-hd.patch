@@ -15,8 +15,37 @@ commit by CMake at configure time; regenerate with tools/export_sdk_patch.sh).
   word 4, the LOD bias), integer number format for 16-bit textures
 - resolve readback: readback_resolve_max_bytes (read back only small resolves)
 - diagnostics: dump_resolves_frame / dump_resolves_dir (resolve dumps for
-  tools/decode_resolve.py)
+  tools/decode_resolve.py), gpu_profile (GPU time per frame by kind of work,
+  Vulkan timestamps), log_rt_transfers
+- render targets: elide_rt_transfers (ownership transfers of resolve-cleared
+  ranges become clears; transfers fully overwritten by Direct3D 9 clear
+  rectangles are dropped), execute_unclipped_draw_vs_on_cpu on by default
+- input: serialize InputSystem (device list rebuilt concurrently by several
+  guest threads - heap corruption)
+- build: REXGLUE_OUTPUT_DIR; guest memory mapped above AddressSanitizer's
+  shadow in ASan builds
 
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 9b3cdf5..4f3bb0b 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -223,9 +223,13 @@ configure_file(
+ )
+ 
+ # Output directories (multi-config appends /<Config>/ automatically)
+-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${REXGLUE_ROOT}/out/${REX_PLATFORM}")
+-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${REXGLUE_ROOT}/out/${REX_PLATFORM}")
+-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${REXGLUE_ROOT}/out/${REX_PLATFORM}")
++# REXGLUE_OUTPUT_DIR separates builds with different flags (e.g. sanitizers)
++# that would otherwise overwrite each other's libraries.
++set(REXGLUE_OUTPUT_DIR "${REXGLUE_ROOT}/out/${REX_PLATFORM}" CACHE PATH
++    "Output directory for SDK binaries")
++set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${REXGLUE_OUTPUT_DIR}")
++set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${REXGLUE_OUTPUT_DIR}")
++set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${REXGLUE_OUTPUT_DIR}")
+ 
+ # Sanitizer support for debugging memory corruption and undefined behavior
+ if(REXGLUE_ENABLE_SANITIZERS)
 diff --git a/include/rex/graphics/flags.h b/include/rex/graphics/flags.h
 index 2cf24c4..fbdd17c 100644
 --- a/include/rex/graphics/flags.h
@@ -29,11 +58,162 @@ index 2cf24c4..fbdd17c 100644
  REXCVAR_DECLARE(bool, mrt_edram_used_range_clamp_to_min);
  REXCVAR_DECLARE(bool, direct_host_resolve);
  
+diff --git a/include/rex/graphics/pipeline/render_target/cache.h b/include/rex/graphics/pipeline/render_target/cache.h
+index 3bbd52e..e02e116 100644
+--- a/include/rex/graphics/pipeline/render_target/cache.h
++++ b/include/rex/graphics/pipeline/render_target/cache.h
+@@ -173,6 +173,10 @@ class RenderTargetCache {
+ 
+   virtual bool Update(bool is_rasterization_done, reg::RB_DEPTHCONTROL normalized_depth_control,
+                       uint32_t normalized_color_mask, const Shader& vertex_shader);
++  // Whether the next Update's draw may leave pixels inside its primitives
++  // unwritten (pixel shader kill, alpha test, alpha to coverage) - such draws
++  // can't replace ownership transfers (elide_rt_transfers).
++  void SetDrawMayDiscardPixels(bool may_discard) { draw_may_discard_pixels_ = may_discard; }
+ 
+   // Returns bits where 0 is whether a depth render target is currently bound on
+   // the host and 1... are whether the same applies to color render targets, and
+@@ -306,6 +310,11 @@ class RenderTargetCache {
+     uint32_t end_tiles;
+     RenderTarget* source;
+     RenderTarget* host_depth_source;
++    // The source range only holds a resolve clear value (raw 32-bit EDRAM
++    // word) that hasn't been drawn over - clear the destination instead of
++    // copying (elide_cleared_rt_transfers).
++    bool is_clear = false;
++    uint32_t clear_value = 0;
+     Transfer(uint32_t start_tiles, uint32_t end_tiles, RenderTarget* source,
+              RenderTarget* host_depth_source)
+         : start_tiles(start_tiles),
+@@ -554,6 +563,12 @@ class RenderTargetCache {
+   uint32_t draw_resolution_scale_y_;
+ 
+   DrawExtentEstimator draw_extent_estimator_;
++  bool draw_may_discard_pixels_ = true;
++  // Drops ownership transfers to render targets that the current draw (a
++  // Direct3D 9 style clear rectangle) fully overwrites in the transferred area.
++  void ElideOverwrittenTransfers(reg::RB_DEPTHCONTROL normalized_depth_control,
++                                 uint32_t normalized_color_mask, const Shader& vertex_shader,
++                                 const RenderTargetKey* rt_keys);
+ 
+   // For host render targets.
+ 
+@@ -582,6 +597,10 @@ class RenderTargetCache {
+     // empty too.
+     RenderTargetKey host_depth_render_target_unorm24;
+     RenderTargetKey host_depth_render_target_float24;
++    // Whether the range was fully cleared by a resolve (to clear_value, a raw
++    // 32-bit EDRAM word) and not drawn to since.
++    bool cleared = false;
++    uint32_t clear_value = 0;
+     OwnershipRange(uint32_t end_tiles, RenderTargetKey render_target,
+                    RenderTargetKey host_depth_render_target_unorm24,
+                    RenderTargetKey host_depth_render_target_float24)
+@@ -619,7 +638,9 @@ class RenderTargetCache {
+     bool AreOwnersSame(const OwnershipRange& other_range) const {
+       return render_target == other_range.render_target &&
+              host_depth_render_target_unorm24 == other_range.host_depth_render_target_unorm24 &&
+-             host_depth_render_target_float24 == other_range.host_depth_render_target_float24;
++             host_depth_render_target_float24 == other_range.host_depth_render_target_float24 &&
++             cleared == other_range.cleared &&
++             (!cleared || clear_value == other_range.clear_value);
+     }
+   };
+ 
+@@ -645,9 +666,13 @@ class RenderTargetCache {
+                                             uint32_t length_tiles) const;
+   // Updates ownership_ranges_, adds the transfers needed for the ownership
+   // change to transfers_append_out if it's not null.
++  // Whether the backend performs Transfer::is_clear transfers as clears.
++  virtual bool SupportsClearTransfers() const { return false; }
++
+   void ChangeOwnership(RenderTargetKey dest, uint32_t start_tiles_base_relative,
+                        uint32_t length_tiles, std::vector<Transfer>* transfers_append_out,
+-                       const Transfer::Rectangle* resolve_clear_cutout = nullptr);
++                       const Transfer::Rectangle* resolve_clear_cutout = nullptr,
++                       const uint32_t* cleared_value = nullptr);
+ 
+   // If failed to create, may contain nullptr to prevent attempting to create a
+   // render target twice.
+diff --git a/include/rex/graphics/util/draw_extent_estimator.h b/include/rex/graphics/util/draw_extent_estimator.h
+index e5e4908..3a0b2ff 100644
+--- a/include/rex/graphics/util/draw_extent_estimator.h
++++ b/include/rex/graphics/util/draw_extent_estimator.h
+@@ -31,7 +31,35 @@ class DrawExtentEstimator {
+   uint32_t EstimateVertexMaxY(const Shader& vertex_shader);
+   uint32_t EstimateMaxY(bool try_to_estimate_vertex_max_y, const Shader& vertex_shader);
+ 
++  // For a single-rectangle kRectangleList draw (how Direct3D 9 clears),
++  // computes the screen-space bounds of the rectangle in guest pixels (window
++  // offset and pixel center convention applied), by running the vertex shader
++  // for its 3 vertices. Returns false if not such a draw or not determinable.
++  bool EstimateRectangleListBounds(const Shader& vertex_shader, float& x0_out, float& y0_out,
++                                   float& x1_out, float& y1_out);
++
+  private:
++  class PositionExportSink : public ShaderInterpreter::ExportSink {
++   public:
++    void Export(ucode::ExportRegister export_register, const float* value,
++                uint32_t value_mask) override;
++    void Reset() {
++      position_x_.reset();
++      position_y_.reset();
++      position_w_.reset();
++      vertex_kill_.reset();
++    }
++    const std::optional<float>& position_x() const { return position_x_; }
++    const std::optional<float>& position_y() const { return position_y_; }
++    const std::optional<float>& position_w() const { return position_w_; }
++    const std::optional<uint32_t>& vertex_kill() const { return vertex_kill_; }
++
++   private:
++    std::optional<float> position_x_;
++    std::optional<float> position_y_;
++    std::optional<float> position_w_;
++    std::optional<uint32_t> vertex_kill_;
++  };
+   class PositionYExportSink : public ShaderInterpreter::ExportSink {
+    public:
+     void Export(ucode::ExportRegister export_register, const float* value,
 diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
-index 696ff48..d0b3bd6 100644
+index 696ff48..24d315d 100644
 --- a/include/rex/graphics/vulkan/command_processor.h
 +++ b/include/rex/graphics/vulkan/command_processor.h
-@@ -426,6 +426,7 @@ class VulkanCommandProcessor : public CommandProcessor {
+@@ -244,6 +244,33 @@ class VulkanCommandProcessor : public CommandProcessor {
+   // Returns the text to display in the GPU backend name in the window title.
+   std::string GetWindowTitleText() const;
+ 
++  // GPU time profiling (gpu_profile cvar): timestamps around kinds of work,
++  // attributed exclusively (nested scopes take their time from the outer one),
++  // logged as milliseconds per frame once per second. Everything not inside a
++  // scope is reported as "draws/other".
++  enum class GpuProfileCategory : uint32_t {
++    kResolve,
++    kTransfer,
++    kTextureLoad,
++    kSwap,
++    kCount,
++  };
++  void GpuProfileMark(GpuProfileCategory category, bool begin);
++  class GpuProfileScope {
++   public:
++    GpuProfileScope(VulkanCommandProcessor& command_processor, GpuProfileCategory category)
++        : command_processor_(command_processor), category_(category) {
++      command_processor_.GpuProfileMark(category_, true);
++    }
++    ~GpuProfileScope() { command_processor_.GpuProfileMark(category_, false); }
++    GpuProfileScope(const GpuProfileScope&) = delete;
++    GpuProfileScope& operator=(const GpuProfileScope&) = delete;
++
++   private:
++    VulkanCommandProcessor& command_processor_;
++    GpuProfileCategory category_;
++  };
++
+  protected:
+   bool SetupContext() override;
+   void ShutdownContext() override;
+@@ -426,6 +453,7 @@ class VulkanCommandProcessor : public CommandProcessor {
  
    void ClearTransientDescriptorPools();
    bool IssueCopy_ReadbackResolvePath();
@@ -41,6 +221,119 @@ index 696ff48..d0b3bd6 100644
    bool IssueDraw_MemexportReadbackFullPath(uint32_t total_size);
    bool IssueDraw_MemexportReadbackFastPath(uint32_t total_size);
  
+@@ -729,6 +757,28 @@ class VulkanCommandProcessor : public CommandProcessor {
+ 
+   static constexpr uint32_t kMaxOcclusionQueries = 8192;
+   VkQueryPool occlusion_query_pool_ = VK_NULL_HANDLE;
++
++  // gpu_profile state. One query range per submission slot; a slot is read
++  // back once its submission has completed.
++  static constexpr uint32_t kGpuProfileSlots = 16;
++  static constexpr uint32_t kGpuProfileQueriesPerSlot = 4096;
++  struct GpuProfileSlot {
++    uint64_t submission = 0;
++    bool pending = false;
++    uint32_t used = 0;
++    // Per query after the first: category, or category | 0x80 for an end.
++    std::vector<uint8_t> marks;
++  };
++  void GpuProfileBeginSubmission();
++  void GpuProfileEndSubmission();
++  void GpuProfileCollect();
++  VkQueryPool gpu_profile_pool_ = VK_NULL_HANDLE;
++  std::array<GpuProfileSlot, kGpuProfileSlots> gpu_profile_slots_;
++  GpuProfileSlot* gpu_profile_current_slot_ = nullptr;
++  uint64_t gpu_profile_total_ticks_ = 0;
++  uint64_t gpu_profile_category_ticks_[size_t(GpuProfileCategory::kCount) + 1] = {};
++  uint64_t gpu_profile_report_time_ns_ = 0;
++  uint32_t gpu_profile_report_swaps_ = 0;
+   VkBuffer occlusion_query_readback_buffer_ = VK_NULL_HANDLE;
+   VkDeviceMemory occlusion_query_readback_memory_ = VK_NULL_HANDLE;
+   uint32_t occlusion_query_readback_memory_type_ = UINT32_MAX;
+diff --git a/include/rex/graphics/vulkan/deferred_command_buffer.h b/include/rex/graphics/vulkan/deferred_command_buffer.h
+index 9d2a848..a6fc6c2 100644
+--- a/include/rex/graphics/vulkan/deferred_command_buffer.h
++++ b/include/rex/graphics/vulkan/deferred_command_buffer.h
+@@ -265,6 +265,15 @@ class DeferredCommandBuffer {
+   void CmdVkBeginRendering(const VkRenderingInfo* rendering_info);
+   void CmdVkEndRendering() { WriteCommand(Command::kVkEndRendering, 0); }
+ 
++  void CmdVkWriteTimestamp(VkPipelineStageFlagBits pipeline_stage, VkQueryPool query_pool,
++                           uint32_t query) {
++    auto& args = *reinterpret_cast<ArgsVkWriteTimestamp*>(
++        WriteCommand(Command::kVkWriteTimestamp, sizeof(ArgsVkWriteTimestamp)));
++    args.pipeline_stage = pipeline_stage;
++    args.query_pool = query_pool;
++    args.query = query;
++  }
++
+   void CmdVkResetQueryPool(VkQueryPool query_pool, uint32_t first_query, uint32_t query_count) {
+     auto& args = *reinterpret_cast<ArgsVkResetQueryPool*>(
+         WriteCommand(Command::kVkResetQueryPool, sizeof(ArgsVkResetQueryPool)));
+@@ -381,6 +390,7 @@ class DeferredCommandBuffer {
+     kVkSetStencilReference,
+     kVkSetStencilWriteMask,
+     kVkSetViewport,
++    kVkWriteTimestamp,
+   };
+ 
+   struct CommandHeader {
+@@ -415,6 +425,12 @@ class DeferredCommandBuffer {
+     static_assert(alignof(VkRenderingAttachmentInfo) <= alignof(uintmax_t));
+   };
+ 
++  struct ArgsVkWriteTimestamp {
++    VkPipelineStageFlagBits pipeline_stage;
++    VkQueryPool query_pool;
++    uint32_t query;
++  };
++
+   struct ArgsVkBeginQuery {
+     VkQueryPool query_pool;
+     uint32_t query;
+diff --git a/include/rex/graphics/vulkan/render_target_cache.h b/include/rex/graphics/vulkan/render_target_cache.h
+index 34f7033..fdfefea 100644
+--- a/include/rex/graphics/vulkan/render_target_cache.h
++++ b/include/rex/graphics/vulkan/render_target_cache.h
+@@ -794,6 +794,15 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
+   // resolve_clear_rectangle is expected to be provided by
+   // PrepareHostRenderTargetsResolveClear which should do all the needed size
+   // bound checks.
++  // Host clear value for a raw guest EDRAM clear value (as in a resolve clear)
++  // of the render target.
++  bool SupportsClearTransfers() const override { return true; }
++
++  // Ownership transfers that are actual copies (others are clears).
++  std::vector<Transfer> copy_transfers_temp_;
++
++  void GetGuestClearAttachment(RenderTargetKey key, uint64_t clear_value,
++                               VkClearAttachment& attachment) const;
+   void PerformTransfersAndResolveClears(
+       uint32_t render_target_count, RenderTarget* const* render_targets,
+       const std::vector<Transfer>* render_target_transfers,
+diff --git a/include/rex/input/input_system.h b/include/rex/input/input_system.h
+index 1cb3faa..01748df 100644
+--- a/include/rex/input/input_system.h
++++ b/include/rex/input/input_system.h
+@@ -11,6 +11,7 @@
+  */
+ 
+ #include <memory>
++#include <mutex>
+ #include <vector>
+ 
+ #include <rex/input/device_assignment.h>
+@@ -65,6 +66,10 @@ class InputSystem : public system::IInputSystem {
+   // does not renumber pad two.
+   std::vector<DeviceInfo> devices_;
+   std::vector<InputDriver*> device_owners_;
++
++  // The guest polls input from several threads, and every call re-enumerates
++  // the devices (rebuilding devices_ / device_owners_) - serialize them.
++  std::mutex mutex_;
+ };
+ 
+ /// Create a default InputSystem with SDL + NOP drivers.
 diff --git a/include/rex/input/mnk/mnk_input_driver.h b/include/rex/input/mnk/mnk_input_driver.h
 index c8751b7..9271ff4 100644
 --- a/include/rex/input/mnk/mnk_input_driver.h
@@ -64,6 +357,68 @@ index c8751b7..9271ff4 100644
  
    // Packet number incremented on state change
    uint32_t packet_number_ = 0;
+diff --git a/include/rex/ui/vulkan/device.h b/include/rex/ui/vulkan/device.h
+index 947817f..9deb376 100644
+--- a/include/rex/ui/vulkan/device.h
++++ b/include/rex/ui/vulkan/device.h
+@@ -71,6 +71,9 @@ class VulkanDevice {
+     uint32_t maxFragmentInputComponents = 64;
+     uint32_t maxFragmentCombinedOutputResources = 4;
+     float maxSamplerAnisotropy = 1.0f;
++    // Nanoseconds per timestamp tick.
++    float timestampPeriod = 1.0f;
++    bool timestampComputeAndGraphics = false;
+     uint32_t maxViewportDimensions[2] = {4096, 4096};
+     VkDeviceSize minUniformBufferOffsetAlignment = 256;
+     VkDeviceSize minStorageBufferOffsetAlignment = 256;
+diff --git a/include/rex/ui/vulkan/functions/device_1_0.inc b/include/rex/ui/vulkan/functions/device_1_0.inc
+index aa55a4a..14eb1da 100644
+--- a/include/rex/ui/vulkan/functions/device_1_0.inc
++++ b/include/rex/ui/vulkan/functions/device_1_0.inc
+@@ -5,6 +5,7 @@ XE_UI_VULKAN_FUNCTION(vkAllocateMemory)
+ XE_UI_VULKAN_FUNCTION(vkBeginCommandBuffer)
+ XE_UI_VULKAN_FUNCTION(vkBindBufferMemory)
+ XE_UI_VULKAN_FUNCTION(vkBindImageMemory)
++XE_UI_VULKAN_FUNCTION(vkCmdBeginQuery)
+ XE_UI_VULKAN_FUNCTION(vkCmdBeginRenderPass)
+ XE_UI_VULKAN_FUNCTION(vkCmdBindDescriptorSets)
+ XE_UI_VULKAN_FUNCTION(vkCmdBindIndexBuffer)
+@@ -19,9 +20,8 @@ XE_UI_VULKAN_FUNCTION(vkCmdCopyQueryPoolResults)
+ XE_UI_VULKAN_FUNCTION(vkCmdDispatch)
+ XE_UI_VULKAN_FUNCTION(vkCmdDraw)
+ XE_UI_VULKAN_FUNCTION(vkCmdDrawIndexed)
+-XE_UI_VULKAN_FUNCTION(vkCmdEndRenderPass)
+-XE_UI_VULKAN_FUNCTION(vkCmdBeginQuery)
+ XE_UI_VULKAN_FUNCTION(vkCmdEndQuery)
++XE_UI_VULKAN_FUNCTION(vkCmdEndRenderPass)
+ XE_UI_VULKAN_FUNCTION(vkCmdPipelineBarrier)
+ XE_UI_VULKAN_FUNCTION(vkCmdPushConstants)
+ XE_UI_VULKAN_FUNCTION(vkCmdResetQueryPool)
+@@ -32,6 +32,7 @@ XE_UI_VULKAN_FUNCTION(vkCmdSetStencilCompareMask)
+ XE_UI_VULKAN_FUNCTION(vkCmdSetStencilReference)
+ XE_UI_VULKAN_FUNCTION(vkCmdSetStencilWriteMask)
+ XE_UI_VULKAN_FUNCTION(vkCmdSetViewport)
++XE_UI_VULKAN_FUNCTION(vkCmdWriteTimestamp)
+ XE_UI_VULKAN_FUNCTION(vkCreateBuffer)
+ XE_UI_VULKAN_FUNCTION(vkCreateBufferView)
+ XE_UI_VULKAN_FUNCTION(vkCreateCommandPool)
+@@ -72,13 +73,14 @@ XE_UI_VULKAN_FUNCTION(vkGetBufferMemoryRequirements)
+ XE_UI_VULKAN_FUNCTION(vkGetDeviceQueue)
+ XE_UI_VULKAN_FUNCTION(vkGetFenceStatus)
+ XE_UI_VULKAN_FUNCTION(vkGetImageMemoryRequirements)
++XE_UI_VULKAN_FUNCTION(vkGetQueryPoolResults)
+ XE_UI_VULKAN_FUNCTION(vkInvalidateMappedMemoryRanges)
+ XE_UI_VULKAN_FUNCTION(vkMapMemory)
++XE_UI_VULKAN_FUNCTION(vkQueueBindSparse)
++XE_UI_VULKAN_FUNCTION(vkQueueSubmit)
+ XE_UI_VULKAN_FUNCTION(vkResetCommandPool)
+ XE_UI_VULKAN_FUNCTION(vkResetDescriptorPool)
+ XE_UI_VULKAN_FUNCTION(vkResetFences)
+-XE_UI_VULKAN_FUNCTION(vkQueueBindSparse)
+-XE_UI_VULKAN_FUNCTION(vkQueueSubmit)
+ XE_UI_VULKAN_FUNCTION(vkUnmapMemory)
+ XE_UI_VULKAN_FUNCTION(vkUpdateDescriptorSets)
+ XE_UI_VULKAN_FUNCTION(vkWaitForFences)
 diff --git a/include/rex/ui/vulkan/functions/instance_ext_headless_surface.inc b/include/rex/ui/vulkan/functions/instance_ext_headless_surface.inc
 new file mode 100644
 index 0000000..59a6c2b
@@ -139,6 +494,390 @@ index a744375..ea6d313 100644
      // The scan converter writes the internal result back to the register here.
      // We just fake it and say it was visible in case it is read back.
      if (id < 32) {
+diff --git a/src/graphics/pipeline/render_target/cache.cpp b/src/graphics/pipeline/render_target/cache.cpp
+index 953c5fd..7194d55 100644
+--- a/src/graphics/pipeline/render_target/cache.cpp
++++ b/src/graphics/pipeline/render_target/cache.cpp
+@@ -37,6 +37,15 @@ REXCVAR_DEFINE_BOOL(execute_unclipped_draw_vs_on_cpu_for_psi_render_backend, tru
+ REXCVAR_DEFINE_BOOL(snorm16_render_target_full_range, true, "GPU",
+                     "Use full range for SNORM16 render targets");
+ 
++REXCVAR_DEFINE_BOOL(elide_rt_transfers, true, "GPU",
++                    "Skip render target ownership transfers whose data is overwritten anyway: "
++                    "EDRAM ranges that only hold a resolve clear value are cleared on the "
++                    "destination instead, and transfers to render targets that the drawing "
++                    "clear rectangle fully overwrites are dropped")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_INT32(log_rt_transfers, 0, "GPU",
++                     "Diagnostics: log the next N render target ownership transfers")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ REXCVAR_DEFINE_BOOL(direct_host_resolve, true, "GPU",
+                     "Resolve from host render targets directly to shared memory when possible")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+@@ -690,6 +699,57 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+                     interlock_barrier_only ? nullptr : &last_update_transfers_[rt_bit_index]);
+   }
+ 
++  if (!interlock_barrier_only && REXCVAR_GET(elide_rt_transfers)) {
++    ElideOverwrittenTransfers(normalized_depth_control, normalized_color_mask, vertex_shader,
++                              rt_keys);
++  }
++
++  if (int32_t log_remaining = REXCVAR_GET(log_rt_transfers);
++      log_remaining > 0 && !interlock_barrier_only) {
++    auto describe = [](RenderTargetKey key) {
++      return fmt::format("{}{} base {} pitch {} msaa {}x",
++                         key.is_depth ? "depth " : "",
++                         key.is_depth ? xenos::GetDepthRenderTargetFormatName(key.GetDepthFormat())
++                                      : xenos::GetColorRenderTargetFormatName(key.GetColorFormat()),
++                         uint32_t(key.base_tiles), key.GetPitchTiles(),
++                         uint32_t(1) << uint32_t(key.msaa_samples));
++    };
++    bool any_transfers = false;
++    for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
++      any_transfers |= !last_update_transfers_[i].empty();
++    }
++    if (any_transfers) {
++      // The draw that triggers the transfers (the first one on the new owner).
++      auto draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
++      auto depth_control = regs.Get<reg::RB_DEPTHCONTROL>();
++      REXGPU_INFO(
++          "rt transfers for draw: prim {} count {} z {}{} func {} stencil {} func {} zpass {} "
++          "mask 0x{:08X} color_mask 0x{:04X} blend0 0x{:08X} colorcontrol 0x{:08X} "
++          "scissor 0x{:08X}-0x{:08X}",
++          uint32_t(draw_initiator.prim_type), uint32_t(draw_initiator.num_indices),
++          uint32_t(depth_control.z_enable), depth_control.z_write_enable ? "w" : "",
++          uint32_t(depth_control.zfunc), uint32_t(depth_control.stencil_enable),
++          uint32_t(depth_control.stencilfunc), uint32_t(depth_control.stencilzpass),
++          regs[XE_GPU_REG_RB_STENCILREFMASK], regs[XE_GPU_REG_RB_COLOR_MASK] & 0xFFFF,
++          regs[XE_GPU_REG_RB_BLENDCONTROL0], regs[XE_GPU_REG_RB_COLORCONTROL],
++          regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL], regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR]);
++    }
++    for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets && log_remaining > 0; ++i) {
++      for (const Transfer& transfer : last_update_transfers_[i]) {
++        REXGPU_INFO("rt transfer: {} <- {} tiles {}..{} ({}){}{}", describe(rt_keys[i]),
++                    describe(transfer.source->key()), transfer.start_tiles, transfer.end_tiles,
++                    transfer.end_tiles - transfer.start_tiles,
++                    transfer.host_depth_source ? " +host depth" : "",
++                    transfer.is_clear ? fmt::format(" CLEAR 0x{:08X}", transfer.clear_value)
++                                      : std::string());
++        if (--log_remaining <= 0) {
++          break;
++        }
++      }
++    }
++    rex::cvar::SetFlagByName("log_rt_transfers", std::to_string(std::max(log_remaining, 0)));
++  }
++
+   if (interlock_barrier_only) {
+     // No copying transfers or render target bindings - only needed the barrier.
+     return true;
+@@ -1108,18 +1168,36 @@ bool RenderTargetCache::PrepareHostRenderTargetsResolveClear(
+     return false;
+   }
+ 
++  // If the rectangle covers whole tile rows, every tile of the range ends up
++  // holding the clear value - track that to replace later ownership transfers
++  // from it with clears (64bpp color values are two words, not tracked).
++  uint32_t tile_height_pixels = xenos::kEdramTileHeightSamples >> msaa_samples_y_log2;
++  bool clear_covers_tiles = clear_rectangle.x_pixels == 0 &&
++                            clear_rectangle.width_pixels == pitch_pixels &&
++                            clear_rectangle.y_pixels % tile_height_pixels == 0 &&
++                            ((clear_rectangle.y_pixels + clear_rectangle.height_pixels) %
++                                     tile_height_pixels ==
++                                 0 ||
++                             clear_rectangle.y_pixels + clear_rectangle.height_pixels ==
++                                 render_target_height_pixels);
++  uint32_t depth_cleared_value = resolve_info.rb_depth_clear;
++  uint32_t color_cleared_value = resolve_info.rb_color_clear;
+   clear_rectangle_out = clear_rectangle;
+   depth_render_target_out = depth_render_target;
+   depth_transfers_out.clear();
+   if (depth_render_target) {
+     ChangeOwnership(depth_render_target_key, depth_clear_start_tiles_base_relative,
+-                    depth_clear_length_tiles, &depth_transfers_out, &clear_rectangle);
++                    depth_clear_length_tiles, &depth_transfers_out, &clear_rectangle,
++                    clear_covers_tiles ? &depth_cleared_value : nullptr);
+   }
+   color_render_target_out = color_render_target;
+   color_transfers_out.clear();
+   if (color_render_target) {
+     ChangeOwnership(color_render_target_key, color_clear_start_tiles_base_relative,
+-                    color_clear_length_tiles, &color_transfers_out, &clear_rectangle);
++                    color_clear_length_tiles, &color_transfers_out, &clear_rectangle,
++                    clear_covers_tiles && !resolve_info.color_edram_info.format_is_64bpp
++                        ? &color_cleared_value
++                        : nullptr);
+   }
+   return true;
+ }
+@@ -1237,10 +1315,170 @@ bool RenderTargetCache::WouldOwnershipChangeRequireTransfers(RenderTargetKey des
+   return false;
+ }
+ 
++void RenderTargetCache::ElideOverwrittenTransfers(reg::RB_DEPTHCONTROL normalized_depth_control,
++                                                  uint32_t normalized_color_mask,
++                                                  const Shader& vertex_shader,
++                                                  const RenderTargetKey* rt_keys) {
++  bool any_transfers = false;
++  for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
++    any_transfers |= !last_update_transfers_[i].empty();
++  }
++  const RegisterFile& regs = register_file();
++  bool log = REXCVAR_GET(log_rt_transfers) > 0;
++  auto log_skip = [&](const char* reason) {
++    if (log) {
++      REXGPU_INFO("rt transfers kept: {}", reason);
++    }
++  };
++  if (!any_transfers) {
++    return;
++  }
++  if (draw_may_discard_pixels_) {
++    log_skip("draw may discard pixels");
++    return;
++  }
++  // Every sample inside the primitive must pass the depth / stencil tests.
++  bool depth_test_passes_all =
++      !normalized_depth_control.z_enable ||
++      normalized_depth_control.zfunc == xenos::CompareFunction::kAlways;
++  bool stencil_test_passes_all =
++      !normalized_depth_control.stencil_enable ||
++      (normalized_depth_control.stencilfunc == xenos::CompareFunction::kAlways &&
++       (!normalized_depth_control.backface_enable ||
++        normalized_depth_control.stencilfunc_bf == xenos::CompareFunction::kAlways));
++  if (!depth_test_passes_all || !stencil_test_passes_all) {
++    log_skip("depth / stencil test");
++    return;
++  }
++  uint32_t overwritten = 0;
++  // Depth: both depth and stencil replaced.
++  if (!last_update_transfers_[0].empty() && normalized_depth_control.z_enable &&
++      normalized_depth_control.z_write_enable && normalized_depth_control.stencil_enable &&
++      normalized_depth_control.stencilzpass == xenos::StencilOp::kReplace &&
++      (!normalized_depth_control.backface_enable ||
++       normalized_depth_control.stencilzpass_bf == xenos::StencilOp::kReplace) &&
++      regs.Get<reg::RB_STENCILREFMASK>().stencilwritemask == 0xFF &&
++      (!normalized_depth_control.backface_enable ||
++       regs.Get<reg::RB_STENCILREFMASK>(XE_GPU_REG_RB_STENCILREFMASK_BF).stencilwritemask == 0xFF)) {
++    overwritten |= 1;
++  }
++  // Color: all components written, no blending.
++  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
++    if (last_update_transfers_[1 + i].empty() || ((normalized_color_mask >> (4 * i)) & 0xF) != 0xF) {
++      continue;
++    }
++    auto blend_control =
++        regs.Get<reg::RB_BLENDCONTROL>(reg::RB_BLENDCONTROL::rt_register_indices[i]);
++    if (blend_control.color_srcblend == xenos::BlendFactor::kOne &&
++        blend_control.color_destblend == xenos::BlendFactor::kZero &&
++        blend_control.color_comb_fcn == xenos::BlendOp::kAdd &&
++        blend_control.alpha_srcblend == xenos::BlendFactor::kOne &&
++        blend_control.alpha_destblend == xenos::BlendFactor::kZero &&
++        blend_control.alpha_comb_fcn == xenos::BlendOp::kAdd) {
++      overwritten |= uint32_t(1) << (1 + i);
++    }
++  }
++  if (!overwritten) {
++    log_skip("no render target fully written");
++    return;
++  }
++  float x0, y0, x1, y1;
++  if (!draw_extent_estimator_.EstimateRectangleListBounds(vertex_shader, x0, y0, x1, y1)) {
++    auto draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
++    if (log) {
++      REXGPU_INFO("rt transfers kept: no rectangle bounds (prim {} count {} source {})",
++                  uint32_t(draw_initiator.prim_type), uint32_t(draw_initiator.num_indices),
++                  uint32_t(draw_initiator.source_select));
++    }
++    return;
++  }
++  if (log) {
++    REXGPU_INFO("rt transfers: rectangle {},{} - {},{} overwritten 0b{:b}", x0, y0, x1, y1,
++                overwritten);
++  }
++  // Fully covered whole pixels (all samples), clipped by the scissor.
++  draw_util::Scissor scissor;
++  draw_util::GetScissor(regs, scissor, false);
++  int64_t covered_x0 = std::max(int64_t(std::ceil(x0)), int64_t(scissor.offset[0]));
++  int64_t covered_y0 = std::max(int64_t(std::ceil(y0)), int64_t(scissor.offset[1]));
++  int64_t covered_x1 =
++      std::min(int64_t(std::floor(x1)), int64_t(scissor.offset[0]) + scissor.extent[0]);
++  int64_t covered_y1 =
++      std::min(int64_t(std::floor(y1)), int64_t(scissor.offset[1]) + scissor.extent[1]);
++  if (covered_x0 >= covered_x1 || covered_y0 >= covered_y1) {
++    return;
++  }
++  for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
++    if (!(overwritten & (uint32_t(1) << i))) {
++      continue;
++    }
++    RenderTargetKey key = rt_keys[i];
++    std::vector<Transfer>& transfers = last_update_transfers_[i];
++    // Whole tile rows covered (only if the rectangle spans the whole pitch).
++    uint32_t msaa_samples_x_log2 = uint32_t(key.msaa_samples >= xenos::MsaaSamples::k4X);
++    uint32_t msaa_samples_y_log2 = uint32_t(key.msaa_samples >= xenos::MsaaSamples::k2X);
++    int64_t pitch_pixels = int64_t(key.pitch_tiles_at_32bpp) *
++                           (xenos::kEdramTileWidthSamples >> msaa_samples_x_log2);
++    int64_t tile_height_pixels = xenos::kEdramTileHeightSamples >> msaa_samples_y_log2;
++    uint32_t pitch_tiles = key.GetPitchTiles();
++    uint32_t covered_start_tiles = 0, covered_end_tiles = 0;
++    if (covered_x0 <= 0 && covered_x1 >= pitch_pixels) {
++      int64_t row_start = (std::max(covered_y0, int64_t(0)) + tile_height_pixels - 1) /
++                          tile_height_pixels;
++      int64_t row_end = covered_y1 / tile_height_pixels;
++      if (row_end > row_start) {
++        covered_start_tiles = uint32_t(row_start) * pitch_tiles;
++        covered_end_tiles = uint32_t(row_end) * pitch_tiles;
++      }
++    }
++    std::vector<Transfer> kept;
++    kept.reserve(transfers.size());
++    for (const Transfer& transfer : transfers) {
++      // Fully inside the rectangle - drop.
++      Transfer::Rectangle rectangles[Transfer::kMaxRectanglesWithoutCutout];
++      uint32_t rectangle_count = transfer.GetRectangles(
++          key.base_tiles, key.pitch_tiles_at_32bpp, key.msaa_samples, key.Is64bpp(), rectangles);
++      bool inside = true;
++      for (uint32_t j = 0; j < rectangle_count; ++j) {
++        const Transfer::Rectangle& r = rectangles[j];
++        if (int64_t(r.x_pixels) < covered_x0 || int64_t(r.y_pixels) < covered_y0 ||
++            int64_t(r.x_pixels) + r.width_pixels > covered_x1 ||
++            int64_t(r.y_pixels) + r.height_pixels > covered_y1) {
++          inside = false;
++          break;
++        }
++      }
++      if (inside) {
++        continue;
++      }
++      // Otherwise keep only the tiles outside the covered rows.
++      if (covered_end_tiles > covered_start_tiles) {
++        uint32_t relative_start =
++            (transfer.start_tiles - key.base_tiles) & (xenos::kEdramTileCount - 1);
++        uint32_t relative_end = relative_start + (transfer.end_tiles - transfer.start_tiles);
++        if (relative_start < covered_end_tiles && relative_end > covered_start_tiles) {
++          if (relative_start < covered_start_tiles) {
++            Transfer& head = kept.emplace_back(transfer);
++            head.end_tiles = transfer.start_tiles + (covered_start_tiles - relative_start);
++          }
++          if (relative_end > covered_end_tiles) {
++            Transfer& tail = kept.emplace_back(transfer);
++            tail.start_tiles = transfer.start_tiles + (covered_end_tiles - relative_start);
++          }
++          continue;
++        }
++      }
++      kept.push_back(transfer);
++    }
++    transfers = std::move(kept);
++  }
++}
++
+ void RenderTargetCache::ChangeOwnership(RenderTargetKey dest, uint32_t start_tiles_base_relative,
+                                         uint32_t length_tiles,
+                                         std::vector<Transfer>* transfers_append_out,
+-                                        const Transfer::Rectangle* resolve_clear_cutout) {
++                                        const Transfer::Rectangle* resolve_clear_cutout,
++                                        const uint32_t* cleared_value) {
+   // xenos::kEdramTileCount with length 0 is fine if both the start and the end
+   // are clamped to xenos::kEdramTileCount.
+   assert_true(start_tiles_base_relative <= (xenos::kEdramTileCount - uint32_t(length_tiles != 0)));
+@@ -1252,6 +1490,21 @@ void RenderTargetCache::ChangeOwnership(RenderTargetKey dest, uint32_t start_til
+   bool dest_is_64bpp = dest.Is64bpp();
+   bool host_depth_encoding_different = dest.is_depth && GetPath() == Path::kHostRenderTargets &&
+                                        IsHostDepthEncodingDifferent(dest.GetDepthFormat());
++  bool elide_cleared_transfers = REXCVAR_GET(elide_rt_transfers) &&
++                                 GetPath() == Path::kHostRenderTargets &&
++                                 SupportsClearTransfers() && !dest_is_64bpp;
++  // Whether a range already owned by the destination still needs its cleared
++  // state updated.
++  auto cleared_state_differs = [&](const OwnershipRange& range) {
++    if (!cleared_value) {
++      return range.cleared;
++    }
++    return !range.cleared || range.clear_value != *cleared_value;
++  };
++  auto set_cleared_state = [&](OwnershipRange& range) {
++    range.cleared = cleared_value != nullptr;
++    range.clear_value = cleared_value ? *cleared_value : 0;
++  };
+   auto change_ownership_in_extent = [&](uint32_t extent_start, uint32_t extent_end) {
+     // The map contains consecutive ranges, merged if the adjacent ones are the
+     // same. Find the range starting at >= the start. A portion of the range
+@@ -1262,7 +1515,8 @@ void RenderTargetCache::ChangeOwnership(RenderTargetKey dest, uint32_t start_til
+     if (it != ownership_ranges_.begin()) {
+       auto it_pre = std::prev(it);
+       if (it_pre->second.end_tiles > extent_start &&
+-          !it_pre->second.IsOwnedBy(dest, host_depth_encoding_different)) {
++          (!it_pre->second.IsOwnedBy(dest, host_depth_encoding_different) ||
++           cleared_state_differs(it_pre->second))) {
+         // Different render target overlapping the range - split the head.
+         ownership_ranges_.emplace(extent_start, it_pre->second);
+         it_pre->second.end_tiles = extent_start;
+@@ -1278,7 +1532,14 @@ void RenderTargetCache::ChangeOwnership(RenderTargetKey dest, uint32_t start_til
+       }
+       if (it->second.IsOwnedBy(dest, host_depth_encoding_different)) {
+         // Already owned by the needed render target - no need to transfer
+-        // anything.
++        // anything, only to track whether it's cleared.
++        if (cleared_state_differs(it->second)) {
++          if (it->second.end_tiles > extent_end) {
++            ownership_ranges_.emplace(extent_end, it->second);
++            it->second.end_tiles = extent_end;
++          }
++          set_cleared_state(it->second);
++        }
+         ++it;
+         continue;
+       }
+@@ -1294,7 +1555,28 @@ void RenderTargetCache::ChangeOwnership(RenderTargetKey dest, uint32_t start_til
+         // Only perform the copying when actually changing the latest owner, not
+         // just the latest host depth owner - the transfer source is expected to
+         // be different than the destination.
+-        if (!transfer_source.IsEmpty() && transfer_source != dest) {
++        if (!transfer_source.IsEmpty() && transfer_source != dest && elide_cleared_transfers &&
++            it->second.cleared && !transfer_source.Is64bpp()) {
++          // The source only holds a clear value - clear the destination.
++          uint32_t transfer_end_tiles = std::min(it->second.end_tiles, extent_end);
++          auto transfer_source_rt_it = render_targets_.find(transfer_source);
++          if (transfer_source_rt_it != render_targets_.end() &&
++              (!resolve_clear_cutout ||
++               Transfer::GetRangeRectangles(it->first, transfer_end_tiles, dest.base_tiles,
++                                            dest_pitch_tiles, dest.msaa_samples, dest_is_64bpp,
++                                            nullptr, resolve_clear_cutout))) {
++            if (!transfers_append_out->empty() && transfers_append_out->back().is_clear &&
++                transfers_append_out->back().clear_value == it->second.clear_value &&
++                transfers_append_out->back().end_tiles == it->first) {
++              transfers_append_out->back().end_tiles = transfer_end_tiles;
++            } else {
++              Transfer& clear_transfer = transfers_append_out->emplace_back(
++                  it->first, transfer_end_tiles, transfer_source_rt_it->second, nullptr);
++              clear_transfer.is_clear = true;
++              clear_transfer.clear_value = it->second.clear_value;
++            }
++          }
++        } else if (!transfer_source.IsEmpty() && transfer_source != dest) {
+           uint32_t transfer_end_tiles = std::min(it->second.end_tiles, extent_end);
+           if (!resolve_clear_cutout ||
+               Transfer::GetRangeRectangles(it->first, transfer_end_tiles, dest.base_tiles,
+@@ -1308,7 +1590,7 @@ void RenderTargetCache::ChangeOwnership(RenderTargetKey dest, uint32_t start_til
+               // Same render target, don't provide a separate host depth source.
+               transfer_host_depth_source = RenderTargetKey();
+             }
+-            if (!transfers_append_out->empty() &&
++            if (!transfers_append_out->empty() && !transfers_append_out->back().is_clear &&
+                 transfers_append_out->back().end_tiles == it->first &&
+                 transfers_append_out->back().source->key() == transfer_source &&
+                 ((transfers_append_out->back().host_depth_source == nullptr) ==
+@@ -1344,6 +1626,7 @@ void RenderTargetCache::ChangeOwnership(RenderTargetKey dest, uint32_t start_til
+       }
+       // Claim the current range.
+       it->second.render_target = dest;
++      set_cleared_state(it->second);
+       if (host_depth_encoding_different) {
+         it->second.GetHostDepthRenderTarget(dest.GetDepthFormat()) = dest;
+       }
 diff --git a/src/graphics/pipeline/shader/spirv_translator_fetch.cpp b/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
 index 9ce3bb4..548d1e7 100644
 --- a/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
@@ -11425,8 +12164,163 @@ index 0000000..deec8f0
 +#endif  // SHADING_LANGUAGE_*_XE
 +
 +#endif  // XENIA_UI_SHADERS_XESL_XESLI_
+diff --git a/src/graphics/util/draw_extent_estimator.cpp b/src/graphics/util/draw_extent_estimator.cpp
+index 3027dc8..831fd98 100644
+--- a/src/graphics/util/draw_extent_estimator.cpp
++++ b/src/graphics/util/draw_extent_estimator.cpp
+@@ -10,6 +10,7 @@
+  */
+ 
+ #include <algorithm>
++#include <cmath>
+ #include <cfloat>
+ #include <cstdint>
+ 
+@@ -17,6 +18,9 @@
+ #include <rex/cvar.h>
+ #include <rex/dbg.h>
+ #include <rex/graphics/flags.h>
++#include <rex/logging.h>
++
++REXCVAR_DECLARE(int32_t, log_rt_transfers);
+ #include <rex/graphics/format/ucode.h>
+ #include <rex/graphics/registers.h>
+ #include <rex/graphics/util/draw_extent_estimator.h>
+@@ -24,8 +28,10 @@
+ #include <rex/memory.h>
+ #include <rex/ui/graphics_util.h>
+ 
+-REXCVAR_DEFINE_BOOL(execute_unclipped_draw_vs_on_cpu, false, "GPU",
+-                    "Execute unclipped draw vertex shader on CPU");
++REXCVAR_DEFINE_BOOL(execute_unclipped_draw_vs_on_cpu, true, "GPU",
++                    "Execute unclipped draw vertex shader on CPU (to bound the render "
++                    "target area it uses - like Xenia, avoids ownership transfers of the "
++                    "whole EDRAM for clears)");
+ 
+ REXCVAR_DEFINE_BOOL(execute_unclipped_draw_vs_on_cpu_with_scissor, false, "GPU",
+                     "Execute unclipped draw VS on CPU with scissor");
+@@ -78,6 +84,119 @@ void DrawExtentEstimator::PositionYExportSink::Export(ucode::ExportRegister expo
+   }
+ }
+ 
++void DrawExtentEstimator::PositionExportSink::Export(ucode::ExportRegister export_register,
++                                                     const float* value, uint32_t value_mask) {
++  if (export_register == ucode::ExportRegister::kVSPosition) {
++    if (value_mask & 0b0001) {
++      position_x_ = value[0];
++    }
++    if (value_mask & 0b0010) {
++      position_y_ = value[1];
++    }
++    if (value_mask & 0b1000) {
++      position_w_ = value[3];
++    }
++  } else if (export_register == ucode::ExportRegister::kVSPointSizeEdgeFlagKillVertex) {
++    if (value_mask & 0b0100) {
++      vertex_kill_ = rex::memory::Reinterpret<uint32_t>(value[2]);
++    }
++  }
++}
++
++bool DrawExtentEstimator::EstimateRectangleListBounds(const Shader& vertex_shader,
++                                                      float& x0_out, float& y0_out,
++                                                      float& x1_out, float& y1_out) {
++  const RegisterFile& regs = register_file_;
++  auto vgt_draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
++  if (vgt_draw_initiator.prim_type != xenos::PrimitiveType::kRectangleList ||
++      vgt_draw_initiator.num_indices != 3 ||
++      vgt_draw_initiator.source_select != xenos::SourceSelect::kAutoIndex ||
++      xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode, vgt_draw_initiator.prim_type)) {
++    return false;
++  }
++  assert_true(vertex_shader.type() == xenos::ShaderType::kVertex);
++  if (!vertex_shader.is_ucode_analyzed() ||
++      !ShaderInterpreter::CanInterpretShader(vertex_shader)) {
++    return false;
++  }
++  uint32_t index_offset = regs.Get<reg::VGT_INDX_OFFSET>().indx_offset;
++  uint32_t min_index = regs.Get<reg::VGT_MIN_VTX_INDX>().min_indx;
++  uint32_t max_index = regs.Get<reg::VGT_MAX_VTX_INDX>().max_indx;
++  auto pa_cl_vte_cntl = regs.Get<reg::PA_CL_VTE_CNTL>();
++  float viewport_x_scale =
++      pa_cl_vte_cntl.vport_x_scale_ena ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XSCALE) : 1.0f;
++  float viewport_x_offset =
++      pa_cl_vte_cntl.vport_x_offset_ena ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XOFFSET) : 0.0f;
++  float viewport_y_scale =
++      pa_cl_vte_cntl.vport_y_scale_ena ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YSCALE) : 1.0f;
++  float viewport_y_offset =
++      pa_cl_vte_cntl.vport_y_offset_ena ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YOFFSET) : 0.0f;
++  // Same conventions as EstimateVertexMaxY: D3D pixel centers at integers.
++  float pixel_offset =
++      regs.Get<reg::PA_SU_VTX_CNTL>().pix_center == xenos::PixelCenter::kD3DZero ? 0.5f : 0.0f;
++  float window_x_offset = 0.0f, window_y_offset = 0.0f;
++  if (regs.Get<reg::PA_SU_SC_MODE_CNTL>().vtx_window_offset_enable) {
++    auto pa_sc_window_offset = regs.Get<reg::PA_SC_WINDOW_OFFSET>();
++    window_x_offset = float(pa_sc_window_offset.window_x_offset);
++    window_y_offset = float(pa_sc_window_offset.window_y_offset);
++  }
++
++  float x0 = FLT_MAX, y0 = FLT_MAX, x1 = -FLT_MAX, y1 = -FLT_MAX;
++  shader_interpreter_.SetShader(vertex_shader);
++  PositionExportSink export_sink;
++  shader_interpreter_.SetExportSink(&export_sink);
++  bool valid = true;
++  for (uint32_t i = 0; i < 3 && valid; ++i) {
++    uint32_t vertex_index = std::min(max_index, std::max(min_index, (i + index_offset) & 0xFFFFFF));
++    export_sink.Reset();
++    shader_interpreter_.temp_registers()[0] = float(vertex_index);
++    shader_interpreter_.Execute();
++    if ((export_sink.vertex_kill().has_value() &&
++         (export_sink.vertex_kill().value() & ~(UINT32_C(1) << 31))) ||
++        !export_sink.position_x().has_value() || !export_sink.position_y().has_value()) {
++      valid = false;
++      break;
++    }
++    float x = export_sink.position_x().value();
++    float y = export_sink.position_y().value();
++    if (!pa_cl_vte_cntl.vtx_xy_fmt) {
++      if (!export_sink.position_w().has_value() || !(export_sink.position_w().value() > 0.0f)) {
++        valid = false;
++        break;
++      }
++      x /= export_sink.position_w().value();
++      y /= export_sink.position_w().value();
++    }
++    if (REXCVAR_GET(log_rt_transfers) > 0) {
++      REXGPU_INFO("  rect vertex {}: index {} pos {} {} w {} xy_fmt {} vp x {}*+{} y {}*+{} win {} {}",
++                  i, vertex_index, export_sink.position_x().value(),
++                  export_sink.position_y().value(),
++                  export_sink.position_w().has_value() ? export_sink.position_w().value() : -1.0f,
++                  uint32_t(pa_cl_vte_cntl.vtx_xy_fmt), viewport_x_scale, viewport_x_offset,
++                  viewport_y_scale, viewport_y_offset, window_x_offset, window_y_offset);
++    }
++    x = x * viewport_x_scale + viewport_x_offset + pixel_offset + window_x_offset;
++    y = y * viewport_y_scale + viewport_y_offset + pixel_offset + window_y_offset;
++    if (!std::isfinite(x) || !std::isfinite(y)) {
++      valid = false;
++      break;
++    }
++    x0 = std::min(x0, x);
++    y0 = std::min(y0, y);
++    x1 = std::max(x1, x);
++    y1 = std::max(y1, y);
++  }
++  shader_interpreter_.SetExportSink(nullptr);
++  if (!valid) {
++    return false;
++  }
++  x0_out = x0;
++  y0_out = y0;
++  x1_out = x1;
++  y1_out = y1;
++  return true;
++}
++
+ uint32_t DrawExtentEstimator::EstimateVertexMaxY(const Shader& vertex_shader) {
+   SCOPE_profile_cpu_f("gpu");
+ 
 diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
-index 001f36b..64a8011 100644
+index 001f36b..101c5ed 100644
 --- a/src/graphics/vulkan/command_processor.cpp
 +++ b/src/graphics/vulkan/command_processor.cpp
 @@ -10,6 +10,10 @@
@@ -11440,10 +12334,14 @@ index 001f36b..64a8011 100644
  #include <array>
  #include <cstdint>
  #include <cstring>
-@@ -55,6 +59,34 @@ REXCVAR_DEFINE_BOOL(vulkan_readback_memexport, false, "GPU/Vulkan",
+@@ -55,6 +59,38 @@ REXCVAR_DEFINE_BOOL(vulkan_readback_memexport, false, "GPU/Vulkan",
                      "Read data written by memory export in shaders on the CPU")
      .lifecycle(rex::cvar::Lifecycle::kHotReload);
  
++REXCVAR_DEFINE_BOOL(gpu_profile, false, "GPU",
++                    "Log GPU time per frame by kind of work (resolves, render target "
++                    "transfers, texture loads, swap, draws/other) once per second")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 +REXCVAR_DEFINE_INT32(dump_resolves_frame, -1, "GPU",
 +                     "With readback_resolve=full, dump every resolve of this guest frame "
 +                     "(counted in swaps) to dump_resolves_dir (diagnostics; -1 = off, "
@@ -11475,7 +12373,7 @@ index 001f36b..64a8011 100644
  REXCVAR_DEFINE_BOOL(vulkan_async_skip_incomplete_frames, true, "GPU/Vulkan",
                      "When async shader compilation is enabled, skip presenting frames that "
                      "used placeholder pipelines to avoid visible flashing")
-@@ -2275,6 +2307,25 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+@@ -2275,6 +2311,25 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
    vertex_buffers_in_sync_[0] = 0;
    vertex_buffers_in_sync_[1] = 0;
  
@@ -11501,7 +12399,16 @@ index 001f36b..64a8011 100644
    if (!graphics_system_)
      return;
    ui::Presenter* presenter = graphics_system_->presenter();
-@@ -2304,6 +2355,22 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+@@ -2288,6 +2343,8 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+     REXGPU_ERROR("XELOG_GPU PRESENT: BeginSubmission FAILED");
+     return;
+   }
++  // Ends with the submission (EndSubmission inside), so the rest of it counts.
++  GpuProfileScope gpu_profile_scope(*this, GpuProfileCategory::kSwap);
+ 
+   bool skip_present_due_async_placeholder = REXCVAR_GET(async_shader_compilation) &&
+                                             REXCVAR_GET(vulkan_async_skip_incomplete_frames) &&
+@@ -2304,6 +2361,22 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
      return;
    }
  
@@ -11524,7 +12431,7 @@ index 001f36b..64a8011 100644
    SwapPostEffect swap_post_effect = GetActualSwapPostEffect();
  
    // Obtain the actual swap source texture size (resolution-scaled if it's a
-@@ -2395,7 +2462,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+@@ -2395,7 +2468,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
            frontbuffer_width_scaled, frontbuffer_height_scaled);
      }
    }
@@ -11533,7 +12440,7 @@ index 001f36b..64a8011 100644
        "XELOG_GPU PRESENT: swap_texture_view={:p} packet_size={}x{} src_size={}x{} "
        "src_unscaled={}x{} guest_output_size={}x{} format={}",
        static_cast<void*>(swap_texture_view), frontbuffer_width, frontbuffer_height,
-@@ -3590,6 +3657,7 @@ Shader* VulkanCommandProcessor::LoadShader(xenos::ShaderType shader_type, uint32
+@@ -3590,6 +3663,7 @@ Shader* VulkanCommandProcessor::LoadShader(xenos::ShaderType shader_type, uint32
  bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t index_count,
                                         IndexBufferInfo* index_buffer_info,
                                         bool major_mode_explicit) {
@@ -11541,15 +12448,173 @@ index 001f36b..64a8011 100644
  #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
    SCOPE_profile_cpu_f("gpu");
  #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
-@@ -4382,6 +4450,7 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
+@@ -3839,6 +3913,14 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+ 
+   const VulkanPipelineCache::PipelineLayoutProvider* pipeline_layout_provider;
+   // Set up the render targets - this may perform dispatches and draws.
++  {
++    auto color_control = regs.Get<reg::RB_COLORCONTROL>();
++    render_target_cache_->SetDrawMayDiscardPixels(
++        !pixel_shader || pixel_shader->kills_pixels() ||
++        (color_control.alpha_test_enable &&
++         color_control.alpha_func != xenos::CompareFunction::kAlways) ||
++        color_control.alpha_to_mask_enable);
++  }
+   if (!render_target_cache_->Update(is_rasterization_done, normalized_depth_control,
+                                     normalized_color_mask, *vertex_shader)) {
+     return draw_fail("render_target_update");
+@@ -4381,7 +4463,142 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
+   return true;
  }
  
++void VulkanCommandProcessor::GpuProfileBeginSubmission() {
++  gpu_profile_current_slot_ = nullptr;
++  if (!REXCVAR_GET(gpu_profile)) {
++    return;
++  }
++  const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
++  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
++  if (gpu_profile_pool_ == VK_NULL_HANDLE) {
++    VkQueryPoolCreateInfo pool_info = {};
++    pool_info.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
++    pool_info.queryType = VK_QUERY_TYPE_TIMESTAMP;
++    pool_info.queryCount = kGpuProfileSlots * kGpuProfileQueriesPerSlot;
++    if (dfn.vkCreateQueryPool(vulkan_device->device(), &pool_info, nullptr, &gpu_profile_pool_) !=
++        VK_SUCCESS) {
++      REXGPU_ERROR("gpu_profile: failed to create the timestamp query pool");
++      rex::cvar::SetFlagByName("gpu_profile", "false");
++      return;
++    }
++  }
++  GpuProfileCollect();
++  GpuProfileSlot& slot = gpu_profile_slots_[GetCurrentSubmission() % kGpuProfileSlots];
++  if (slot.pending) {
++    // The GPU is more than kGpuProfileSlots submissions behind - skip this one.
++    return;
++  }
++  uint32_t first_query =
++      uint32_t(GetCurrentSubmission() % kGpuProfileSlots) * kGpuProfileQueriesPerSlot;
++  deferred_command_buffer_.CmdVkResetQueryPool(gpu_profile_pool_, first_query,
++                                               kGpuProfileQueriesPerSlot);
++  deferred_command_buffer_.CmdVkWriteTimestamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
++                                               gpu_profile_pool_, first_query);
++  slot.used = 1;
++  slot.marks.clear();
++  gpu_profile_current_slot_ = &slot;
++}
++
++void VulkanCommandProcessor::GpuProfileMark(GpuProfileCategory category, bool begin) {
++  GpuProfileSlot* slot = gpu_profile_current_slot_;
++  // Keep the last query for the end of the submission.
++  if (!slot || !submission_open_ || slot->used + 1 >= kGpuProfileQueriesPerSlot) {
++    return;
++  }
++  uint32_t first_query =
++      uint32_t(GetCurrentSubmission() % kGpuProfileSlots) * kGpuProfileQueriesPerSlot;
++  deferred_command_buffer_.CmdVkWriteTimestamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
++                                               gpu_profile_pool_, first_query + slot->used++);
++  slot->marks.push_back(uint8_t(category) | (begin ? 0 : 0x80));
++}
++
++void VulkanCommandProcessor::GpuProfileEndSubmission() {
++  GpuProfileSlot* slot = gpu_profile_current_slot_;
++  gpu_profile_current_slot_ = nullptr;
++  if (!slot) {
++    return;
++  }
++  uint32_t first_query =
++      uint32_t(GetCurrentSubmission() % kGpuProfileSlots) * kGpuProfileQueriesPerSlot;
++  deferred_command_buffer_.CmdVkWriteTimestamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
++                                               gpu_profile_pool_, first_query + slot->used++);
++  slot->marks.push_back(uint8_t(GpuProfileCategory::kCount));  // End of submission.
++  slot->submission = GetCurrentSubmission();
++  slot->pending = true;
++}
++
++void VulkanCommandProcessor::GpuProfileCollect() {
++  const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
++  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
++  std::vector<uint64_t> timestamps;
++  for (uint32_t slot_index = 0; slot_index < kGpuProfileSlots; ++slot_index) {
++    GpuProfileSlot& slot = gpu_profile_slots_[slot_index];
++    if (!slot.pending || slot.submission > submission_completed_) {
++      continue;
++    }
++    slot.pending = false;
++    timestamps.resize(slot.used);
++    if (dfn.vkGetQueryPoolResults(vulkan_device->device(), gpu_profile_pool_,
++                                  slot_index * kGpuProfileQueriesPerSlot, slot.used,
++                                  sizeof(uint64_t) * slot.used, timestamps.data(),
++                                  sizeof(uint64_t), VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) {
++      continue;
++    }
++    // Attribute each interval to the innermost open scope ("other" if none).
++    uint8_t stack[16];
++    uint32_t depth = 0;
++    const size_t other = size_t(GpuProfileCategory::kCount);
++    for (uint32_t i = 1; i < slot.used; ++i) {
++      uint64_t ticks = timestamps[i] - timestamps[i - 1];
++      gpu_profile_category_ticks_[depth ? stack[depth - 1] : other] += ticks;
++      uint8_t mark = slot.marks[i - 1];
++      if (mark == uint8_t(GpuProfileCategory::kCount)) {
++        break;
++      }
++      if (!(mark & 0x80)) {
++        if (depth < 16) {
++          stack[depth++] = mark;
++        }
++      } else if (depth) {
++        --depth;
++      }
++    }
++    gpu_profile_total_ticks_ += timestamps[slot.used - 1] - timestamps[0];
++  }
++
++  // Report once per second, per guest frame.
++  uint64_t now_ns = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
++                                 std::chrono::steady_clock::now().time_since_epoch())
++                                 .count());
++  if (!gpu_profile_report_time_ns_) {
++    gpu_profile_report_time_ns_ = now_ns;
++    gpu_profile_report_swaps_ = g_swap_count.load(std::memory_order_relaxed);
++    return;
++  }
++  if (now_ns - gpu_profile_report_time_ns_ < 1000000000) {
++    return;
++  }
++  uint32_t swaps = g_swap_count.load(std::memory_order_relaxed);
++  uint32_t frames = std::max(swaps - gpu_profile_report_swaps_, uint32_t(1));
++  double ms_per_tick = double(vulkan_device->properties().timestampPeriod) * 1e-6 / frames;
++  auto ms = [&](GpuProfileCategory category) {
++    return double(gpu_profile_category_ticks_[size_t(category)]) * ms_per_tick;
++  };
++  REXGPU_INFO(
++      "gpu time/frame: {:.2f} ms (draws/other {:.2f}, resolves {:.2f}, rt transfers {:.2f}, "
++      "texture loads {:.2f}, swap {:.2f}) over {} frames",
++      double(gpu_profile_total_ticks_) * ms_per_tick,
++      double(gpu_profile_category_ticks_[size_t(GpuProfileCategory::kCount)]) * ms_per_tick,
++      ms(GpuProfileCategory::kResolve), ms(GpuProfileCategory::kTransfer),
++      ms(GpuProfileCategory::kTextureLoad), ms(GpuProfileCategory::kSwap), frames);
++  gpu_profile_total_ticks_ = 0;
++  std::memset(gpu_profile_category_ticks_, 0, sizeof(gpu_profile_category_ticks_));
++  gpu_profile_report_time_ns_ = now_ns;
++  gpu_profile_report_swaps_ = swaps;
++}
++
  bool VulkanCommandProcessor::IssueCopy() {
 +  g_copies_since_report.fetch_add(1, std::memory_order_relaxed);
  #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
    SCOPE_profile_cpu_f("gpu");
  #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
-@@ -4400,7 +4469,62 @@ bool VulkanCommandProcessor::IssueCopy() {
+@@ -4389,6 +4606,7 @@ bool VulkanCommandProcessor::IssueCopy() {
+   if (!BeginSubmission(true)) {
+     return false;
+   }
++  GpuProfileScope gpu_profile_scope(*this, GpuProfileCategory::kResolve);
+ 
+   ReadbackResolveMode readback_mode = GetReadbackResolveMode(REXCVAR_GET(vulkan_readback_resolve));
+   if (readback_mode == ReadbackResolveMode::kDisabled) {
+@@ -4400,7 +4618,62 @@ bool VulkanCommandProcessor::IssueCopy() {
    return IssueCopy_ReadbackResolvePath();
  }
  
@@ -11612,7 +12677,7 @@ index 001f36b..64a8011 100644
    const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
    const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
    const VkDevice device = vulkan_device->device();
-@@ -4423,6 +4547,10 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+@@ -4423,6 +4696,10 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
    if (readback_mode == ReadbackResolveMode::kDisabled) {
      return true;
    }
@@ -11623,7 +12688,35 @@ index 001f36b..64a8011 100644
  
    auto ensure_readback_slot = [&](ReadbackBuffer& readback, uint32_t index, uint32_t size) -> bool {
      if (readback.buffers[index] != VK_NULL_HANDLE && size <= readback.sizes[index] &&
-@@ -6233,6 +6361,18 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
+@@ -4800,6 +5077,10 @@ void VulkanCommandProcessor::ShutdownOcclusionQueryResources() {
+   if (occlusion_query_pool_ != VK_NULL_HANDLE) {
+     dfn.vkDestroyQueryPool(device, occlusion_query_pool_, nullptr);
+   }
++  if (gpu_profile_pool_ != VK_NULL_HANDLE) {
++    dfn.vkDestroyQueryPool(device, gpu_profile_pool_, nullptr);
++    gpu_profile_pool_ = VK_NULL_HANDLE;
++  }
+ 
+   occlusion_query_pool_ = VK_NULL_HANDLE;
+   occlusion_query_readback_buffer_ = VK_NULL_HANDLE;
+@@ -5136,6 +5417,7 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+     // the end of the submission (when async pipeline object creation requests
+     // are fulfilled).
+     deferred_command_buffer_.Reset();
++    GpuProfileBeginSubmission();
+ 
+     // Reset cached state of the command buffer.
+     dynamic_viewport_update_needed_ = true;
+@@ -5370,6 +5652,8 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+ 
+     SubmitBarriers(true);
+ 
++    GpuProfileEndSubmission();
++
+     assert_false(command_buffers_writable_.empty());
+     CommandBuffer command_buffer = command_buffers_writable_.back();
+     if (dfn.vkResetCommandPool(device, command_buffer.pool, 0) != VK_SUCCESS) {
+@@ -6233,6 +6517,18 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
      reg::RB_COLOR_INFO color_info = color_infos[i];
      // Exponent bias is in bits 20:25 of RB_COLOR_INFO.
      int32_t color_exp_bias = color_info.color_exp_bias;
@@ -11642,8 +12735,24 @@ index 001f36b..64a8011 100644
      if (render_target_cache_->GetPath() == RenderTargetCache::Path::kHostRenderTargets &&
          (color_info.color_format == xenos::ColorRenderTargetFormat::k_16_16 &&
               !render_target_cache_->IsFixedRG16TruncatedToMinus1To1() ||
+diff --git a/src/graphics/vulkan/deferred_command_buffer.cpp b/src/graphics/vulkan/deferred_command_buffer.cpp
+index b49e033..3d3ede7 100644
+--- a/src/graphics/vulkan/deferred_command_buffer.cpp
++++ b/src/graphics/vulkan/deferred_command_buffer.cpp
+@@ -266,6 +266,11 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {
+             reinterpret_cast<const uint8_t*>(stream) + sizeof(ArgsVkPushConstants));
+       } break;
+ 
++      case Command::kVkWriteTimestamp: {
++        auto& args = *reinterpret_cast<const ArgsVkWriteTimestamp*>(stream);
++        dfn.vkCmdWriteTimestamp(command_buffer, args.pipeline_stage, args.query_pool, args.query);
++      } break;
++
+       case Command::kVkResetQueryPool: {
+         auto& args = *reinterpret_cast<const ArgsVkResetQueryPool*>(stream);
+         dfn.vkCmdResetQueryPool(command_buffer, args.query_pool, args.first_query,
 diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/render_target_cache.cpp
-index 0298f06..7350754 100644
+index 0298f06..444bf95 100644
 --- a/src/graphics/vulkan/render_target_cache.cpp
 +++ b/src/graphics/vulkan/render_target_cache.cpp
 @@ -10,6 +10,8 @@
@@ -11712,6 +12821,421 @@ index 0298f06..7350754 100644
  
    // Nothing to copy/clear.
    if (!resolve_info.coordinate_info.width_div_8 || !resolve_info.height_div_8) {
+@@ -4546,11 +4574,138 @@ VkPipeline const* VulkanRenderTargetCache::GetTransferPipelines(TransferPipeline
+   return transfer_pipelines_.emplace(key, pipelines).first->second.data();
+ }
+ 
++void VulkanRenderTargetCache::GetGuestClearAttachment(RenderTargetKey key, uint64_t clear_value,
++                                                      VkClearAttachment& attachment) const {
++  attachment.colorAttachment = 0;
++  std::memset(&attachment.clearValue, 0,
++              sizeof(attachment.clearValue));
++  if (key.is_depth) {
++    attachment.aspectMask =
++        VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
++    uint32_t depth_guest_clear_value = (uint32_t(clear_value) >> 8) & 0xFFFFFF;
++    switch (key.GetDepthFormat()) {
++      case xenos::DepthRenderTargetFormat::kD24S8:
++        attachment.clearValue.depthStencil.depth =
++            xenos::UNorm24To32(depth_guest_clear_value);
++        break;
++      case xenos::DepthRenderTargetFormat::kD24FS8:
++        // Taking [0, 2) -> [0, 1) remapping into account.
++        attachment.clearValue.depthStencil.depth =
++            xenos::Float20e4To32(depth_guest_clear_value) * 0.5f;
++        break;
++    }
++    attachment.clearValue.depthStencil.stencil = uint32_t(clear_value) & 0xFF;
++  } else {
++    attachment.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
++    bool dest_color_transfer_is_uint = false;
++    GetColorOwnershipTransferVulkanFormat(
++        key.GetColorFormat(), key.msaa_samples, &dest_color_transfer_is_uint);
++    switch (key.GetColorFormat()) {
++      case xenos::ColorRenderTargetFormat::k_8_8_8_8:
++      case xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA: {
++        for (uint32_t j = 0; j < 4; ++j) {
++          attachment.clearValue.color.float32[j] =
++              ((clear_value >> (j * 8)) & 0xFF) * (1.0f / 0xFF);
++        }
++        if (key.GetColorFormat() == xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA &&
++            gamma_render_target_as_unorm16_) {
++          // 8_8_8_8_GAMMA is represented by linear stored in
++          // R16G16B16A16_UNORM.
++          for (uint32_t j = 0; j < 3; ++j) {
++            attachment.clearValue.color.float32[j] =
++                xenos::PWLGammaToLinear(attachment.clearValue.color.float32[j]);
++          }
++        }
++      } break;
++      case xenos::ColorRenderTargetFormat::k_2_10_10_10:
++      case xenos::ColorRenderTargetFormat::k_2_10_10_10_AS_10_10_10_10: {
++        for (uint32_t j = 0; j < 3; ++j) {
++          attachment.clearValue.color.float32[j] =
++              ((clear_value >> (j * 10)) & 0x3FF) * (1.0f / 0x3FF);
++        }
++        attachment.clearValue.color.float32[3] =
++            ((clear_value >> 30) & 0x3) * (1.0f / 0x3);
++      } break;
++      case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT:
++      case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT_AS_16_16_16_16: {
++        for (uint32_t j = 0; j < 3; ++j) {
++          attachment.clearValue.color.float32[j] =
++              xenos::Float7e3To32((clear_value >> (j * 10)) & 0x3FF);
++        }
++        attachment.clearValue.color.float32[3] =
++            ((clear_value >> 30) & 0x3) * (1.0f / 0x3);
++      } break;
++      case xenos::ColorRenderTargetFormat::k_16_16:
++      case xenos::ColorRenderTargetFormat::k_16_16_FLOAT: {
++        // Using uint for transfers and clears of both. Disregarding the
++        // current -32...32 vs. -1...1 settings for consistency with color
++        // clear via depth aliasing.
++        for (uint32_t j = 0; j < 2; ++j) {
++          uint16_t component = uint16_t((clear_value >> (j * 16)) & 0xFFFF);
++          if (dest_color_transfer_is_uint) {
++            attachment.clearValue.color.uint32[j] = component;
++          } else if (IsColor16FormatFloatLike(key.GetColorFormat())) {
++            attachment.clearValue.color.float32[j] =
++                rex::xenos_half_to_float(component);
++          } else {
++            attachment.clearValue.color.float32[j] =
++                std::max(float(int16_t(component)) * (1.0f / 32767.0f), -1.0f);
++          }
++        }
++      } break;
++      case xenos::ColorRenderTargetFormat::k_16_16_16_16:
++      case xenos::ColorRenderTargetFormat::k_16_16_16_16_FLOAT: {
++        // Using uint for transfers and clears of both. Disregarding the
++        // current -32...32 vs. -1...1 settings for consistency with color
++        // clear via depth aliasing.
++        for (uint32_t j = 0; j < 4; ++j) {
++          uint16_t component = uint16_t((clear_value >> (j * 16)) & 0xFFFF);
++          if (dest_color_transfer_is_uint) {
++            attachment.clearValue.color.uint32[j] = component;
++          } else if (IsColor16FormatFloatLike(key.GetColorFormat())) {
++            attachment.clearValue.color.float32[j] =
++                rex::xenos_half_to_float(component);
++          } else {
++            attachment.clearValue.color.float32[j] =
++                std::max(float(int16_t(component)) * (1.0f / 32767.0f), -1.0f);
++          }
++        }
++      } break;
++      case xenos::ColorRenderTargetFormat::k_32_FLOAT: {
++        uint32_t component = uint32_t(clear_value);
++        if (dest_color_transfer_is_uint) {
++          // Using uint for proper denormal and NaN handling.
++          attachment.clearValue.color.uint32[0] = component;
++        } else {
++          std::memcpy(&attachment.clearValue.color.float32[0], &component,
++                      sizeof(component));
++        }
++      } break;
++      case xenos::ColorRenderTargetFormat::k_32_32_FLOAT: {
++        uint32_t component_0 = uint32_t(clear_value);
++        uint32_t component_1 = uint32_t(clear_value >> 32);
++        if (dest_color_transfer_is_uint) {
++          // Using uint for proper denormal and NaN handling.
++          attachment.clearValue.color.uint32[0] = component_0;
++          attachment.clearValue.color.uint32[1] = component_1;
++        } else {
++          std::memcpy(&attachment.clearValue.color.float32[0], &component_0,
++                      sizeof(component_0));
++          std::memcpy(&attachment.clearValue.color.float32[1], &component_1,
++                      sizeof(component_1));
++        }
++      } break;
++    }
++  }
++}
++
+ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
+     uint32_t render_target_count, RenderTarget* const* render_targets,
+     const std::vector<Transfer>* render_target_transfers,
+     const uint64_t* render_target_resolve_clear_values,
+     const Transfer::Rectangle* resolve_clear_rectangle) {
++  VulkanCommandProcessor::GpuProfileScope gpu_profile_scope(
++      command_processor_, VulkanCommandProcessor::GpuProfileCategory::kTransfer);
+   assert_true(GetPath() == Path::kHostRenderTargets);
+ 
+   const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
+@@ -4681,7 +4836,8 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
+     bool dest_used_previously_as_source = false;
+     for (uint32_t j = 0; j < i; ++j) {
+       for (const Transfer& previous_transfer : render_target_transfers[j]) {
+-        if (previous_transfer.source == dest_rt || previous_transfer.host_depth_source == dest_rt) {
++        if ((!previous_transfer.is_clear && previous_transfer.source == dest_rt) ||
++            previous_transfer.host_depth_source == dest_rt) {
+           dest_used_previously_as_source = true;
+           break;
+         }
+@@ -4707,6 +4863,9 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
+     // Transition the sources, only if not going to be used as destinations
+     // earlier.
+     for (const Transfer& transfer : dest_transfers) {
++      if (transfer.is_clear) {
++        continue;
++      }
+       bool source_previously_used_as_dest = false;
+       bool host_depth_source_previously_used_as_dest = false;
+       for (uint32_t j = 0; j < i; ++j) {
+@@ -4774,8 +4933,8 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
+       continue;
+     }
+ 
+-    const std::vector<Transfer>& current_transfers = render_target_transfers[i];
+-    if (current_transfers.empty() && !resolve_clear_needed) {
++    const std::vector<Transfer>& all_transfers = render_target_transfers[i];
++    if (all_transfers.empty() && !resolve_clear_needed) {
+       continue;
+     }
+ 
+@@ -4836,6 +4995,48 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
+     VkImageView transfer_dest_view = dest_rt_key.is_depth ? dest_vulkan_rt.view_depth_stencil()
+                                                           : dest_vulkan_rt.view_color_transfer();
+ 
++    // Transfers from ranges that only hold a resolve clear value are done as
++    // clears; the rest are copied below.
++    const std::vector<Transfer>* copy_transfers = &all_transfers;
++    if (std::any_of(all_transfers.begin(), all_transfers.end(),
++                    [](const Transfer& transfer) { return transfer.is_clear; })) {
++      copy_transfers_temp_.clear();
++      for (const Transfer& transfer : all_transfers) {
++        if (!transfer.is_clear) {
++          copy_transfers_temp_.push_back(transfer);
++          continue;
++        }
++        Transfer::Rectangle clear_rectangles[Transfer::kMaxRectanglesWithCutout];
++        uint32_t clear_rectangle_count = transfer.GetRectangles(
++            dest_rt_key.base_tiles, dest_rt_key.pitch_tiles_at_32bpp, dest_rt_key.msaa_samples,
++            dest_rt_key.Is64bpp(), clear_rectangles, resolve_clear_rectangle);
++        if (!clear_rectangle_count) {
++          continue;
++        }
++        VkClearRect clear_rects[Transfer::kMaxRectanglesWithCutout];
++        for (uint32_t j = 0; j < clear_rectangle_count; ++j) {
++          clear_rects[j].rect.offset.x =
++              int32_t(clear_rectangles[j].x_pixels * draw_resolution_scale_x());
++          clear_rects[j].rect.offset.y =
++              int32_t(clear_rectangles[j].y_pixels * draw_resolution_scale_y());
++          clear_rects[j].rect.extent.width =
++              clear_rectangles[j].width_pixels * draw_resolution_scale_x();
++          clear_rects[j].rect.extent.height =
++              clear_rectangles[j].height_pixels * draw_resolution_scale_y();
++          clear_rects[j].baseArrayLayer = 0;
++          clear_rects[j].layerCount = 1;
++        }
++        VkClearAttachment clear_attachment;
++        GetGuestClearAttachment(dest_rt_key, transfer.clear_value, clear_attachment);
++        command_processor_.SubmitBarriersAndEnterRenderTargetCacheRenderPass(
++            transfer_render_pass, transfer_framebuffer, transfer_dest_view, dest_rt_key.is_depth);
++        command_buffer.CmdVkClearAttachments(1, &clear_attachment, clear_rectangle_count,
++                                             clear_rects);
++      }
++      copy_transfers = &copy_transfers_temp_;
++    }
++    const std::vector<Transfer>& current_transfers = *copy_transfers;
++
+     if (!current_transfers.empty()) {
+       uint32_t dest_pitch_tiles = dest_rt_key.GetPitchTiles();
+       bool dest_is_64bpp = dest_rt_key.Is64bpp();
+@@ -5280,128 +5481,8 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
+       command_processor_.SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+           transfer_render_pass, transfer_framebuffer, transfer_dest_view, dest_rt_key.is_depth);
+       VkClearAttachment resolve_clear_attachment;
+-      resolve_clear_attachment.colorAttachment = 0;
+-      std::memset(&resolve_clear_attachment.clearValue, 0,
+-                  sizeof(resolve_clear_attachment.clearValue));
+-      uint64_t clear_value = render_target_resolve_clear_values[i];
+-      if (dest_rt_key.is_depth) {
+-        resolve_clear_attachment.aspectMask =
+-            VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+-        uint32_t depth_guest_clear_value = (uint32_t(clear_value) >> 8) & 0xFFFFFF;
+-        switch (dest_rt_key.GetDepthFormat()) {
+-          case xenos::DepthRenderTargetFormat::kD24S8:
+-            resolve_clear_attachment.clearValue.depthStencil.depth =
+-                xenos::UNorm24To32(depth_guest_clear_value);
+-            break;
+-          case xenos::DepthRenderTargetFormat::kD24FS8:
+-            // Taking [0, 2) -> [0, 1) remapping into account.
+-            resolve_clear_attachment.clearValue.depthStencil.depth =
+-                xenos::Float20e4To32(depth_guest_clear_value) * 0.5f;
+-            break;
+-        }
+-        resolve_clear_attachment.clearValue.depthStencil.stencil = uint32_t(clear_value) & 0xFF;
+-      } else {
+-        resolve_clear_attachment.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+-        bool dest_color_transfer_is_uint = false;
+-        GetColorOwnershipTransferVulkanFormat(
+-            dest_rt_key.GetColorFormat(), dest_rt_key.msaa_samples, &dest_color_transfer_is_uint);
+-        switch (dest_rt_key.GetColorFormat()) {
+-          case xenos::ColorRenderTargetFormat::k_8_8_8_8:
+-          case xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA: {
+-            for (uint32_t j = 0; j < 4; ++j) {
+-              resolve_clear_attachment.clearValue.color.float32[j] =
+-                  ((clear_value >> (j * 8)) & 0xFF) * (1.0f / 0xFF);
+-            }
+-            if (dest_rt_key.GetColorFormat() == xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA &&
+-                gamma_render_target_as_unorm16_) {
+-              // 8_8_8_8_GAMMA is represented by linear stored in
+-              // R16G16B16A16_UNORM.
+-              for (uint32_t j = 0; j < 3; ++j) {
+-                resolve_clear_attachment.clearValue.color.float32[j] =
+-                    xenos::PWLGammaToLinear(resolve_clear_attachment.clearValue.color.float32[j]);
+-              }
+-            }
+-          } break;
+-          case xenos::ColorRenderTargetFormat::k_2_10_10_10:
+-          case xenos::ColorRenderTargetFormat::k_2_10_10_10_AS_10_10_10_10: {
+-            for (uint32_t j = 0; j < 3; ++j) {
+-              resolve_clear_attachment.clearValue.color.float32[j] =
+-                  ((clear_value >> (j * 10)) & 0x3FF) * (1.0f / 0x3FF);
+-            }
+-            resolve_clear_attachment.clearValue.color.float32[3] =
+-                ((clear_value >> 30) & 0x3) * (1.0f / 0x3);
+-          } break;
+-          case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT:
+-          case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT_AS_16_16_16_16: {
+-            for (uint32_t j = 0; j < 3; ++j) {
+-              resolve_clear_attachment.clearValue.color.float32[j] =
+-                  xenos::Float7e3To32((clear_value >> (j * 10)) & 0x3FF);
+-            }
+-            resolve_clear_attachment.clearValue.color.float32[3] =
+-                ((clear_value >> 30) & 0x3) * (1.0f / 0x3);
+-          } break;
+-          case xenos::ColorRenderTargetFormat::k_16_16:
+-          case xenos::ColorRenderTargetFormat::k_16_16_FLOAT: {
+-            // Using uint for transfers and clears of both. Disregarding the
+-            // current -32...32 vs. -1...1 settings for consistency with color
+-            // clear via depth aliasing.
+-            for (uint32_t j = 0; j < 2; ++j) {
+-              uint16_t component = uint16_t((clear_value >> (j * 16)) & 0xFFFF);
+-              if (dest_color_transfer_is_uint) {
+-                resolve_clear_attachment.clearValue.color.uint32[j] = component;
+-              } else if (IsColor16FormatFloatLike(dest_rt_key.GetColorFormat())) {
+-                resolve_clear_attachment.clearValue.color.float32[j] =
+-                    rex::xenos_half_to_float(component);
+-              } else {
+-                resolve_clear_attachment.clearValue.color.float32[j] =
+-                    std::max(float(int16_t(component)) * (1.0f / 32767.0f), -1.0f);
+-              }
+-            }
+-          } break;
+-          case xenos::ColorRenderTargetFormat::k_16_16_16_16:
+-          case xenos::ColorRenderTargetFormat::k_16_16_16_16_FLOAT: {
+-            // Using uint for transfers and clears of both. Disregarding the
+-            // current -32...32 vs. -1...1 settings for consistency with color
+-            // clear via depth aliasing.
+-            for (uint32_t j = 0; j < 4; ++j) {
+-              uint16_t component = uint16_t((clear_value >> (j * 16)) & 0xFFFF);
+-              if (dest_color_transfer_is_uint) {
+-                resolve_clear_attachment.clearValue.color.uint32[j] = component;
+-              } else if (IsColor16FormatFloatLike(dest_rt_key.GetColorFormat())) {
+-                resolve_clear_attachment.clearValue.color.float32[j] =
+-                    rex::xenos_half_to_float(component);
+-              } else {
+-                resolve_clear_attachment.clearValue.color.float32[j] =
+-                    std::max(float(int16_t(component)) * (1.0f / 32767.0f), -1.0f);
+-              }
+-            }
+-          } break;
+-          case xenos::ColorRenderTargetFormat::k_32_FLOAT: {
+-            uint32_t component = uint32_t(clear_value);
+-            if (dest_color_transfer_is_uint) {
+-              // Using uint for proper denormal and NaN handling.
+-              resolve_clear_attachment.clearValue.color.uint32[0] = component;
+-            } else {
+-              std::memcpy(&resolve_clear_attachment.clearValue.color.float32[0], &component,
+-                          sizeof(component));
+-            }
+-          } break;
+-          case xenos::ColorRenderTargetFormat::k_32_32_FLOAT: {
+-            uint32_t component_0 = uint32_t(clear_value);
+-            uint32_t component_1 = uint32_t(clear_value >> 32);
+-            if (dest_color_transfer_is_uint) {
+-              // Using uint for proper denormal and NaN handling.
+-              resolve_clear_attachment.clearValue.color.uint32[0] = component_0;
+-              resolve_clear_attachment.clearValue.color.uint32[1] = component_1;
+-            } else {
+-              std::memcpy(&resolve_clear_attachment.clearValue.color.float32[0], &component_0,
+-                          sizeof(component_0));
+-              std::memcpy(&resolve_clear_attachment.clearValue.color.float32[1], &component_1,
+-                          sizeof(component_1));
+-            }
+-          } break;
+-        }
+-      }
++      GetGuestClearAttachment(dest_rt_key, render_target_resolve_clear_values[i],
++                              resolve_clear_attachment);
+       command_buffer.CmdVkClearAttachments(1, &resolve_clear_attachment, 1, &resolve_clear_rect);
+     }
+   }
+diff --git a/src/graphics/vulkan/texture_cache.cpp b/src/graphics/vulkan/texture_cache.cpp
+index ecbd940..c8318dc 100644
+--- a/src/graphics/vulkan/texture_cache.cpp
++++ b/src/graphics/vulkan/texture_cache.cpp
+@@ -1215,6 +1215,8 @@ bool VulkanTextureCache::EnsureScaledResolveMemoryCommitted(uint32_t start_unsca
+ 
+ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture, bool load_base,
+                                                                bool load_mips) {
++  VulkanCommandProcessor::GpuProfileScope gpu_profile_scope(
++      command_processor_, VulkanCommandProcessor::GpuProfileCategory::kTextureLoad);
+   VulkanTexture& vulkan_texture = static_cast<VulkanTexture&>(texture);
+   TextureKey texture_key = vulkan_texture.key();
+ 
+diff --git a/src/input/input_system.cpp b/src/input/input_system.cpp
+index 813bb1c..89f6441 100644
+--- a/src/input/input_system.cpp
++++ b/src/input/input_system.cpp
+@@ -55,6 +55,7 @@ void InputSystem::Shutdown() {
+ }
+ 
+ void InputSystem::AddDriver(std::unique_ptr<InputDriver> driver) {
++  std::lock_guard<std::mutex> lock(mutex_);
+   drivers_.push_back(std::move(driver));
+ }
+ 
+@@ -72,6 +73,7 @@ void InputSystem::SetActiveCallback(std::function<bool()> callback) {
+ }
+ 
+ void InputSystem::SetDeviceAssignment(std::unique_ptr<DeviceAssignment> assignment) {
++  std::lock_guard<std::mutex> lock(mutex_);
+   assignment_ = std::move(assignment);
+   if (assignment_) {
+     assignment_->OnDevicesChanged(devices_);
+@@ -187,6 +189,7 @@ const DeviceInfo* InputSystem::DeviceInfoFor(DeviceId id) const {
+ X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
+                                       X_INPUT_CAPABILITIES* out_caps) {
+   SCOPE_profile_cpu_f("hid");
++  std::lock_guard<std::mutex> lock(mutex_);
+   if (!out_caps || !assignment_) {
+     return X_ERROR_DEVICE_NOT_CONNECTED;
+   }
+@@ -214,6 +217,7 @@ X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
+ 
+ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
+   SCOPE_profile_cpu_f("hid");
++  std::lock_guard<std::mutex> lock(mutex_);
+   if (!assignment_) {
+     return X_ERROR_DEVICE_NOT_CONNECTED;
+   }
+@@ -253,6 +257,7 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
+ 
+ X_RESULT InputSystem::SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration) {
+   SCOPE_profile_cpu_f("hid");
++  std::lock_guard<std::mutex> lock(mutex_);
+   if (!assignment_) {
+     return X_ERROR_DEVICE_NOT_CONNECTED;
+   }
+@@ -295,6 +300,7 @@ X_RESULT InputSystem::SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration
+ X_RESULT InputSystem::GetKeystroke(uint32_t user_index, uint32_t flags,
+                                    X_INPUT_KEYSTROKE* out_keystroke) {
+   SCOPE_profile_cpu_f("hid");
++  std::lock_guard<std::mutex> lock(mutex_);
+   if (!assignment_) {
+     return X_ERROR_DEVICE_NOT_CONNECTED;
+   }
 diff --git a/src/input/mnk/mnk_input_driver.cpp b/src/input/mnk/mnk_input_driver.cpp
 index 3f9422d..02bcc4b 100644
 --- a/src/input/mnk/mnk_input_driver.cpp
@@ -11878,6 +13402,39 @@ index 3f9422d..02bcc4b 100644
    if (keystroke_queue_.empty()) {
      return X_ERROR_EMPTY;
    }
+diff --git a/src/system/xmemory.cpp b/src/system/xmemory.cpp
+index 76cc877..7d86c07 100644
+--- a/src/system/xmemory.cpp
++++ b/src/system/xmemory.cpp
+@@ -161,7 +161,14 @@ bool Memory::Initialize() {
+   // Attempt to create our views. This may fail at the first address
+   // we pick, so try a few times.
+   mapping_base_ = 0;
+-  for (size_t n = 32; n < 64; n++) {
++#if defined(__SANITIZE_ADDRESS__) || (defined(__has_feature) && __has_feature(address_sanitizer))
++  // AddressSanitizer's shadow memory spans up to 0x10007FFF7FFF and the views
++  // are mapped with MAP_FIXED, which would silently replace it.
++  constexpr size_t kFirstMappingBaseLog2 = 45;
++#else
++  constexpr size_t kFirstMappingBaseLog2 = 32;
++#endif
++  for (size_t n = kFirstMappingBaseLog2; n < 64; n++) {
+     auto mapping_base = reinterpret_cast<uint8_t*>(1ull << n);
+     if (!MapViews(mapping_base)) {
+       mapping_base_ = mapping_base;
+diff --git a/src/ui/vulkan/vulkan_device.cpp b/src/ui/vulkan/vulkan_device.cpp
+index 8197bb4..700a70b 100644
+--- a/src/ui/vulkan/vulkan_device.cpp
++++ b/src/ui/vulkan/vulkan_device.cpp
+@@ -607,6 +607,8 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+   XE_UI_VULKAN_LIMIT(maxFragmentInputComponents)
+   XE_UI_VULKAN_LIMIT(maxFragmentCombinedOutputResources)
+   XE_UI_VULKAN_LIMIT(maxSamplerAnisotropy)
++  XE_UI_VULKAN_LIMIT(timestampPeriod)
++  XE_UI_VULKAN_LIMIT(timestampComputeAndGraphics)
+   XE_UI_VULKAN_LIMIT(maxViewportDimensions[0])
+   XE_UI_VULKAN_LIMIT(maxViewportDimensions[1])
+   XE_UI_VULKAN_LIMIT(minUniformBufferOffsetAlignment)
 diff --git a/src/ui/vulkan/vulkan_instance.cpp b/src/ui/vulkan/vulkan_instance.cpp
 index 914b311..69e65ba 100644
 --- a/src/ui/vulkan/vulkan_instance.cpp

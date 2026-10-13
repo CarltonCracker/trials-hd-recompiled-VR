@@ -2,7 +2,6 @@
 
 #include "virtual_pad.h"
 
-#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -55,6 +54,16 @@ void Apply(SDL_Joystick* joystick, const std::string& line,
     // Diagnostics: with --readback_resolve=full, dump every resolve of the next
     // frame (see dump_resolves_frame / dump_resolves_dir in the SDK).
     rex::cvar::SetFlagByName("dump_resolves_frame", "-2");
+    return;
+  }
+  if (line.rfind("set ", 0) == 0) {
+    // Diagnostics / benchmarks: change a cvar at runtime ("set vsync false").
+    std::istringstream args(line.substr(4));
+    std::string cvar, cvar_value;
+    if (args >> cvar >> cvar_value) {
+      rex::cvar::SetFlagByName(cvar, cvar_value);
+      REXLOG_INFO("Virtual pad: {} = {}", cvar, rex::cvar::GetFlagByName(cvar));
+    }
     return;
   }
   if (line.rfind("capture ", 0) == 0) {
