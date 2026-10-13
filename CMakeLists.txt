@@ -58,6 +58,7 @@ set(TRIALSHD_SOURCES
     src/fallback_audio.cpp
     src/graphics_settings.cpp
     src/main_menu.cpp
+    src/gpu_wait.cpp
     src/package_license.cpp
     src/virtual_pad.cpp
 )
