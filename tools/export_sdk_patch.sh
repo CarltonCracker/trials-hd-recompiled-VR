@@ -35,6 +35,9 @@ commit by CMake at configure time; regenerate with tools/export_sdk_patch.sh).
 - render targets: elide_rt_transfers (ownership transfers of resolve-cleared
   ranges become clears; transfers fully overwritten by Direct3D 9 clear
   rectangles are dropped), execute_unclipped_draw_vs_on_cpu on by default
+- frame generation (frame_generation): a motion-interpolated frame between
+  each pair of game frames, presented by the swap (shaders in
+  src/graphics/shaders/framegen)
 - input: serialize InputSystem (device list rebuilt concurrently by several
   guest threads - heap corruption)
 - build: REXGLUE_OUTPUT_DIR; guest memory mapped above AddressSanitizer's

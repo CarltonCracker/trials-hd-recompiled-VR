@@ -112,6 +112,28 @@ void ApplyStartupGraphicsSettings() {
   rex::cvar::SetFlagByName("vulkan_allow_present_mode_mailbox", allow);
 }
 
+// Frame generation presents two frames per game frame. With vsync, that only
+// works on displays refreshing at about twice the game's 60 FPS - on slower
+// ones the presents would block and slow the whole game down.
+bool UpdateFrameGenerationDisplayOk() {
+  bool ok = !REXCVAR_GET(host_vsync);
+  if (!ok) {
+    SDL_Window* window = FindGameWindow();
+    SDL_DisplayID display = window ? SDL_GetDisplayForWindow(window) : SDL_GetPrimaryDisplay();
+    const SDL_DisplayMode* mode = display ? SDL_GetCurrentDisplayMode(display) : nullptr;
+    ok = mode && mode->refresh_rate >= 110.0f;
+  }
+  static int last_ok = -1;
+  if (int(ok) != last_ok) {
+    last_ok = int(ok);
+    REXLOG_INFO("Frame generation: {} (vsync {})",
+                ok ? "usable on this display" : "off, the display refreshes below 120 Hz",
+                REXCVAR_GET(host_vsync) ? "on" : "off");
+  }
+  rex::cvar::SetFlagByName("frame_generation_display_ok", ok ? "true" : "false");
+  return ok;
+}
+
 void ApplyDisplayMode() {
   if (g_startup_render_scale.empty()) {
     g_startup_render_scale = rex::cvar::GetFlagByName("draw_resolution_scale_x");
@@ -120,6 +142,7 @@ void ApplyDisplayMode() {
   if (!window) {
     return;
   }
+  UpdateFrameGenerationDisplayOk();
   const int w = REXCVAR_GET(display_width);
   const int h = REXCVAR_GET(display_height);
   if (GetBool("fullscreen")) {
@@ -304,6 +327,24 @@ void GraphicsSettingsDialog::OnDraw(ImGuiIO& io) {
     ImGui::SetTooltip(
         "Caps how often frames reach the screen. Trials HD always runs its\n"
         "simulation at 60 steps per second, so this never changes game speed.");
+  }
+
+  // Frame generation (presentation only, the game still simulates at 60 Hz)
+  bool frame_generation = rex::cvar::GetFlagByName("frame_generation") == "true";
+  label("Frame Generation");
+  if (ImGui::Checkbox("##framegen", &frame_generation)) {
+    rex::cvar::SetFlagByName("frame_generation", frame_generation ? "true" : "false");
+  }
+  bool frame_generation_display_ok = UpdateFrameGenerationDisplayOk();
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip(
+        "Shows a generated frame between every two game frames: 120 FPS on\n"
+        "screen while the game and its physics keep running at 60. Needs a\n"
+        "120 Hz or faster display with VSync on. Adds about one frame of latency.");
+  }
+  if (frame_generation && !frame_generation_display_ok) {
+    ImGui::SameLine();
+    ImGui::TextDisabled("(needs a 120 Hz+ display)");
   }
 
   // VSync

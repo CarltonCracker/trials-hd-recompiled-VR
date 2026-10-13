@@ -30,7 +30,8 @@ def main():
     pattern = re.compile(r"guest fps: ([\d.]+) draws/frame: ([\d.]+) resolves/frame: ([\d.]+)")
     gpu_pattern = re.compile(
         r"gpu time/frame: ([\d.]+) ms \(draws/other ([\d.]+), resolves ([\d.]+), "
-        r"rt transfers ([\d.]+), texture loads ([\d.]+), swap ([\d.]+)\)")
+        r"rt transfers ([\d.]+), texture loads ([\d.]+), swap ([\d.]+)"
+        r"(?:, frame generation ([\d.]+))?\)")
     samples = []
     gpu_samples = []
     with open(args[0], errors="replace") as f:
@@ -40,10 +41,11 @@ def main():
                 samples.append(tuple(float(v) for v in m.groups()))
             m = gpu_pattern.search(line)
             if m:
-                gpu_samples.append(tuple(float(v) for v in m.groups()))
+                gpu_samples.append(tuple(float(v or 0) for v in m.groups()))
     if gpu_samples:
         window = gpu_samples[-gpu_window:]
-        names = ("total", "draws/other", "resolves", "rt transfers", "texture loads", "swap")
+        names = ("total", "draws/other", "resolves", "rt transfers", "texture loads", "swap",
+                 "frame generation")
         print("gpu ms/frame (median of last {}s): ".format(len(window)) + ", ".join(
             f"{name} {statistics.median(s[i] for s in window):.2f}"
             for i, name in enumerate(names)))
