@@ -63,6 +63,7 @@ set(TRIALSHD_SOURCES
     src/main.cpp
     src/fallback_audio.cpp
     src/graphics_settings.cpp
+    src/fps_unlock.cpp
     src/gpu_wait.cpp
     src/package_license.cpp
     src/virtual_pad.cpp
@@ -110,6 +111,20 @@ add_dependencies(trials_hd trials_hd_stage_libs)
 # imgui::imgui would add a second copy of ImGui's global context.
 target_include_directories(trials_hd PRIVATE
     $<TARGET_PROPERTY:imgui::imgui,INTERFACE_INCLUDE_DIRECTORIES>)
+
+# The SDK forces BUILD_TESTING off; keep project tests independent of that cache entry.
+option(TRIALSHD_BUILD_TESTING "Build project regression tests" ON)
+if(TRIALSHD_BUILD_TESTING)
+    enable_testing()
+    add_executable(frame_clock_test tests/frame_clock_test.cpp)
+    target_include_directories(frame_clock_test PRIVATE src)
+    add_test(NAME frame_clock COMMAND frame_clock_test)
+    find_package(Python3 QUIET COMPONENTS Interpreter)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME fps_log COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_fps_log_test.py)
+    endif()
+endif()
 
 # Development tool: dumps the loaded XEX image for writing codegen overrides.
 add_executable(xex_dump EXCLUDE_FROM_ALL tools/xex_dump/xex_dump.cpp)

@@ -1,10 +1,11 @@
 # GPU benchmark: rides 'Middle Name: Danger' for 25 s while logging GPU time per
-# frame by kind of work (the game itself is paced at 60 FPS, so GPU time per
-# frame is what shows the headroom for higher frame rates):
+# frame by kind of work (fixed updates stay at 60 Hz; rendering is unlocked):
 #   LOG_LEVEL=info INPUT=tests/headless/bench_gpu.txt tools/headless_run.sh 80 \
 #     --vulkan_device=1 --vulkan_headless_surface=true --log_guest_fps=true \
-#     --gpu_profile=true --draw_resolution_scale_x=2 --draw_resolution_scale_y=2
+#     --gpu_profile=true --log_simulation_rate=true --host_vsync=false \
+#     --draw_resolution_scale_x=2 --draw_resolution_scale_y=2
 #   tools/bench_summary.py out/run/trials_hd.log
+#   python3 tests/check_fps_log.py out/run/trials_hd.log
 wait 22
 pad a 1
 wait 0.1

@@ -82,6 +82,13 @@ class TrialsHdApp : public rex::ReXApp {
   }
 
   void OnPostSetup() override {
+    // Guest vblank pacing must not re-cap the independent render loop at 60.
+    // Host VSync still controls tearing; physics is paced by the fixed clock.
+    const bool unlocked = rex::cvar::GetFlagByName("fps_unlock") == "true";
+    rex::cvar::SetFlagByName("present_fps_limit_guest_paced", unlocked ? "true" : "false");
+    if (unlocked) {
+      rex::cvar::SetFlagByName("vsync", "false");
+    }
     // Trials HD's memexport draws (GPU point-list passes) are only consumed by
     // later GPU work. Reading them back to guest memory forces a full CPU/GPU
     // sync per draw and caps gameplay at 15-30 FPS; without it the game holds
@@ -108,14 +115,12 @@ class TrialsHdApp : public rex::ReXApp {
                 rex::cvar::GetFlagByName("readback_resolve_max_bytes"));
 
     // Replaces the SDK's input gate: the game ignores the controller while the
-    // settings menu is open (it navigates the menu instead).
+    // settings menu is open (it navigates the menu instead). Called from game
+    // threads, so it must not touch ImGui (not thread-safe - the SDK's gate
+    // queried ImGui's IO here, racing with the UI thread's frames).
     if (auto* input = static_cast<rex::input::InputSystem*>(runtime()->input_system())) {
       input->SetActiveCallback([this] {
-        if (graphics_settings_.load() || hold_input_until_released_.load()) {
-          return false;
-        }
-        auto* drawer = imgui_drawer();
-        return !drawer || !drawer->GetIO().WantCaptureMouse;
+        return !graphics_settings_.load() && !hold_input_until_released_.load();
       });
     }
     // Test harness only: no-op unless TRIALS_HD_VIRTUAL_PAD is set.

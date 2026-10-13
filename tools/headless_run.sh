@@ -14,7 +14,7 @@ shift || true
 exe="${TRIALS_HD_EXE:-$root/out/build/linux-amd64-relwithdebinfo/trials_hd}"
 out="$root/out/run"
 mkdir -p "$out"
-rm -f "$out"/shot_*.png "$out"/Xvfb_screen0
+rm -f "$out"/shot_*.png "$out"/Xvfb_screen0 "$out"/trials_hd*.log "$out"/stdout.log "$out"/input.log
 
 display=":$((90 + RANDOM % 100))"
 # Scriptable virtual gamepad (src/virtual_pad.cpp), driven by xsend pad/axis lines.
@@ -23,7 +23,9 @@ rm -f "$pad_fifo" && mkfifo "$pad_fifo"
 export TRIALS_HD_VIRTUAL_PAD="$pad_fifo"
 Xvfb "$display" -screen 0 1280x720x24 -fbdir "$out" -nolisten tcp &
 xvfb_pid=$!
-trap 'kill $game_pid $xvfb_pid 2>/dev/null || true' EXIT
+game_pid=""
+input_pid=""
+trap 'kill "$input_pid" "$game_pid" "$xvfb_pid" 2>/dev/null || true' EXIT
 sleep 1
 
 DISPLAY="$display" "$exe" --game_data_root="$root/assets" --log_level="${LOG_LEVEL:-debug}" \
@@ -33,6 +35,7 @@ game_pid=$!
 if [[ -n "${INPUT:-}" ]]; then
   python3 "$root/tools/xsend.py" "$display" "$INPUT" "$out/Xvfb_screen0" "$out" "$pad_fifo" \
     > "$out/input.log" 2>&1 &
+  input_pid=$!
 fi
 
 for ((i = 0; i < secs / 5; i++)); do

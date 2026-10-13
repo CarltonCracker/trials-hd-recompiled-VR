@@ -37,13 +37,13 @@ constexpr int kGuestWidth = 1280;
 constexpr int kGuestHeight = 720;
 constexpr int kMaxRenderScale = 3;
 
-// Presentation caps offered in the menu. The game simulates one 1/60 s step per
-// frame, so these only throttle what reaches the screen, never the game.
-constexpr std::array<int, 4> kFpsLimits = {0, 60, 45, 30};
+// Render caps are independent of the original fixed update clock.
+constexpr std::array<int, 9> kFpsLimits = {0, 240, 165, 144, 120, 90, 60, 45, 30};
 
 // Values in effect since startup, for "restart to apply" notes.
 std::string g_startup_render_scale;
 bool g_startup_vsync = true;
+bool g_startup_fps_unlock = true;
 
 int GetInt(std::string_view name) {
   try {
@@ -105,33 +105,12 @@ constexpr std::array<std::pair<SDL_GamepadButton, ImGuiKey>, 6> kNavButtons = {{
 
 void ApplyStartupGraphicsSettings() {
   g_startup_vsync = REXCVAR_GET(host_vsync);
+  g_startup_fps_unlock = GetBool("fps_unlock");
   // The presenter prefers immediate, then mailbox, then FIFO-relaxed, then FIFO.
   // VSync on removes the tearing / unsynchronized modes from that list.
   const char* allow = g_startup_vsync ? "false" : "true";
   rex::cvar::SetFlagByName("vulkan_allow_present_mode_immediate", allow);
   rex::cvar::SetFlagByName("vulkan_allow_present_mode_mailbox", allow);
-}
-
-// Frame generation presents two frames per game frame. With vsync, that only
-// works on displays refreshing at about twice the game's 60 FPS - on slower
-// ones the presents would block and slow the whole game down.
-bool UpdateFrameGenerationDisplayOk() {
-  bool ok = !REXCVAR_GET(host_vsync);
-  if (!ok) {
-    SDL_Window* window = FindGameWindow();
-    SDL_DisplayID display = window ? SDL_GetDisplayForWindow(window) : SDL_GetPrimaryDisplay();
-    const SDL_DisplayMode* mode = display ? SDL_GetCurrentDisplayMode(display) : nullptr;
-    ok = mode && mode->refresh_rate >= 110.0f;
-  }
-  static int last_ok = -1;
-  if (int(ok) != last_ok) {
-    last_ok = int(ok);
-    REXLOG_INFO("Frame generation: {} (vsync {})",
-                ok ? "usable on this display" : "off, the display refreshes below 120 Hz",
-                REXCVAR_GET(host_vsync) ? "on" : "off");
-  }
-  rex::cvar::SetFlagByName("frame_generation_display_ok", ok ? "true" : "false");
-  return ok;
 }
 
 void ApplyDisplayMode() {
@@ -142,7 +121,6 @@ void ApplyDisplayMode() {
   if (!window) {
     return;
   }
-  UpdateFrameGenerationDisplayOk();
   const int w = REXCVAR_GET(display_width);
   const int h = REXCVAR_GET(display_height);
   if (GetBool("fullscreen")) {
@@ -311,7 +289,14 @@ void GraphicsSettingsDialog::OnDraw(ImGuiIO& io) {
   restart_note(!g_startup_render_scale.empty() &&
                rex::cvar::GetFlagByName("draw_resolution_scale_x") != g_startup_render_scale);
 
-  // FPS limit (presentation cap)
+  bool fps_unlock = GetBool("fps_unlock");
+  label("Unlock FPS");
+  if (ImGui::Checkbox("##unlock", &fps_unlock)) {
+    rex::cvar::SetFlagByName("fps_unlock", fps_unlock ? "true" : "false");
+  }
+  restart_note(fps_unlock != g_startup_fps_unlock);
+
+  // FPS limit (real render cap)
   const int fps = GetInt("present_fps_limit");
   auto fps_label = [](int f) { return f > 0 ? fmt::format("{} FPS", f) : std::string("Unlimited"); };
   label("FPS Limit");
@@ -325,26 +310,9 @@ void GraphicsSettingsDialog::OnDraw(ImGuiIO& io) {
   }
   if (ImGui::IsItemHovered()) {
     ImGui::SetTooltip(
-        "Caps how often frames reach the screen. Trials HD always runs its\n"
-        "simulation at 60 steps per second, so this never changes game speed.");
-  }
-
-  // Frame generation (presentation only, the game still simulates at 60 Hz)
-  bool frame_generation = rex::cvar::GetFlagByName("frame_generation") == "true";
-  label("Frame Generation");
-  if (ImGui::Checkbox("##framegen", &frame_generation)) {
-    rex::cvar::SetFlagByName("frame_generation", frame_generation ? "true" : "false");
-  }
-  bool frame_generation_display_ok = UpdateFrameGenerationDisplayOk();
-  if (ImGui::IsItemHovered()) {
-    ImGui::SetTooltip(
-        "Shows a generated frame between every two game frames: 120 FPS on\n"
-        "screen while the game and its physics keep running at 60. Needs a\n"
-        "120 Hz or faster display with VSync on. Adds about one frame of latency.");
-  }
-  if (frame_generation && !frame_generation_display_ok) {
-    ImGui::SameLine();
-    ImGui::TextDisabled("(needs a 120 Hz+ display)");
+        "Caps real rendered frames. With Unlock FPS enabled, physics keeps\n"
+        "its original fixed tick independently of this cap. VSync can also\n"
+        "limit rendering to your display refresh rate.");
   }
 
   // VSync

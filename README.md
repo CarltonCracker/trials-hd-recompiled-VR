@@ -10,8 +10,9 @@ against a native runtime (kernel HLE, Vulkan GPU backend, SDL input/audio).
 > your own copy. The C++ in `generated/` is produced on your machine from your own
 > `default.xex` during the build, and must not be redistributed.
 
-Status: **playable with a controller** at a steady **60 FPS at 1440p on an RX 6600**
-(menus and gameplay, measured headless — see *Testing* below). Audio output is untested.
+Status: **playable with a controller**, with **unlocked real rendering** and the
+original ~60 Hz simulation. Headless RX 6600 gameplay checks pass at 30, 60 and
+120 render FPS — see *Testing* below. Audio output is untested.
 Linux (x86-64) is the only supported target for now.
 
 ## Requirements
@@ -92,13 +93,29 @@ graphics menu. It is navigated with the D-pad / left stick, A and B.
 | Display Mode | Windowed or fullscreen (applies immediately) |
 | Resolution | Window size, or the fullscreen display mode; *Desktop* = borderless at desktop resolution |
 | Render Resolution | Internal resolution: 1280x720, 2560x1440 or 3840x2160 (restart to apply) |
-| FPS Limit | Caps frames presented to the screen. Trials HD advances its simulation by a fixed 1/60 s per frame, so this never changes game speed |
+| Unlock FPS | Independent real rendering with the original fixed physics tick (on by default; restart to apply) |
+| FPS Limit | Unlimited, 240, 165, 144, 120, 90, 60, 45 or 30 real rendered frames per second; independent of physics with Unlock FPS enabled |
 | VSync | Tear-free presentation (restart to apply) |
 
 **Save** writes the settings to `trials_hd.toml` next to the executable. They are
 ordinary settings, so they also work on the command line, e.g.
 `--display_width=1920 --display_height=1080 --draw_resolution_scale_x=2
 --draw_resolution_scale_y=2 --present_fps_limit=60 --host_vsync=false`.
+
+### FPS unlock
+
+`--fps_unlock=true --present_fps_limit=0 --host_vsync=false` enables uncapped
+real rendering. VSync can still limit output to the display refresh rate.
+`--fps_unlock=false` restores the original game loop for comparison.
+
+The patch in `src/fps_unlock.cpp` replaces the game's combined frame gate and
+separates its update-worker and render-worker synchronization. Game updates keep
+the original **16,666 µs fixed step**, including the original five-step hitch
+limit; the physics timestep is not divided by the render rate. No optical-flow
+frames, framebuffer interpolation, or duplicated presentations are used.
+Physics-driven transforms still change on fixed ticks; this patch does not add
+sub-tick transform interpolation. Long stalls beyond the five-step catch-up
+budget can still lose simulation time, as in the original game.
 
 ### Main menu
 
@@ -114,7 +131,7 @@ one with `--vulkan_device=N` (the device list is printed at startup).
 `readback_memexport` defaults to `false` in this port. Trials HD's memexport passes
 (GPU point-list draws used by its effects) are only consumed by later GPU work; reading
 them back into guest memory forced a full CPU/GPU sync per draw and held gameplay at
-15–30 FPS. Without it the game holds 60 FPS. Set `readback_memexport = true` in
+15–30 FPS. Disabling it avoids that readback penalty. Set `readback_memexport = true` in
 `trials_hd.toml` to restore the SDK default.
 
 ## Testing
@@ -130,10 +147,35 @@ LOG_LEVEL=info INPUT=tests/headless/ride_middle_name_danger.txt tools/headless_r
   --vulkan_device=1 --vulkan_headless_surface=true --log_guest_fps=true \
   --draw_resolution_scale_x=2 --draw_resolution_scale_y=2
 grep "guest fps" out/run/trials_hd*.log
+
+# Timing regression test: run the same ride at 30, 60, 120 and unlimited FPS.
+# Activate the local Python environment first if Pillow / python-xlib are there.
+LOG_LEVEL=info INPUT=tests/headless/ride_middle_name_danger.txt tools/headless_run.sh 85 \
+  --vulkan_device=1 --vulkan_headless_surface=true --host_vsync=false \
+  --present_fps_limit=120 --log_guest_fps=true --log_simulation_rate=true
+python3 tests/check_fps_log.py out/run/trials_hd.log 120
+ctest --test-dir out/build/linux-amd64-relwithdebinfo --no-tests=error --output-on-failure
 ```
 
 Frames captured by a script's `capture <name>` lines (taken from the game's own output,
 so they work with the headless surface) land in `out/run/<name>.png`.
+
+Verified on Linux with an RX 6600, headless Vulkan with 1280×720 captured output,
+host VSync off, and an 85-second scripted ride on *Middle Name: Danger*:
+
+| Render limit | Median real GPU swaps/sec | Mean fixed updates/sec |
+| --- | ---: | ---: |
+| 30 | 30.0 | 60.00 |
+| 60 | 60.0 | 60.07 |
+| 120 | 120.0 | 60.05 |
+| Unlimited | 203.9 | 59.95 |
+
+These are the last 15 logged samples, with positive game draws and resolves in
+every sample. Gameplay captures show normal race-timer progression, riding,
+explosions and crashes; an original-loop 60-FPS run provides the baseline.
+This is a one-track smoke test, not bit-identical replay or full-track coverage.
+Audio uses the silent fallback in this environment. Startup heap-release warnings
+also occur with the original loop; no guest access violations occurred in these runs.
 
 ## Layout
 
@@ -142,7 +184,7 @@ so they work with the headless surface) land in `out/run/<name>.png`.
 | `trials_hd_manifest.toml` | Codegen manifest |
 | `config/codegen.toml` | Codegen settings (CRT `setjmp`/`longjmp` addresses) |
 | `config/functions.toml` | Function starts the analyzer misses (addresses only) |
-| `src/` | Host-side app code: asset path lookup, GPU plugin default, audio fallback |
+| `src/` | Host-side app code: asset path lookup, GPU plugin default, audio fallback, fixed-tick FPS unlock |
 | `generated/rexglue.cmake` | SDK build glue (from `rexglue init`) |
 | `generated/default/` | Recompiled game code; generated at build time, gitignored |
 | `thirdparty/rexglue-sdk` | ReXGlue SDK (git submodule) |

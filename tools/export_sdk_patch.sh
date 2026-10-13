@@ -18,6 +18,7 @@ commit by CMake at configure time; regenerate with tools/export_sdk_patch.sh).
 
 - input/mnk: synthesize XamInputGetKeystroke events from bound keys
 - vulkan command processor: host presentation FPS cap (present_fps_limit),
+  bypassed when the game loop already paces real frames (present_fps_limit_guest_paced),
   guest FPS / draws / resolves per frame logging (log_guest_fps),
   render target / resolve format logging (log_render_formats)
 - core: unlink the guest memory shm right after creating it (no leaks on crash)
@@ -35,9 +36,6 @@ commit by CMake at configure time; regenerate with tools/export_sdk_patch.sh).
 - render targets: elide_rt_transfers (ownership transfers of resolve-cleared
   ranges become clears; transfers fully overwritten by Direct3D 9 clear
   rectangles are dropped), execute_unclipped_draw_vs_on_cpu on by default
-- frame generation (frame_generation): a motion-interpolated frame between
-  each pair of game frames, presented by the swap (shaders in
-  src/graphics/shaders/framegen)
 - input: serialize InputSystem (device list rebuilt concurrently by several
   guest threads - heap corruption)
 - build: REXGLUE_OUTPUT_DIR; guest memory mapped above AddressSanitizer's
