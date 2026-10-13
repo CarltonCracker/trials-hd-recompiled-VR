@@ -12,8 +12,7 @@ against a native runtime (kernel HLE, Vulkan GPU backend, SDL input/audio).
 
 Status: **playable with a controller** at a steady **60 FPS at 1440p on an RX 6600**
 (menus and gameplay, measured headless — see *Testing* below). Audio output is untested.
-Linux (x86-64) is the only supported target for now; a native WebGPU renderer is in
-development ([docs/webgpu-renderer.md](docs/webgpu-renderer.md)).
+Linux (x86-64) is the only supported target for now.
 
 ## Requirements
 
@@ -57,22 +56,6 @@ cmake --build out/build/linux-amd64-relwithdebinfo -j$(nproc)
 
 The first build runs `rexglue codegen` on `assets/default.xex` (a few seconds) and
 then compiles ~110 MB of generated C++, which takes a while and several GB of RAM.
-
-### WebGPU renderer (in development)
-
-See [docs/webgpu-renderer.md](docs/webgpu-renderer.md). It needs Dawn, built from
-`thirdparty/dawn`:
-
-```sh
-cmake -S thirdparty/dawn -B out/dawn -G Ninja -DCMAKE_BUILD_TYPE=Release \
-  -DDAWN_FETCH_DEPENDENCIES=ON -DDAWN_ENABLE_INSTALL=ON -DDAWN_BUILD_SAMPLES=OFF \
-  -DDAWN_BUILD_TESTS=OFF -DTINT_BUILD_TESTS=OFF -DDAWN_USE_GLFW=OFF -DDAWN_USE_WAYLAND=OFF \
-  -DCMAKE_INSTALL_PREFIX=$PWD/out/dawn-install
-cmake --build out/dawn --target install
-cmake --preset linux-amd64-relwithdebinfo -DTRIALSHD_WEBGPU=ON \
-  -DCMAKE_PREFIX_PATH=$PWD/out/dawn-install
-cmake --build out/build/linux-amd64-relwithdebinfo --target webgpu_smoke
-```
 
 ## 3. Run
 
@@ -171,11 +154,6 @@ so they work with the headless surface) land in `out/run/<name>.png`.
 | `tools/headless_run.sh`, `tools/xwd_to_png.py` | Run under Xvfb with logging and periodic screenshots |
 | `tools/xsend.py` | Scripted controller/key input for headless runs (`INPUT=script tools/headless_run.sh`, drives a virtual gamepad) |
 | `tools/package.sh` | Assembles a runnable build folder in `dist/` (no game data) |
-| `src/webgpu/`, `tools/webgpu_smoke/` | WebGPU renderer foundation (Dawn natively, emdawnwebgpu on the web) and its smoke test |
-| `docs/webgpu-renderer.md`, `docs/d3d-map.md` | WebGPU renderer design/milestones; map of the game's Direct3D runtime |
-| `tools/d3d_survey.py` | Finds the functions that emit GPU command packets (Direct3D runtime survey) |
-| `tools/gen_trace_shims.py`, `src/diag/` | Diagnostic build (`-DTRIALSHD_CALL_TRACE=ON`): per-function call counts and argument samples, for mapping the Direct3D API |
-| `thirdparty/dawn` | Dawn (git submodule), only needed with `-DTRIALSHD_WEBGPU=ON` |
 
 ## Legal
 

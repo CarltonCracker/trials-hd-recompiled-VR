@@ -27,9 +27,6 @@
 #include "graphics_settings.h"
 #include "package_license.h"
 #include "virtual_pad.h"
-#if TRIALSHD_CALL_TRACE
-#include "diag/call_trace.h"
-#endif
 
 class TrialsHdApp : public rex::ReXApp {
  public:
@@ -121,9 +118,6 @@ class TrialsHdApp : public rex::ReXApp {
         return !drawer || !drawer->GetIO().WantCaptureMouse;
       });
     }
-#if TRIALSHD_CALL_TRACE
-    trials_hd::diag::StartCallTraceReporter();
-#endif
     // Test harness only: no-op unless TRIALS_HD_VIRTUAL_PAD is set.
     trials_hd::StartVirtualPadFromEnvironment([this](const std::string& path) {
       app_context().CallInUIThreadDeferred([this, path] { CaptureGuestFrame(path); });
