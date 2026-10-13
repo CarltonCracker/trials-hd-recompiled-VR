@@ -17,12 +17,15 @@ commit by CMake at configure time; regenerate with tools/export_sdk_patch.sh).
 - resolve readback: readback_resolve_max_bytes (read back only small resolves)
 - diagnostics: dump_resolves_frame / dump_resolves_dir (resolve dumps for
   tools/decode_resolve.py), gpu_profile (GPU time per frame by kind of work,
-  Vulkan timestamps), log_rt_transfers
+  Vulkan timestamps, per render pass and per load / resolve / transfer),
+  log_rt_transfers, log_cp_waits, log_texture_loads
 - render targets: elide_rt_transfers (ownership transfers of resolve-cleared
   ranges become clears; transfers fully overwritten by Direct3D 9 clear
   rectangles are dropped), execute_unclipped_draw_vs_on_cpu on by default
 - input: serialize InputSystem (device list rebuilt concurrently by several
   guest threads - heap corruption)
+- graphics: lock the command processor's CallInThread queue (pushed from
+  other threads); logging: reserve the category registry (read lock-free)
 - build: REXGLUE_OUTPUT_DIR; guest memory mapped above AddressSanitizer's
   shadow in ASan builds
 
@@ -47,6 +50,23 @@ index 9b3cdf5..4f3bb0b 100644
  
  # Sanitizer support for debugging memory corruption and undefined behavior
  if(REXGLUE_ENABLE_SANITIZERS)
+diff --git a/include/rex/graphics/command_processor.h b/include/rex/graphics/command_processor.h
+index da8e432..74b87ff 100644
+--- a/include/rex/graphics/command_processor.h
++++ b/include/rex/graphics/command_processor.h
+@@ -238,7 +238,12 @@ class CommandProcessor {
+   std::atomic<bool> worker_running_;
+   system::object_ref<system::XHostThread> worker_thread_;
+ 
++  // Functions queued by other threads for the worker (CallInThread).
+   std::queue<std::function<void()>> pending_fns_;
++  std::mutex pending_fns_mutex_;
++  std::atomic<size_t> pending_fns_count_{0};
++  bool HasPendingFunctions() const { return pending_fns_count_.load() != 0; }
++  void ExecutePendingFunctions();
+ 
+   // MicroEngine binary from PM4_ME_INIT
+   std::vector<uint32_t> me_bin_;
 diff --git a/include/rex/graphics/flags.h b/include/rex/graphics/flags.h
 index 2cf24c4..fbdd17c 100644
 --- a/include/rex/graphics/flags.h
@@ -177,10 +197,10 @@ index e5e4908..3a0b2ff 100644
     public:
      void Export(ucode::ExportRegister export_register, const float* value,
 diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
-index 696ff48..4e602fa 100644
+index 696ff48..5730029 100644
 --- a/include/rex/graphics/vulkan/command_processor.h
 +++ b/include/rex/graphics/vulkan/command_processor.h
-@@ -244,6 +244,36 @@ class VulkanCommandProcessor : public CommandProcessor {
+@@ -244,6 +244,41 @@ class VulkanCommandProcessor : public CommandProcessor {
    // Returns the text to display in the GPU backend name in the window title.
    std::string GetWindowTitleText() const;
  
@@ -199,6 +219,11 @@ index 696ff48..4e602fa 100644
 +  // Attributes the following uncategorized GPU time to a guest render target
 +  // configuration (for the per-pass breakdown).
 +  void GpuProfilePass(uint32_t render_pass_key, uint32_t width, uint32_t height);
++  // Labels the work in the current category scope (a texture load, a resolve,
++  // the transfers to one render target) for the per-item breakdown. The label
++  // is only built the first time the key is seen.
++  void GpuProfileItem(uint64_t key, const std::function<std::string()>& make_label);
++  bool IsGpuProfiling() const { return gpu_profile_current_slot_ != nullptr; }
 +  class GpuProfileScope {
 +   public:
 +    GpuProfileScope(VulkanCommandProcessor& command_processor, GpuProfileCategory category)
@@ -217,7 +242,7 @@ index 696ff48..4e602fa 100644
   protected:
    bool SetupContext() override;
    void ShutdownContext() override;
-@@ -426,6 +456,7 @@ class VulkanCommandProcessor : public CommandProcessor {
+@@ -426,6 +461,7 @@ class VulkanCommandProcessor : public CommandProcessor {
  
    void ClearTransientDescriptorPools();
    bool IssueCopy_ReadbackResolvePath();
@@ -225,7 +250,7 @@ index 696ff48..4e602fa 100644
    bool IssueDraw_MemexportReadbackFullPath(uint32_t total_size);
    bool IssueDraw_MemexportReadbackFastPath(uint32_t total_size);
  
-@@ -729,6 +760,35 @@ class VulkanCommandProcessor : public CommandProcessor {
+@@ -729,6 +765,40 @@ class VulkanCommandProcessor : public CommandProcessor {
  
    static constexpr uint32_t kMaxOcclusionQueries = 8192;
    VkQueryPool occlusion_query_pool_ = VK_NULL_HANDLE;
@@ -253,6 +278,11 @@ index 696ff48..4e602fa 100644
 +  uint64_t gpu_profile_report_time_ns_ = 0;
 +  uint32_t gpu_profile_report_swaps_ = 0;
 +  static constexpr uint32_t kGpuProfilePassMark = 0x100;
++  static constexpr uint32_t kGpuProfileItemMark = 0x200;
++  std::unordered_map<uint64_t, uint32_t> gpu_profile_item_label_indices_;
++  std::vector<std::string> gpu_profile_item_labels_;
++  std::vector<uint64_t> gpu_profile_item_ticks_;
++  uint32_t gpu_profile_collect_item_ = UINT32_MAX;
 +  std::unordered_map<uint64_t, uint32_t> gpu_profile_pass_label_indices_;
 +  std::vector<std::string> gpu_profile_pass_labels_;
 +  std::vector<uint64_t> gpu_profile_pass_ticks_;
@@ -459,6 +489,42 @@ index 4edde2b..022c961 100644
      bool ext_KHR_portability_enumeration = false;              // #395
    };
  
+diff --git a/src/core/logging.cpp b/src/core/logging.cpp
+index 1645848..a0814bc 100644
+--- a/src/core/logging.cpp
++++ b/src/core/logging.cpp
+@@ -61,6 +61,15 @@ namespace rex {
+ namespace {
+ 
+ std::vector<LogCategoryEntry> g_registry;
++// GetLoggerRaw / GetLogger read the registry without the mutex (every log
++// call), while categories can still be registered from other threads - the
++// storage is reserved once so appending never reallocates under readers.
++constexpr size_t kRegistryCapacity = 1024;
++void ReserveRegistry() {
++  if (g_registry.capacity() < kRegistryCapacity) {
++    g_registry.reserve(kRegistryCapacity);
++  }
++}
+ spdlog::sink_ptr g_console_sink;
+ spdlog::sink_ptr g_file_sink;
+ spdlog::sink_ptr g_early_sink;
+@@ -311,6 +320,7 @@ LogCategoryId RegisterLogCategory(const char* name) {
+   if (g_initialized || g_early_initialized) {
+     entry.logger = CreateCategoryLogger(name);
+   }
++  ReserveRegistry();
+   g_registry.push_back(std::move(entry));
+   return LogCategoryId{id};
+ }
+@@ -337,6 +347,7 @@ LogCategoryId RegisterLogSubcategory(const char* name, LogCategoryId parent) {
+     if (g_config.category_levels.count(full_name))
+       entry.has_explicit_level = true;
+   }
++  ReserveRegistry();
+   g_registry.push_back(std::move(entry));
+   return LogCategoryId{id};
+ }
 diff --git a/src/core/memory_posix.cpp b/src/core/memory_posix.cpp
 index b52bf39..bfc1537 100644
 --- a/src/core/memory_posix.cpp
@@ -475,7 +541,7 @@ index b52bf39..bfc1537 100644
  #endif
  }
 diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
-index a744375..4a1a78e 100644
+index a744375..5da9d11 100644
 --- a/src/graphics/command_processor.cpp
 +++ b/src/graphics/command_processor.cpp
 @@ -10,6 +10,7 @@
@@ -511,7 +577,64 @@ index a744375..4a1a78e 100644
  REXCVAR_DEFINE_BOOL(readback_resolve_half_pixel_offset, false, "GPU",
                      "When draw resolution scaling is active, sample from the center of each "
                      "scaled block during resolve readback downscale")
-@@ -989,6 +1001,45 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
+@@ -158,10 +170,29 @@ void CommandProcessor::InitializeShaderStorage(const std::filesystem::path& cach
+                                                uint32_t title_id, bool blocking) {}
+ 
+ void CommandProcessor::CallInThread(std::function<void()> fn) {
+-  if (pending_fns_.empty() && system::XThread::IsInThread(worker_thread_.get())) {
++  if (!HasPendingFunctions() && system::XThread::IsInThread(worker_thread_.get())) {
+     fn();
+   } else {
++    // Called from other threads too (UI, setup) - the queue needs a lock.
++    std::lock_guard<std::mutex> lock(pending_fns_mutex_);
+     pending_fns_.push(std::move(fn));
++    pending_fns_count_.fetch_add(1);
++  }
++}
++
++void CommandProcessor::ExecutePendingFunctions() {
++  while (HasPendingFunctions()) {
++    std::function<void()> fn;
++    {
++      std::lock_guard<std::mutex> lock(pending_fns_mutex_);
++      if (pending_fns_.empty()) {
++        break;
++      }
++      fn = std::move(pending_fns_.front());
++      pending_fns_.pop();
++      pending_fns_count_.fetch_sub(1);
++    }
++    fn();
+   }
+ }
+ 
+@@ -204,11 +235,7 @@ void CommandProcessor::WorkerThreadMain() {
+   }
+ 
+   while (worker_running_) {
+-    while (!pending_fns_.empty()) {
+-      auto fn = std::move(pending_fns_.front());
+-      pending_fns_.pop();
+-      fn();
+-    }
++    ExecutePendingFunctions();
+ 
+     uint32_t write_ptr_index = write_ptr_index_.load();
+     if (write_ptr_index == 0xBAADF00D || read_ptr_index_ == write_ptr_index) {
+@@ -229,10 +256,10 @@ void CommandProcessor::WorkerThreadMain() {
+         rex::thread::MaybeYield();
+         loop_count++;
+         write_ptr_index = write_ptr_index_.load();
+-      } while (worker_running_ && pending_fns_.empty() &&
++      } while (worker_running_ && !HasPendingFunctions() &&
+                (write_ptr_index == 0xBAADF00D || read_ptr_index_ == write_ptr_index));
+       ReturnFromWait();
+-      if (!worker_running_ || !pending_fns_.empty()) {
++      if (!worker_running_ || HasPendingFunctions()) {
+         continue;
+       }
+     }
+@@ -989,6 +1016,45 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
  
    bool is_memory = (wait_info & 0x10) != 0;
  
@@ -557,7 +680,7 @@ index a744375..4a1a78e 100644
    bool matched = false;
    do {
      uint32_t value = 0;
-@@ -1594,11 +1645,11 @@ bool CommandProcessor::ExecutePacketType3_VIZ_QUERY(memory::RingBuffer* reader,
+@@ -1594,11 +1660,11 @@ bool CommandProcessor::ExecutePacketType3_VIZ_QUERY(memory::RingBuffer* reader,
      // On hardware this clears the internal state of the scan converter (which
      // is different to the register)
      WriteRegister(XE_GPU_REG_VGT_EVENT_INITIATOR, VIZQUERY_START);
@@ -12397,7 +12520,7 @@ index 3027dc8..831fd98 100644
    SCOPE_profile_cpu_f("gpu");
  
 diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
-index 001f36b..b93193c 100644
+index 001f36b..ad73c84 100644
 --- a/src/graphics/vulkan/command_processor.cpp
 +++ b/src/graphics/vulkan/command_processor.cpp
 @@ -10,6 +10,10 @@
@@ -12591,7 +12714,7 @@ index 001f36b..b93193c 100644
  
    // Create the pipeline (for this, need the render pass from the render target
    // cache), translating the shaders - doing this now to obtain the used
-@@ -4381,7 +4472,222 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
+@@ -4381,7 +4472,270 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
    return true;
  }
  
@@ -12643,6 +12766,29 @@ index 001f36b..b93193c 100644
 +  deferred_command_buffer_.CmdVkWriteTimestamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
 +                                               gpu_profile_pool_, first_query + slot->used++);
 +  slot->marks.push_back(uint32_t(category) | (begin ? 0 : 0x80));
++}
++
++void VulkanCommandProcessor::GpuProfileItem(uint64_t key,
++                                            const std::function<std::string()>& make_label) {
++  GpuProfileSlot* slot = gpu_profile_current_slot_;
++  if (!slot || !submission_open_ || slot->used + 1 >= kGpuProfileQueriesPerSlot) {
++    return;
++  }
++  auto it = gpu_profile_item_label_indices_.find(key);
++  uint32_t index;
++  if (it != gpu_profile_item_label_indices_.end()) {
++    index = it->second;
++  } else {
++    index = uint32_t(gpu_profile_item_labels_.size());
++    gpu_profile_item_labels_.push_back(make_label());
++    gpu_profile_item_ticks_.push_back(0);
++    gpu_profile_item_label_indices_.emplace(key, index);
++  }
++  uint32_t first_query =
++      uint32_t(GetCurrentSubmission() % kGpuProfileSlots) * kGpuProfileQueriesPerSlot;
++  deferred_command_buffer_.CmdVkWriteTimestamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
++                                               gpu_profile_pool_, first_query + slot->used++);
++  slot->marks.push_back(kGpuProfileItemMark | (index << 16));
 +}
 +
 +void VulkanCommandProcessor::GpuProfilePass(uint32_t render_pass_key, uint32_t width,
@@ -12742,6 +12888,9 @@ index 001f36b..b93193c 100644
 +      if (!depth && gpu_profile_collect_pass_ < gpu_profile_pass_ticks_.size()) {
 +        gpu_profile_pass_ticks_[gpu_profile_collect_pass_] += ticks;
 +      }
++      if (depth && gpu_profile_collect_item_ < gpu_profile_item_ticks_.size()) {
++        gpu_profile_item_ticks_[gpu_profile_collect_item_] += ticks;
++      }
 +      uint32_t mark = slot.marks[i - 1];
 +      if (mark == uint32_t(GpuProfileCategory::kCount)) {
 +        break;
@@ -12750,6 +12899,12 @@ index 001f36b..b93193c 100644
 +        gpu_profile_collect_pass_ = mark >> 16;
 +        continue;
 +      }
++      if (mark & kGpuProfileItemMark) {
++        gpu_profile_collect_item_ = mark >> 16;
++        continue;
++      }
++      // Any scope boundary ends the current item.
++      gpu_profile_collect_item_ = UINT32_MAX;
 +      if (!(mark & 0x80)) {
 +        if (depth < 16) {
 +          stack[depth++] = mark;
@@ -12803,6 +12958,22 @@ index 001f36b..b93193c 100644
 +                gpu_profile_pass_labels_[pass_order[i]]);
 +  }
 +  std::fill(gpu_profile_pass_ticks_.begin(), gpu_profile_pass_ticks_.end(), 0);
++  std::vector<uint32_t> item_order(gpu_profile_item_ticks_.size());
++  for (uint32_t i = 0; i < item_order.size(); ++i) {
++    item_order[i] = i;
++  }
++  std::sort(item_order.begin(), item_order.end(), [&](uint32_t a, uint32_t b) {
++    return gpu_profile_item_ticks_[a] > gpu_profile_item_ticks_[b];
++  });
++  for (uint32_t i = 0; i < std::min(size_t(12), item_order.size()); ++i) {
++    uint64_t ticks = gpu_profile_item_ticks_[item_order[i]];
++    if (!ticks) {
++      break;
++    }
++    REXGPU_INFO("  gpu item {:.2f} ms: {}", double(ticks) * ms_per_tick,
++                gpu_profile_item_labels_[item_order[i]]);
++  }
++  std::fill(gpu_profile_item_ticks_.begin(), gpu_profile_item_ticks_.end(), 0);
 +  gpu_profile_total_ticks_ = 0;
 +  std::memset(gpu_profile_category_ticks_, 0, sizeof(gpu_profile_category_ticks_));
 +  gpu_profile_report_time_ns_ = now_ns;
@@ -12814,7 +12985,7 @@ index 001f36b..b93193c 100644
  #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
    SCOPE_profile_cpu_f("gpu");
  #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
-@@ -4389,6 +4695,7 @@ bool VulkanCommandProcessor::IssueCopy() {
+@@ -4389,6 +4743,7 @@ bool VulkanCommandProcessor::IssueCopy() {
    if (!BeginSubmission(true)) {
      return false;
    }
@@ -12822,7 +12993,7 @@ index 001f36b..b93193c 100644
  
    ReadbackResolveMode readback_mode = GetReadbackResolveMode(REXCVAR_GET(vulkan_readback_resolve));
    if (readback_mode == ReadbackResolveMode::kDisabled) {
-@@ -4400,7 +4707,62 @@ bool VulkanCommandProcessor::IssueCopy() {
+@@ -4400,7 +4755,62 @@ bool VulkanCommandProcessor::IssueCopy() {
    return IssueCopy_ReadbackResolvePath();
  }
  
@@ -12885,7 +13056,7 @@ index 001f36b..b93193c 100644
    const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
    const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
    const VkDevice device = vulkan_device->device();
-@@ -4423,6 +4785,10 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+@@ -4423,6 +4833,10 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
    if (readback_mode == ReadbackResolveMode::kDisabled) {
      return true;
    }
@@ -12896,7 +13067,7 @@ index 001f36b..b93193c 100644
  
    auto ensure_readback_slot = [&](ReadbackBuffer& readback, uint32_t index, uint32_t size) -> bool {
      if (readback.buffers[index] != VK_NULL_HANDLE && size <= readback.sizes[index] &&
-@@ -4800,6 +5166,10 @@ void VulkanCommandProcessor::ShutdownOcclusionQueryResources() {
+@@ -4800,6 +5214,10 @@ void VulkanCommandProcessor::ShutdownOcclusionQueryResources() {
    if (occlusion_query_pool_ != VK_NULL_HANDLE) {
      dfn.vkDestroyQueryPool(device, occlusion_query_pool_, nullptr);
    }
@@ -12907,7 +13078,7 @@ index 001f36b..b93193c 100644
  
    occlusion_query_pool_ = VK_NULL_HANDLE;
    occlusion_query_readback_buffer_ = VK_NULL_HANDLE;
-@@ -5136,6 +5506,7 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -5136,6 +5554,7 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
      // the end of the submission (when async pipeline object creation requests
      // are fulfilled).
      deferred_command_buffer_.Reset();
@@ -12915,7 +13086,7 @@ index 001f36b..b93193c 100644
  
      // Reset cached state of the command buffer.
      dynamic_viewport_update_needed_ = true;
-@@ -5370,6 +5741,8 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5370,6 +5789,8 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
  
      SubmitBarriers(true);
  
@@ -12924,7 +13095,7 @@ index 001f36b..b93193c 100644
      assert_false(command_buffers_writable_.empty());
      CommandBuffer command_buffer = command_buffers_writable_.back();
      if (dfn.vkResetCommandPool(device, command_buffer.pool, 0) != VK_SUCCESS) {
-@@ -6233,6 +6606,18 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
+@@ -6233,6 +6654,18 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
      reg::RB_COLOR_INFO color_info = color_infos[i];
      // Exponent bias is in bits 20:25 of RB_COLOR_INFO.
      int32_t color_exp_bias = color_info.color_exp_bias;
@@ -12960,7 +13131,7 @@ index b49e033..3d3ede7 100644
          auto& args = *reinterpret_cast<const ArgsVkResetQueryPool*>(stream);
          dfn.vkCmdResetQueryPool(command_buffer, args.query_pool, args.first_query,
 diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/render_target_cache.cpp
-index 0298f06..444bf95 100644
+index 0298f06..ab19475 100644
 --- a/src/graphics/vulkan/render_target_cache.cpp
 +++ b/src/graphics/vulkan/render_target_cache.cpp
 @@ -10,6 +10,8 @@
@@ -13002,11 +13173,29 @@ index 0298f06..444bf95 100644
  #include "../shaders/vulkan_spirv/resolve_full_8bpp_cs.h"
  #include "../shaders/vulkan_spirv/resolve_full_8bpp_scaled_cs.h"
  }  // namespace shaders
-@@ -1139,6 +1147,26 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
+@@ -1139,6 +1147,44 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
                                   IsFixedRGBA16TruncatedToMinus1To1(), resolve_info)) {
      return false;
    }
 +  g_last_resolve_info_for_diagnostics = resolve_info;
++  if (command_processor_.IsGpuProfiling()) {
++    const auto& item_src =
++        resolve_info.IsCopyingDepth() ? resolve_info.depth_edram_info : resolve_info.color_edram_info;
++    uint64_t item_key = (uint64_t(2) << 62) | (uint64_t(resolve_info.IsCopyingDepth()) << 61) |
++                        (uint64_t(item_src.format) << 52) |
++                        (uint64_t(resolve_info.copy_dest_info.copy_dest_format) << 44) |
++                        (uint64_t(resolve_info.coordinate_info.width_div_8) << 22) |
++                        uint64_t(resolve_info.height_div_8);
++    command_processor_.GpuProfileItem(item_key, [&]() {
++      return fmt::format("resolve {} fmt {} -> {} {}x{} msaa {}x",
++                         resolve_info.IsCopyingDepth() ? "depth" : "color",
++                         uint32_t(item_src.format),
++                         uint32_t(resolve_info.copy_dest_info.copy_dest_format),
++                         uint32_t(resolve_info.coordinate_info.width_div_8) * 8,
++                         resolve_info.height_div_8 * 8,
++                         1u << uint32_t(item_src.msaa_samples));
++    });
++  }
 +  if (REXCVAR_GET(log_render_formats)) {
 +    static std::mutex seen_mutex;
 +    static std::unordered_set<uint64_t> seen;
@@ -13029,7 +13218,7 @@ index 0298f06..444bf95 100644
  
    // Nothing to copy/clear.
    if (!resolve_info.coordinate_info.width_div_8 || !resolve_info.height_div_8) {
-@@ -4546,11 +4574,138 @@ VkPipeline const* VulkanRenderTargetCache::GetTransferPipelines(TransferPipeline
+@@ -4546,11 +4592,138 @@ VkPipeline const* VulkanRenderTargetCache::GetTransferPipelines(TransferPipeline
    return transfer_pipelines_.emplace(key, pipelines).first->second.data();
  }
  
@@ -13168,7 +13357,7 @@ index 0298f06..444bf95 100644
    assert_true(GetPath() == Path::kHostRenderTargets);
  
    const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
-@@ -4681,7 +4836,8 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
+@@ -4681,7 +4854,8 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
      bool dest_used_previously_as_source = false;
      for (uint32_t j = 0; j < i; ++j) {
        for (const Transfer& previous_transfer : render_target_transfers[j]) {
@@ -13178,7 +13367,7 @@ index 0298f06..444bf95 100644
            dest_used_previously_as_source = true;
            break;
          }
-@@ -4707,6 +4863,9 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
+@@ -4707,6 +4881,9 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
      // Transition the sources, only if not going to be used as destinations
      // earlier.
      for (const Transfer& transfer : dest_transfers) {
@@ -13188,7 +13377,7 @@ index 0298f06..444bf95 100644
        bool source_previously_used_as_dest = false;
        bool host_depth_source_previously_used_as_dest = false;
        for (uint32_t j = 0; j < i; ++j) {
-@@ -4774,8 +4933,8 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
+@@ -4774,13 +4951,23 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
        continue;
      }
  
@@ -13199,7 +13388,22 @@ index 0298f06..444bf95 100644
        continue;
      }
  
-@@ -4836,6 +4995,48 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
+     auto& dest_vulkan_rt = *static_cast<VulkanRenderTarget*>(dest_rt);
+     RenderTargetKey dest_rt_key = dest_vulkan_rt.key();
++    if (command_processor_.IsGpuProfiling() && !all_transfers.empty()) {
++      command_processor_.GpuProfileItem((uint64_t(3) << 62) | dest_rt_key.key, [&]() {
++        return fmt::format("transfers to {} {} msaa {}x pitch {}",
++                           dest_rt_key.is_depth ? "depth" : "color",
++                           dest_rt_key.is_depth
++                               ? xenos::GetDepthRenderTargetFormatName(dest_rt_key.GetDepthFormat())
++                               : xenos::GetColorRenderTargetFormatName(dest_rt_key.GetColorFormat()),
++                           1u << uint32_t(dest_rt_key.msaa_samples), dest_rt_key.GetPitchTiles());
++      });
++    }
+ 
+     // Late barriers in case there was cross-copying that prevented merging of
+     // barriers.
+@@ -4836,6 +5023,48 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
      VkImageView transfer_dest_view = dest_rt_key.is_depth ? dest_vulkan_rt.view_depth_stencil()
                                                            : dest_vulkan_rt.view_color_transfer();
  
@@ -13248,7 +13452,7 @@ index 0298f06..444bf95 100644
      if (!current_transfers.empty()) {
        uint32_t dest_pitch_tiles = dest_rt_key.GetPitchTiles();
        bool dest_is_64bpp = dest_rt_key.Is64bpp();
-@@ -5280,128 +5481,8 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
+@@ -5280,128 +5509,8 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
        command_processor_.SubmitBarriersAndEnterRenderTargetCacheRenderPass(
            transfer_render_pass, transfer_framebuffer, transfer_dest_view, dest_rt_key.is_depth);
        VkClearAttachment resolve_clear_attachment;
@@ -13380,7 +13584,7 @@ index 0298f06..444bf95 100644
      }
    }
 diff --git a/src/graphics/vulkan/texture_cache.cpp b/src/graphics/vulkan/texture_cache.cpp
-index ecbd940..9dbba69 100644
+index ecbd940..7d81954 100644
 --- a/src/graphics/vulkan/texture_cache.cpp
 +++ b/src/graphics/vulkan/texture_cache.cpp
 @@ -35,6 +35,10 @@
@@ -13394,7 +13598,7 @@ index ecbd940..9dbba69 100644
  namespace rex::graphics::vulkan {
  
  // Generated with `xb buildshaders`.
-@@ -1215,8 +1219,19 @@ bool VulkanTextureCache::EnsureScaledResolveMemoryCommitted(uint32_t start_unsca
+@@ -1215,8 +1219,30 @@ bool VulkanTextureCache::EnsureScaledResolveMemoryCommitted(uint32_t start_unsca
  
  bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture, bool load_base,
                                                                 bool load_mips) {
@@ -13402,6 +13606,17 @@ index ecbd940..9dbba69 100644
 +      command_processor_, VulkanCommandProcessor::GpuProfileCategory::kTextureLoad);
    VulkanTexture& vulkan_texture = static_cast<VulkanTexture&>(texture);
    TextureKey texture_key = vulkan_texture.key();
++  if (command_processor_.IsGpuProfiling()) {
++    uint64_t item_key = (uint64_t(texture_key.format) << 56) |
++                        (uint64_t(texture_key.GetWidth()) << 36) |
++                        (uint64_t(texture_key.GetHeight()) << 16) |
++                        (uint64_t(texture_key.scaled_resolve) << 1) | 1;
++    command_processor_.GpuProfileItem(item_key, [&]() {
++      return fmt::format("load {} {}x{}{}", FormatInfo::Get(texture_key.format)->name,
++                         texture_key.GetWidth(), texture_key.GetHeight(),
++                         texture_key.scaled_resolve ? " scaled" : "");
++    });
++  }
 +  if (int32_t log_remaining = REXCVAR_GET(log_texture_loads); log_remaining > 0) {
 +    REXGPU_INFO("texture load: {} {}x{}x{} {}{} base 0x{:08X} mips {} load base {} mips {}",
 +                FormatInfo::Get(texture_key.format)->name, texture_key.GetWidth(),

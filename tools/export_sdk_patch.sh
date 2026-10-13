@@ -32,12 +32,15 @@ commit by CMake at configure time; regenerate with tools/export_sdk_patch.sh).
 - resolve readback: readback_resolve_max_bytes (read back only small resolves)
 - diagnostics: dump_resolves_frame / dump_resolves_dir (resolve dumps for
   tools/decode_resolve.py), gpu_profile (GPU time per frame by kind of work,
-  Vulkan timestamps), log_rt_transfers
+  Vulkan timestamps, per render pass and per load / resolve / transfer),
+  log_rt_transfers, log_cp_waits, log_texture_loads
 - render targets: elide_rt_transfers (ownership transfers of resolve-cleared
   ranges become clears; transfers fully overwritten by Direct3D 9 clear
   rectangles are dropped), execute_unclipped_draw_vs_on_cpu on by default
 - input: serialize InputSystem (device list rebuilt concurrently by several
   guest threads - heap corruption)
+- graphics: lock the command processor's CallInThread queue (pushed from
+  other threads); logging: reserve the category registry (read lock-free)
 - build: REXGLUE_OUTPUT_DIR; guest memory mapped above AddressSanitizer's
   shadow in ASan builds
 
