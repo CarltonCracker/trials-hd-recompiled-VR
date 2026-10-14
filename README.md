@@ -109,6 +109,10 @@ On a headless machine, run under a virtual X server:
 xvfb-run -s "-screen 0 1280x720x24" ./out/build/linux-amd64-relwithdebinfo/trials_hd
 # or, with a debug log and screenshots every 5 s in out/run/:
 tools/headless_run.sh 60
+
+# On NVIDIA GPUs (e.g. RTX 2070 SUPER), the proprietary driver requires an X11/XCB
+# surface under Xvfb instead of VK_EXT_headless_surface:
+tools/headless_run.sh 60 --vulkan_device=0 --vulkan_headless_surface=false
 ```
 
 Play with an Xbox-style controller (SDL gamepad) or the keyboard; both control

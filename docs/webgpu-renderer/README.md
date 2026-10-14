@@ -1784,7 +1784,7 @@ ambiguity, it stops and writes the question into the task's notes instead of gue
 | S-32 | todo | S | Golden-scene CI script: run all golden scenes with both plugins and print a pass/fail table. | S-10, S-11, M3 | table printed |
 | S-33 | todo | S | Keep this document current: after each milestone, update tables and open questions, and audit the Status column against git history (16.0). | — | ongoing |
 | S-34 | todo | S | Measure the shared-memory re-upload volume: each write fault invalidates a widened (up to 256 KB) range, re-uploading ~4.5 MB per frame (~1,140 pages, ~410 upload calls) for ~5 faults per frame. Report bytes per frame and the share of `RequestRanges` time, to decide whether the WebGPU memory mirror (8.3) should treat these pages as streaming. | — | numbers in 8.3 |
-| S-35 | todo | S | The headless run on the RTX 2070 SUPER (`--vulkan_device=0 --vulkan_headless_surface=true`) hangs at startup (no frames logged). Find out why (driver lacks `VK_EXT_headless_surface`?) and document the working NVIDIA test setup. | — | NVIDIA headless run reaches gameplay, or the limitation is documented in the README |
+| S-35 | done 2026-10-14 | S | The headless run on the RTX 2070 SUPER (`--vulkan_device=0 --vulkan_headless_surface=true`) hangs at startup (no frames logged). Find out why (driver lacks `VK_EXT_headless_surface`?) and document the working NVIDIA test setup. | — | root cause diagnosed: NVIDIA proprietary driver 550.163.01 segfaults (`libnvidia-glcore.so`) in `vkGetPhysicalDeviceSurfaceCapabilitiesKHR` on `VK_EXT_headless_surface`; running headless under Xvfb with `--vulkan_device=0 --vulkan_headless_surface=false` uses XCB WSI and runs full gameplay to completion (verified 75s ride on *Middle Name: Danger*) |
 
 ### 16.4 Large-model tasks (L)
 
@@ -2143,3 +2143,10 @@ finding: `YYYY-MM-DD <agent> <task ID>: what changed; evidence; what is left`.
   - **S-31:** Updated `tools/package.sh` to stage `librexgpu-webgpu*.so` and document `--gpu_plugin=webgpu`;
     added WebGPU build subsection to `README.md` documenting `TRIALSHD_WEBGPU` and Dawn prefix path;
     verified packaged build runs cleanly with both `xenos` and `webgpu` plugins.
+  - **S-35:** Diagnosed headless failure on NVIDIA GeForce RTX 2070 SUPER (`--vulkan_device=0`).
+    `gdb` backtrace confirmed the crash is a SIGSEGV inside `/lib/x86_64-linux-gnu/libnvidia-glcore.so.550.163.01`
+    when `vkGetPhysicalDeviceSurfaceCapabilitiesKHR` is called on a surface created with `VK_EXT_headless_surface`
+    (NVIDIA's proprietary driver 550.x lacks headless WSI surface support). Under Xvfb, running with
+    `--vulkan_device=0 --vulkan_headless_surface=false` creates an XCB surface (`VK_KHR_xcb_surface`) which
+    is fully supported: verified 15-frame menu test and full 75-second *Middle Name: Danger* ride run to completion
+    with full frame captures (`out/run/shot_*.png`, 100% stable). Documented in `README.md` and `docs/webgpu-renderer/README.md`.
