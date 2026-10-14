@@ -105,7 +105,26 @@ bool WebGpuBackend::Initialize(memory::Memory& memory, const RegisterFile& regis
     return false;
   }
   shared_memory_ = std::make_unique<WebGpuSharedMemory>(
-      memory, provider_.instance(), device, [this]() { return frame_recorder_->Submit(); });
+      memory, provider_.instance(), device, [this](uint64_t size) {
+        GuestMemoryUpload upload;
+        if (size <= FrameRecorder::kIndexRingSize) {
+          uint32_t offset = 0;
+          upload.data = frame_recorder_->AllocateIndices(uint32_t(size), 4, offset);
+          upload.offset = offset;
+          upload.source = frame_recorder_->index_ring();
+        } else {
+          wgpu::BufferDescriptor desc;
+          desc.label = "large guest memory upload";
+          desc.size = size;
+          desc.usage = wgpu::BufferUsage::CopySrc;
+          desc.mappedAtCreation = true;
+          upload.source = provider_.device().CreateBuffer(&desc);
+          if (upload.source) { upload.data = upload.source.GetMappedRange(0, size); }
+        }
+        frame_recorder_->EndRenderPass();
+        upload.encoder = frame_recorder_->encoder();
+        return upload;
+      });
   if (!shared_memory_->Initialize()) {
     return false;
   }
@@ -388,9 +407,11 @@ bool WebGpuBackend::Draw(const DrawSnapshot& draw) {
   bool topology_supported;
   wgpu::PrimitiveTopology topology =
       ToTopology(primitive.host_primitive_type, topology_supported);
-  if (primitive.host_vertex_shader_type != Shader::HostVertexShaderType::kVertex ||
+  if ((primitive.host_vertex_shader_type != Shader::HostVertexShaderType::kVertex &&
+       primitive.host_vertex_shader_type !=
+           Shader::HostVertexShaderType::kRectangleListAsTriangleStrip) ||
       !topology_supported) {
-    // Rectangle lists (L-04f) and tessellation are not drawn yet.
+    // Point sprite expansion and tessellation are not drawn.
     ++skipped_draws_;
     return true;
   }
@@ -546,6 +567,14 @@ bool WebGpuBackend::Draw(const DrawSnapshot& draw) {
     system.alpha_test_reference = regs.Get<float>(XE_GPU_REG_RB_ALPHA_REF);
   }
   system.vertex_index_endian = uint32_t(primitive.host_shader_index_endian);
+  if (primitive.index_buffer_type == PrimitiveProcessor::kHostBuiltinForDMA) {
+    // Expanded primitives read the guest indices in the vertex shader.
+    system.flags |= WgslSystemConstants::kVertexIndexLoad;
+    if (regs.Get<reg::VGT_DRAW_INITIATOR>().index_size == xenos::IndexFormat::kInt32) {
+      system.flags |= WgslSystemConstants::kVertexIndexLoad32Bit;
+    }
+    system.vertex_index_load_address = primitive.guest_index_base;
+  }
   system.vertex_base_index = regs.Get<int32_t>(XE_GPU_REG_VGT_INDX_OFFSET);
   system.vertex_index_min = regs.Get<uint32_t>(XE_GPU_REG_VGT_MIN_VTX_INDX);
   system.vertex_index_max = regs.Get<uint32_t>(XE_GPU_REG_VGT_MAX_VTX_INDX);

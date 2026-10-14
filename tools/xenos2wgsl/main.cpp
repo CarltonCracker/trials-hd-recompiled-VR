@@ -103,6 +103,19 @@ int main(int argc, char** argv) {
         << translation->GetTranslatedBinaryString();
     std::ofstream(output_dir / (std::string(name) + ".ucode.txt")) << shader.ucode_disassembly();
 
+    if (type == rex::graphics::xenos::ShaderType::kVertex) {
+      // Also the rectangle-list expansion variant (L-04f).
+      WgslShaderTranslator::Modification rectangle = modification;
+      rectangle.host_vertex_shader_type =
+          uint32_t(Shader::HostVertexShaderType::kRectangleListAsTriangleStrip);
+      Shader::Translation* rectangle_translation =
+          shader.GetOrCreateTranslation(rectangle.value);
+      if (!translator.TranslateAnalyzedShader(*rectangle_translation)) {
+        ok = false;
+      }
+      std::ofstream(output_dir / (std::string(name) + ".rect.wgsl"))
+          << rectangle_translation->GetTranslatedBinaryString();
+    }
     ++shader_count;
     std::printf("%s %s %zu dwords", name, ok ? "ok" : "FAILED", ucode.size());
     for (const Shader::Error& error : translation->errors()) {

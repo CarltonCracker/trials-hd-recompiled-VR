@@ -287,6 +287,8 @@ fn xe_fetch_word(index: u32) -> u32 {
 
 void WgslShaderTranslator::EmitVertexShaderEntryPoint(std::string& out) const {
   Modification modification = this->modification();
+  bool rectangle_list = Shader::HostVertexShaderType(modification.host_vertex_shader_type) ==
+                        Shader::HostVertexShaderType::kRectangleListAsTriangleStrip;
   out += "struct XeVertexOut {\n  @invariant @builtin(position) position: vec4f,\n";
   for (uint32_t i = 0; i < 16; ++i) {
     if (modification.interpolator_mask & (1u << i)) {
@@ -294,10 +296,12 @@ void WgslShaderTranslator::EmitVertexShaderEntryPoint(std::string& out) const {
     }
   }
   out += "}\n\n";
-  out += "@vertex\nfn main(@builtin(vertex_index) xe_vertex_index: u32) -> XeVertexOut {\n";
-  out += R"(  var index = xe_vertex_index;
+  out += R"(// Guest vertex index from the host one: optionally read from the guest index
+// buffer (expanded primitives), byte-swapped (guest index buffers bound
+// directly are read in host byte order), offset and clamped.
+fn xe_vertex_index(host_index: u32) -> u32 {
+  var index = host_index;
   if ((xe_system.flags & 8u) != 0u) {
-    // Guest index buffer read in the shader (expanded primitives).
     let is_32bit = (xe_system.flags & 16u) != 0u;
     let address = xe_system.vertex_index_load_address + (index << select(1u, 2u, is_32bit));
     var loaded = xe_load_shared(i32(address >> 2u));
@@ -306,16 +310,14 @@ void WgslShaderTranslator::EmitVertexShaderEntryPoint(std::string& out) const {
     }
     index = loaded;
   }
-  // Guest index buffers bound directly are read in host byte order.
   index = xe_endian_swap(index, xe_system.vertex_index_endian);
-  index = clamp(u32(i32(index) + xe_system.vertex_base_index) & 0xFFFFFFu,
-                xe_system.vertex_index_min, xe_system.vertex_index_max);
-)";
-  if (register_count()) {
-    out += "  xe_r[0].x = f32(index);\n";
-  }
-  out += R"(  xe_main_body();
-  var position = xe_out_position;
+  return clamp(u32(i32(index) + xe_system.vertex_base_index) & 0xFFFFFFu,
+               xe_system.vertex_index_min, xe_system.vertex_index_max);
+}
+
+// Guest position (PA_CL_VTE_CNTL formats) to host clip space.
+fn xe_transform_position(guest_position: vec4f) -> vec4f {
+  var position = guest_position;
   if ((xe_system.flags & 4u) == 0u) {
     position.w = 1.0 / position.w;
   }
@@ -325,14 +327,84 @@ void WgslShaderTranslator::EmitVertexShaderEntryPoint(std::string& out) const {
   if ((xe_system.flags & 2u) != 0u) {
     position.z *= position.w;
   }
-  position = vec4f(position.xyz * xe_system.ndc_scale.xyz + xe_system.ndc_offset.xyz * position.w,
-                   position.w);
-  var xe_output: XeVertexOut;
-  xe_output.position = position;
+  return vec4f(position.xyz * xe_system.ndc_scale.xyz + xe_system.ndc_offset.xyz * position.w,
+               position.w);
+}
+
+// Runs the guest shader for one guest vertex from a clean state.
+fn xe_run_vertex(index: u32) {
 )";
-  for (uint32_t i = 0; i < 16; ++i) {
-    if (modification.interpolator_mask & (1u << i)) {
-      out += fmt::format("  xe_output.interpolator_{} = xe_out_interpolators[{}];\n", i, i);
+  if (register_count()) {
+    out += fmt::format("  xe_r = array<vec4f, {}>();\n", register_count());
+  }
+  out += R"(  xe_p0 = false;
+  xe_ps = 0.0;
+  xe_a0 = 0;
+  xe_loop_count = vec4u(0u);
+  xe_aL = vec4i(0);
+  xe_vfetch_address = 0;
+  xe_out_position = vec4f(0.0);
+  xe_out_interpolators = array<vec4f, 16>();
+  xe_out_point_misc = vec4f(0.0);
+)";
+  if (register_count()) {
+    out += "  xe_r[0].x = f32(index);\n";
+  }
+  out += "  xe_main_body();\n}\n\n";
+
+  out += "@vertex\nfn main(@builtin(vertex_index) xe_vertex_index_in: u32) -> XeVertexOut {\n";
+  out += "  var xe_output: XeVertexOut;\n";
+  if (!rectangle_list) {
+    out += R"(  xe_run_vertex(xe_vertex_index(xe_vertex_index_in));
+  xe_output.position = xe_transform_position(xe_out_position);
+)";
+    for (uint32_t i = 0; i < 16; ++i) {
+      if (modification.interpolator_mask & (1u << i)) {
+        out += fmt::format("  xe_output.interpolator_{} = xe_out_interpolators[{}];\n", i, i);
+      }
+    }
+  } else {
+    // Rectangle lists as two-triangle strips (4 host vertices per rectangle):
+    // run the guest shader for the 3 guest vertices, start the strip at the
+    // corner opposite the longest edge (the right angle), and synthesize the
+    // 4th corner as v1 + v2 - v0 (SpirvShaderTranslator's VS fallback).
+    out += R"(  let rectangle = xe_vertex_index_in >> 2u;
+  let corner = xe_vertex_index_in & 3u;
+  var positions: array<vec4f, 3>;
+  var interpolators: array<array<vec4f, 16>, 3>;
+  for (var v = 0u; v < 3u; v++) {
+    xe_run_vertex(xe_vertex_index(rectangle * 3u + v));
+    positions[v] = xe_transform_position(xe_out_position);
+    interpolators[v] = xe_out_interpolators;
+  }
+  var edge_lengths: array<f32, 3>;
+  for (var e = 0u; e < 3u; e++) {
+    let edge = positions[(e + 2u) % 3u].xy - positions[(e + 1u) % 3u].xy;
+    edge_lengths[e] = dot(edge, edge);
+  }
+  var i0 = 2u;
+  if (edge_lengths[0] > edge_lengths[1] && edge_lengths[0] > edge_lengths[2]) {
+    i0 = 0u;
+  } else if (edge_lengths[1] > edge_lengths[2]) {
+    i0 = 1u;
+  }
+  let i1 = (i0 + 1u) % 3u;
+  let i2 = (i0 + 2u) % 3u;
+  var source = i0;
+  if (corner == 1u) { source = i1; }
+  if (corner == 2u) { source = i2; }
+  let synthetic = corner == 3u;
+  xe_output.position = select(positions[source],
+                              positions[i1] - positions[i0] + positions[i2], synthetic);
+)";
+    for (uint32_t i = 0; i < 16; ++i) {
+      if (modification.interpolator_mask & (1u << i)) {
+        out += fmt::format(
+            "  xe_output.interpolator_{0} = select(interpolators[source][{0}], "
+            "interpolators[i1][{0}] - interpolators[i0][{0}] + interpolators[i2][{0}], "
+            "synthetic);\n",
+            i);
+      }
     }
   }
   out += "  return xe_output;\n}\n";

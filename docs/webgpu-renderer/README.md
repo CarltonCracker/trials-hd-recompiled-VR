@@ -1026,22 +1026,30 @@ as a storage buffer in every shader. WebGPU's default `maxStorageBufferBindingSi
 **L-06 implementation in progress (pi-gpt, 2026-10-14):**
 `guest_memory_mirror.{h,cpp}` implements `WebGpuSharedMemory : SharedMemory` for
 7.6.3's desktop buffer. It owns no separate page tracker and does not change the SDK.
-Construct as `WebGpuSharedMemory(memory, provider.instance(), provider.device(),
-[&recorder] { return recorder.Submit(); })`, then call `Initialize()` and use
-`buffer()` for bindings. Call its methods (including inherited requests and destruction)
-under the provider's device mutex on the CP thread. The constructor's `submit_pending` callback must
-end/submit preceding encoded GPU work before dirty `Queue::WriteBuffer` uploads;
-otherwise multiple draws in one encoder can all see the last upload to a reused
-address. Clean requests do not call the callback. L-12 must honor this ordering,
-or replace queue uploads with encoder-ordered staging copies. GPU writes use the
+Construct with `(memory, provider.instance(), provider.device(), allocate_upload)`;
+see the allocator lambda in `WebGpuBackend::Initialize`. It returns a
+`GuestMemoryUpload` containing CPU space, GPU source buffer, source offset and
+current encoder. The backend reserves unique slices in the recorder's existing
+index/upload ring (now `CopySrc` too), then closes the render pass. Oversized
+requests use a unique mapped-at-creation buffer rather than failing the request.
+Call `Initialize()` and use `buffer()` for bindings; calls and destruction remain
+under the provider's device mutex on the CP thread. Dirty guest pages are copied
+to the reserved CPU space, then copied to the mirror **inside that encoder**,
+after earlier consumers. The recorder uploads ring bytes before submitting;
+slices are not reused until that submission. Mapped sources are unmapped after
+filling. Clean requests do not call the allocator. This removes forced dirty
+submissions and per-request GPU allocations in the normal path.
+GPU writes use the
 inherited `RangeWrittenByGpu` after requesting the destination's CPU pages first;
 CPU-visible readback remains L-13. Synthetic tests live in `tests/gpu_webgpu/` and
 build separately in `out/webgpu-memory-test` to avoid other agents' build directories.
 Synthetic tests pass on both physical GPUs (2026-10-14):
 `cmake --build out/webgpu-memory-test --target shared_memory_test -j2`, followed by
 `out/webgpu-memory-test/shared_memory_test 0` and `... 1`. They check raw bytes,
-clean-page caching, real guest-alias write faults, old/new queue ordering, partial-page
-GPU writes, failed-submit retry, bounds and callback teardown with zero Dawn errors.
+clean-page caching, real guest-alias write faults, old/new data ordering, partial-page
+GPU writes, unavailable-encoder retry, bounds and callback teardown with zero Dawn errors.
+The encoder-ordered replacement passes on both GPUs, including a single encoder
+holding an old-data consumer followed by a newer upload, with no forced submission.
 Measured device limits: RTX 2070 SUPER `maxBufferSize` 1048575 MiB and
 `maxStorageBufferBindingSize` 2047 MiB; RX 6600 (RADV NAVI23) 4095 MiB for both.
 Thus the desktop mirror fits both GPUs (section 14 question 12 answered).
@@ -1793,16 +1801,16 @@ debugging. Several can run in parallel once L-01 to L-03 exist.
 | L-04c | todo | **Vertex fetch via vertex pulling.** Fetch constants, strides, offsets, all formats of section 5.6 plus the remaining Xenos vertex formats, endianness, index source (direct vs converted primitive). | L-04a, S-18 | `spirv_translator_fetch.cpp` | VS outputs match the interpreter on recorded vertex data |
 | L-04d | done 2026-10-14 1d3409f | **Texture fetch.** `tfetch2D`/`Cube`, LOD modes (`setTexLOD`, register LOD, computed), exp adjust (word 3), signedness, integer number format, swizzle, gradients, vertex-stage fetch; resolve-alias textures with different host formats. | L-04a, S-23 | `spirv_translator_fetch.cpp`, SDK patch fixes (5.7) | textured menus match the Vulkan captures |
 | L-04e | todo | **Outputs.** Position transform (viewport, half-pixel offset, `PA_CL_VTE_CNTL`), interpolators, point coordinate, facing, up to 4 color outputs with format conversions and exponent bias, alpha test, depth conventions (reverse-Z, float24). | L-04a | `spirv_translator_rb.cpp` (host-RT parts), `draw_util` | geometry silhouettes match (M3) |
-| L-04f | todo | **Rect-list expansion VS** and other host VS types (`kRectangleListAsTriangleStrip`, point list if ever needed). | L-04e | `shader.h` `HostVertexShaderType`, DXBC translator | resolve/clear/full-screen rect passes draw correctly |
+| L-04f | done 2026-10-14 (this commit) | **Rect-list expansion VS** and other host VS types (`kRectangleListAsTriangleStrip`, point list if ever needed). | L-04e | `shader.h` `HostVertexShaderType`, DXBC translator | resolve/clear/full-screen rect passes draw correctly |
 | L-04g | todo | **memexport → compute.** Emit the memexport VS as a compute entry point writing a storage buffer (formats, endian, `eA` addressing); dispatch per point; make the results visible to later draws. | L-04b, L-06 | `spirv_translator_memexport.cpp`, section 5.6 | particles move like in the Vulkan build |
-| L-05 | claimed claude-opus-5.5 2026-10-14 | **`tools/xenos2wgsl` and the differential test harness**: translate every cached shader, validate with Tint, run VS bodies as compute and compare against the SDK `ShaderInterpreter` on recorded inputs (inputs stay local). | L-04a, S-02 | `interpreter.cpp` | `xenos2wgsl --validate --diff` passes 74/74 |
+| L-05 | todo (partial, claude-opus-5.5 2026-10-14: see notes log) | **`tools/xenos2wgsl` and the differential test harness**: translate every cached shader, validate with Tint, run VS bodies as compute and compare against the SDK `ShaderInterpreter` on recorded inputs (inputs stay local). | L-04a, S-02 | `interpreter.cpp` | `xenos2wgsl --validate --diff` passes 74/74 |
 | L-06 | claimed pi-gpt 2026-10-14 | **Guest memory mirror.** Desktop `WebGpuSharedMemory : SharedMemory` with a 512 MiB buffer and SDK page watches (7.6.3 supersedes the older per-range design); ordered dirty uploads and memexport/resolve destination handling. Streaming classification remains measurement-led (S-34). | L-03 | 8.3, `shared_memory.{h,cpp}`, `mmio_handler.cpp` | correct data in M3 with < 0.3 ms per frame CPU in this code |
-| L-07 | claimed claude-opus-5.5 2026-10-14 | **Pipeline cache and binding model.** Keys, bind group layouts, dynamic offsets, async creation, pipeline pre-creation list, WGSL cache, Dawn blob cache. | L-01, L-04a | 8.5, `vulkan/pipeline_cache.cpp` | no hitch after the first run; pipeline count logged |
-| L-08 | claimed claude-opus-5.5 2026-10-14 | **Render-target cache.** Keys, sizing (draw extent estimator), formats with feature fallbacks, 4x MSAA, `depth32float-stencil8`, scaling 1x/2x/3x (and non-integer if feasible), clear detection, aliasing detection and the minimal transfer path S-04 shows to be necessary. | L-03, S-23 | 8.7, `pipeline/render_target/cache.cpp`, `vulkan/render_target_cache.cpp` | all RT configs of 5.3 render; aliasing events logged |
-| L-09 | claimed claude-opus-5.5 2026-10-14 | **Resolve engine.** Classification (clear, GPU-consumed, CPU-visible, frontbuffer), conversions of section 5.7, resolve-to-texture aliases in the texture cache, MSAA sample selection, CPU-visible writes through the readback manager. | L-08, L-10 | 8.8, `util/draw.cpp` (`ResolveInfo`), XeSL resolve sources | shadows, fog, bloom and exposure match the Vulkan build |
-| L-10 | claimed claude-opus-5.5 2026-10-14 | **Texture cache.** Keys, layout math reuse, upload plus untile dispatch (S-19 shaders), BC direct, cube maps, invalidation from dirty ranges and resolves, eviction. | L-06, S-19, S-23 | 8.9, `pipeline/texture/cache.cpp`, `vulkan/texture_cache.cpp` | textures correct in all golden scenes; texture-load GPU time < 0.2 ms per frame in gameplay |
-| L-11 | claimed claude-opus-5.5 2026-10-14 | **Primitive handling.** Integrate `PrimitiveProcessor` (fans, quads, BE indices), index caching, dummy-draw detection (after S-05). | L-03, S-22 | 8.6, `primitive_processor.{h,cpp}` | all primitive types of 5.2 draw |
-| L-12 | claimed claude-opus-5.5 2026-10-14 | **Frame recorder.** Encoder per frame, lazy render passes, compute interleaving, upload rings, deferred destruction, threaded submission, error scopes. | L-02 | 8.12 | stable multi-minute runs; no validation errors |
+| L-07 | todo (partial, claude-opus-5.5 2026-10-14: see notes log) | **Pipeline cache and binding model.** Keys, bind group layouts, dynamic offsets, async creation, pipeline pre-creation list, WGSL cache, Dawn blob cache. | L-01, L-04a | 8.5, `vulkan/pipeline_cache.cpp` | no hitch after the first run; pipeline count logged |
+| L-08 | todo (partial, claude-opus-5.5 2026-10-14: see notes log) | **Render-target cache.** Keys, sizing (draw extent estimator), formats with feature fallbacks, 4x MSAA, `depth32float-stencil8`, scaling 1x/2x/3x (and non-integer if feasible), clear detection, aliasing detection and the minimal transfer path S-04 shows to be necessary. | L-03, S-23 | 8.7, `pipeline/render_target/cache.cpp`, `vulkan/render_target_cache.cpp` | all RT configs of 5.3 render; aliasing events logged |
+| L-09 | todo (partial, claude-opus-5.5 2026-10-14: see notes log) | **Resolve engine.** Classification (clear, GPU-consumed, CPU-visible, frontbuffer), conversions of section 5.7, resolve-to-texture aliases in the texture cache, MSAA sample selection, CPU-visible writes through the readback manager. | L-08, L-10 | 8.8, `util/draw.cpp` (`ResolveInfo`), XeSL resolve sources | shadows, fog, bloom and exposure match the Vulkan build |
+| L-10 | todo (partial, claude-opus-5.5 2026-10-14: see notes log) | **Texture cache.** Keys, layout math reuse, upload plus untile dispatch (S-19 shaders), BC direct, cube maps, invalidation from dirty ranges and resolves, eviction. | L-06, S-19, S-23 | 8.9, `pipeline/texture/cache.cpp`, `vulkan/texture_cache.cpp` | textures correct in all golden scenes; texture-load GPU time < 0.2 ms per frame in gameplay |
+| L-11 | todo (partial, claude-opus-5.5 2026-10-14: see notes log) | **Primitive handling.** Integrate `PrimitiveProcessor` (fans, quads, BE indices), index caching, dummy-draw detection (after S-05). | L-03, S-22 | 8.6, `primitive_processor.{h,cpp}` | all primitive types of 5.2 draw |
+| L-12 | todo (partial, claude-opus-5.5 2026-10-14: see notes log) | **Frame recorder.** Encoder per frame, lazy render passes, compute interleaving, upload rings, deferred destruction, threaded submission, error scopes. | L-02 | 8.12 | stable multi-minute runs; no validation errors |
 | L-13 | todo | **Queries, fences, readbacks.** Occlusion query results (after RE of how Trials uses them), async luminance readback, sync modes for testing. | L-09, L-12 | 8.10, `ExecutePacketType3_EVENT_WRITE_ZPD` | exposure behaves like the Vulkan build; no stalls |
 | L-14 | todo | **Presenter completion.** Gamma ramp (S-20), FPS pacing and FPS-unlock interplay, present modes, resize, fullscreen, headless capture parity with the Vulkan presenter. | L-02, S-20 | 8.11 | `tests/check_fps_log.py` passes at 60, 120 and uncapped |
 | L-15 | todo | **Parity loop (M6).** Run the golden scenes, find the worst diff, trace it to a draw with S-26 dumps and RenderDoc, fix, repeat. Owns the per-scene thresholds. | L-04*, L-08–L-13, S-32 | 11 | all golden scenes pass |
@@ -1997,6 +2005,37 @@ finding: `YYYY-MM-DD <agent> <task ID>: what changed; evidence; what is left`.
   instruction overrides; resolve aliases (`SetResolveAlias`, not yet fed by L-09).
   Pipeline layouts per texture signature. Frontbuffer blit applies the 256-entry or PWL
   gamma ramp (the WebGPU captures were brighter than Vulkan's before this).
+- 2026-10-14 claude-opus-5.5 L-04f done: rectangle lists drawn as two-triangle strips
+  from the SDK primitive processor; the vertex shader runs the guest body for the 3
+  guest vertices, starts at the corner opposite the longest edge and synthesizes the 4th
+  (v1 + v2 - v0, also for interpolators); guest indices read in the shader for
+  `kHostBuiltinForDMA` (system flags 8/16). `xenos2wgsl` also emits and validates the
+  rectangle variants: 95/95 modules valid. Menu: 0 skipped draws, PSNR vs Vulkan 38.7 →
+  40.4 dB. Riding (Middle Name: Danger): 1,557 draws and 20.5 resolves per frame, 0
+  skipped, no WebGPU errors; only the HUD is visible because the scene reaches the
+  frontbuffer through resolves sampled as textures (L-09 aliases, next). One of four ride
+  runs aborted with `free(): invalid pointer` (intermittent, same class as L-20 and the
+  host's compiler crashes; the other three completed).
+- 2026-10-14 claude-opus-5.5: stopping here (user request). Claims released; state of the
+  partial tasks for whoever continues:
+  - L-05: `xenos2wgsl` + Tint validation done; the GPU-vs-interpreter differential run
+    (`--diff`) is not written.
+  - L-07: shader/pipeline caches and layouts work; missing async creation, the
+    pre-creation list and Dawn's blob cache.
+  - L-08: RT cache works for all formats (full EDRAM height per pitch); missing the
+    height estimator, aliasing transfers (logged only) and partial-rect clears.
+  - L-09: only whole-surface clears and the frontbuffer region. **Next step:** in
+    `WebGpuBackend::Resolve`, copy the source RT region into a texture with the
+    destination's values (sample select for MSAA, k_16_16 integer + exp bias, depth to
+    r32float, 7e3 to 10:10:10:2) and register it with `TextureCache::SetResolveAlias`
+    (the lookup by base address already exists); then CPU-visible luminance resolves
+    (L-13).
+  - L-10: CPU loading for the formats Trials uses; missing eviction, compute untiling
+    (S-19) and 3D/stacked textures.
+  - L-11: SDK PrimitiveProcessor integrated (fans/quads/rects/DMA); index caching is the
+    SDK's; dummy-draw skip not added.
+  - L-12: frame recorder works (one submission per frame plus L-06 flushes); missing
+    deferred destruction and GPU timestamps.
 - 2026-10-14 pi-gpt (coordination): L-06 stays in `guest_memory_mirror.*` plus
   `tests/gpu_webgpu/` (standalone build; no shared build directory). Constructor:
   `(memory, provider.instance(), provider.device(), submit_pending)`; `Initialize()`
@@ -2027,7 +2066,51 @@ finding: `YYYY-MM-DD <agent> <task ID>: what changed; evidence; what is left`.
 - 2026-10-14 pi-gpt (coordination): live L-06 profiling uses a separate Xvfb,
   adapter 1 and `out/webgpu-l06`, not `out/run` or a shared build directory.
   Claimed L-24 next: changes will be confined to POSIX alertable-wait/APC code,
-  a separate SDK patch and synthetic host-thread tests; the existing L-23
+  a threading-only SDK patch update and synthetic host-thread tests; the existing L-23
   non-alertable wait behavior and other SDK edits will be preserved.
   L-25 already has `FlushLogging(); std::_Exit(0)` in `ReXApp::OnClosing`;
   it needs acceptance verification, not another equivalent implementation.
+- 2026-10-14 pi-gpt L-06 performance finding: RX 6600 riding profile captured
+  400 CP stacks; 79 contained `WebGpuSharedMemory::UploadRanges`, and **73/79
+  were inside its forced `FrameRecorder::Submit` callback**. This ordering is
+  correct but too expensive for the memory budget. Replacing the callback with
+  an upload encoder (end the render pass, then record unique-staging-buffer
+  copies into the existing encoder) preserves old-draw/new-data ordering
+  without those extra submissions. Only the constructor lambda in Claude's
+  `webgpu_backend.cpp` and the stale callback comment in `frame_recorder.h`
+  need changing; the recorder implementation and other backend code stay untouched.
+  Profiling output is local. The sampling completed, but `sample.sh` left an
+  inherited-output `sleep 3600` alive, so its background wrapper timed out;
+  fixing the stdin keeper separately before repeating the measurement.
+- 2026-10-14 pi-gpt L-06 follow-up: unique mapped buffers achieved **1 submission
+  per gameplay frame**, but 46/800 CP samples (5.75%) still contained mirror
+  upload work; mmap/ioctl allocation work dominated. Reusing `AllocateIndices`
+  and the existing ring removes those allocations; only an added `CopySrc` usage
+  bit in `frame_recorder.cpp` and the allocator lambda in `webgpu_backend.cpp`
+  change Claude's files. Ring rollover still submits before reuse. Requests
+  larger than the ring retain a mapped-buffer fallback. The synthetic fixture
+  tests mapped and deferred-ring sources, including two source slices and two
+  old-data consumers in a single encoder. CPU budget acceptance stays open.
+- 2026-10-14 pi-gpt L-24 host evidence: per-condition registrations plus a
+  callback-mutex-protected per-thread wake target replace 1 ms polling for
+  `Wait`, `SignalAndWait` and `WaitMultiple`. Callback execution remains outside
+  condition locks and signal handlers; nested waits restore the previous target
+  and alertable state. First synthetic run passed 1,000 FIFO/once-only callback
+  races, four wait forms, wait-all state preservation, nested dispatch and
+  zero/finite deadlines: **0.010 ms thread CPU / 150 ms idle, max callback
+  latency 0.047 ms**. Repeated/short-deadline checks and live game acceptance
+  are pending; task remains claimed. Only the threading section of the existing
+  SDK patch was regenerated, with clean-source replay and a byte-for-byte
+  pre-change check; all other SDK patch sections remain unchanged.
+- 2026-10-14 pi-gpt L-06 pooled measurement (RX 6600, riding, 800 CP samples):
+  mirror upload appears in **8/800 = 1.0%** of stacks (zero submit ancestry),
+  down from 79/400 with forced submissions and 46/800 with per-request mapped
+  buffers. Pre-sampler mean 109.475 guest FPS and CP CPU 89.9% give a
+  **sampling-derived ~0.082 ms/frame for the mirror**, ~0.236 ms/frame including
+  the SDK request path (23/800). Gameplay remains **1 submission/frame**.
+  These are sampling estimates, not exact timers or a whole-renderer performance
+  claim. Two-GPU mapped/ring tests and the isolated production plugin build
+  pass. Latest M3 capture comparison is still pending before closing L-06.
+  L-24 stress passed 30 runs / 30,000 FIFO callbacks: idle CPU 0.008–0.017 ms
+  per 150 ms wait, 200 × 1 ms waits cost 0.870–2.217 ms CPU, maximum observed
+  callback latency 0.248 ms. Same-renderer old/new-runtime live checks are running.
