@@ -7,8 +7,12 @@
 set -euo pipefail
 pid=$1 count=${2:-300} interval=${3:-0.05} threads=${4:-} out=${5:-samples.txt}
 here="$(cd "$(dirname "$0")" && pwd)"
-# gdb must stay in its event loop after the script runs: keep stdin open
-# (process substitution, so nothing waits for the sleep once gdb quits).
+# Keep stdin open for gdb's event loop without an orphan holding output pipes.
+input_dir=$(mktemp -d)
+trap 'rm -rf "$input_dir"' EXIT
+mkfifo "$input_dir/stdin"
+exec {input_fd}<>"$input_dir/stdin"
 SAMPLER_COUNT=$count SAMPLER_INTERVAL=$interval SAMPLER_THREADS=$threads SAMPLER_OUT=$out \
-  gdb -q -nx -p "$pid" -x "$here/gdb_sampler.py" < <(sleep 3600) > "$out.gdb.log" 2>&1 || true
+  gdb -q -nx -p "$pid" -x "$here/gdb_sampler.py" <&$input_fd > "$out.gdb.log" 2>&1 || true
+exec {input_fd}>&-
 echo "$(wc -l < "$out") thread samples in $out"
