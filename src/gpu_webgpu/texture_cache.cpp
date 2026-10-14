@@ -166,31 +166,17 @@ void ConvertBlock(Conversion conversion, xenos::TextureFormat format, bool is_si
   }
 }
 
-wgpu::AddressMode ToAddressMode(xenos::ClampMode mode) {
-  switch (mode) {
-    case xenos::ClampMode::kRepeat:
-      return wgpu::AddressMode::Repeat;
-    case xenos::ClampMode::kMirroredRepeat:
-    case xenos::ClampMode::kMirrorClampToEdge:
-    case xenos::ClampMode::kMirrorClampToHalfway:
-    case xenos::ClampMode::kMirrorClampToBorder:
-      return wgpu::AddressMode::MirrorRepeat;
-    default:
-      return wgpu::AddressMode::ClampToEdge;
-  }
-}
-
 }  // namespace
 
 TextureCache::TextureCache(ui::webgpu::WebGpuProvider& provider, memory::Memory& memory,
                            WebGpuSharedMemory& shared_memory)
-    : provider_(provider), memory_(memory), shared_memory_(shared_memory) {}
+    : provider_(provider), memory_(memory), shared_memory_(shared_memory), sampler_cache_(provider) {}
 
 TextureCache::~TextureCache() {
   std::lock_guard lock(provider_.device_mutex());
   textures_.clear();
   resolve_aliases_.clear();
-  samplers_.clear();
+  sampler_cache_.Clear();
 }
 
 bool TextureCache::Initialize() {
@@ -433,55 +419,7 @@ bool TextureCache::LoadTexture(Texture& texture) {
 wgpu::Sampler TextureCache::GetSampler(const xenos::xe_gpu_texture_fetch_t& fetch,
                                        const ParsedTextureFetchInstruction::Attributes& overrides,
                                        bool vertex_shader) {
-  auto resolve_filter = [](xenos::TextureFilter instruction, xenos::TextureFilter constant) {
-    return instruction == xenos::TextureFilter::kUseFetchConst ? constant : instruction;
-  };
-  xenos::TextureFilter mag = resolve_filter(overrides.mag_filter, fetch.mag_filter);
-  xenos::TextureFilter min = resolve_filter(overrides.min_filter, fetch.min_filter);
-  xenos::TextureFilter mip = resolve_filter(overrides.mip_filter, fetch.mip_filter);
-  xenos::AnisoFilter aniso = overrides.aniso_filter == xenos::AnisoFilter::kUseFetchConst
-                                 ? fetch.aniso_filter
-                                 : overrides.aniso_filter;
-  uint32_t mip_min_level = fetch.mip_min_level;
-  uint32_t mip_max_level = std::max(fetch.mip_max_level, fetch.mip_min_level);
-  if (mip == xenos::TextureFilter::kBaseMap) {
-    mip_max_level = mip_min_level;
-  }
-  uint32_t max_anisotropy = 1;
-  if (aniso != xenos::AnisoFilter::kDisabled && !vertex_shader) {
-    max_anisotropy = uint32_t(1) << (uint32_t(aniso) - 1);
-  }
-  uint64_t sampler_key = uint64_t(fetch.clamp_x) | (uint64_t(fetch.clamp_y) << 3) |
-                         (uint64_t(fetch.clamp_z) << 6) | (uint64_t(mag) << 9) |
-                         (uint64_t(min) << 11) | (uint64_t(mip) << 13) |
-                         (uint64_t(max_anisotropy) << 15) | (uint64_t(mip_min_level) << 21) |
-                         (uint64_t(mip_max_level) << 25);
-  auto it = samplers_.find(sampler_key);
-  if (it != samplers_.end()) {
-    return it->second;
-  }
-  wgpu::SamplerDescriptor desc;
-  desc.label = "guest sampler";
-  desc.addressModeU = ToAddressMode(fetch.clamp_x);
-  desc.addressModeV = ToAddressMode(fetch.clamp_y);
-  desc.addressModeW = ToAddressMode(fetch.clamp_z);
-  desc.magFilter =
-      mag == xenos::TextureFilter::kLinear ? wgpu::FilterMode::Linear : wgpu::FilterMode::Nearest;
-  desc.minFilter =
-      min == xenos::TextureFilter::kLinear ? wgpu::FilterMode::Linear : wgpu::FilterMode::Nearest;
-  desc.mipmapFilter = mip == xenos::TextureFilter::kLinear ? wgpu::MipmapFilterMode::Linear
-                                                           : wgpu::MipmapFilterMode::Nearest;
-  desc.lodMinClamp = float(mip_min_level);
-  desc.lodMaxClamp = float(mip_max_level);
-  // Anisotropy needs linear filtering everywhere in WebGPU.
-  if (max_anisotropy > 1 && desc.magFilter == wgpu::FilterMode::Linear &&
-      desc.minFilter == wgpu::FilterMode::Linear &&
-      desc.mipmapFilter == wgpu::MipmapFilterMode::Linear) {
-    desc.maxAnisotropy = uint16_t(max_anisotropy);
-  }
-  wgpu::Sampler sampler = provider_.device().CreateSampler(&desc);
-  samplers_.emplace(sampler_key, sampler);
-  return sampler;
+  return sampler_cache_.GetOrCreate(fetch, overrides, vertex_shader);
 }
 
 }  // namespace rex::graphics::webgpu

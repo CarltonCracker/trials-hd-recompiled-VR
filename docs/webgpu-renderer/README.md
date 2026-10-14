@@ -1822,8 +1822,8 @@ ambiguity, it stops and writes the question into the task's notes instead of gue
 
 | ID | Status | Tier | Task | Depends | Done when |
 | --- | --- | --- | --- | --- | --- |
-| S-23 | todo | S | `format_tables.{h,cpp}`: Xenos color/depth RT format → `wgpu::TextureFormat`, Xenos texture format → host format and load shader, with fallbacks by feature (sections 9.2, 9.3). Unit tests for every Trials format. | L-02 | tests pass |
-| S-24 | todo | S | `sampler_cache.{h,cpp}`: fetch constant → sampler key → `wgpu::SamplerDescriptor` (clamp, filters, aniso, LOD bias, min/max LOD), cached. Unit tests. | L-02 | tests pass |
+| S-23 | done 2026-10-14 | S | `format_tables.{h,cpp}`: Xenos color/depth RT format → `wgpu::TextureFormat`, Xenos texture format → host format and load shader, with fallbacks by feature (sections 9.2, 9.3). Unit tests for every Trials format. | L-02 | all Trials formats and fallbacks pass unit tests (`format_tables_test`) |
+| S-24 | done 2026-10-14 | S | `sampler_cache.{h,cpp}`: fetch constant → sampler key → `wgpu::SamplerDescriptor` (clamp, filters, aniso, LOD bias, min/max LOD), cached. Unit tests. | L-02 | address modes, filters, aniso rules, key hashing, and live Dawn sampler creation pass on both GPUs (`sampler_cache_test 0/1`) |
 | S-25 | todo | S | Blend, depth and stencil state translation: Xenos `RB_BLENDCONTROL`, `RB_DEPTHCONTROL`, `RB_STENCILREFMASK`, `RB_COLOR_MASK`, `PA_SU_SC_MODE_CNTL` → WebGPU structs, including constant-color factors and depth bias. Unit tests per value in section 5.4. | L-07 (key layout) | tests pass |
 | S-26 | todo | S | Per-draw debug dump in the WebGPU backend (`webgpu_dump_frame=N`), same record format as `probe/draw_probe.gdb`, so `analyze_draws.py` and a diff script compare the two backends. | L-03 | dump of one frame matches the Vulkan probe's draw count |
 | S-27 | todo | S | WebGPU debug labels: every pass, pipeline and draw labeled with guest draw index, shader hashes and RT key; push and pop debug groups per guest pass. | L-12 | labels visible in a RenderDoc capture |
@@ -2231,3 +2231,15 @@ finding: `YYYY-MM-DD <agent> <task ID>: what changed; evidence; what is left`.
     on the RX 6600: Dawn encoding costs **0.137 µs/draw** with `skip_validation` (vs 0.486 µs with validation), and submit
     costs **0.712 µs/draw**, for a total Dawn cost of **0.849 µs/draw** (1.27 ms/frame), beating the 1.0 µs/draw budget.
     Results recorded in Section 7.5.
+  - **S-23:** Implemented `src/gpu_webgpu/format_tables.{h,cpp}` providing feature-dependent mapping for all Xenos color
+    and depth render target formats and texture formats (Sections 9.2, 9.3). Handles `k_16_16` fixed-point RT with 1/32 range scale
+    (`RG16Snorm` when `texture-formats-tier1` is present; `RG16Float` fallback with 1.0 scale), `D24FS8` depth (`Depth32FloatStencil8`
+    with `depth32float-stencil8`; `Depth24PlusStencil8` fallback), BC compression checks, and texture compute load shaders
+    (`texture_load_8bpb`, `32bpb`, `64bpb`, `128bpb`, `depth_float`). Wired into `RenderTargetCache`. Authored unit tests in
+    `tests/gpu_webgpu/format_tables_test.cpp` covering every Trials HD format and fallback configuration; 100% passed.
+  - **S-24:** Implemented `src/gpu_webgpu/sampler_cache.{h,cpp}`: translates fetch constants and instruction overrides to
+    `SamplerKey` and `wgpu::SamplerDescriptor` (wrap/clamp/border address modes, point/linear filtering, mip base map LOD clamping,
+    anisotropy up to 16:1 with WebGPU linear-filter validation guard, vertex-stage anisotropy suppression, and LOD bias). Cached
+    under device lock. Wired into `TextureCache`. Authored unit tests in `tests/gpu_webgpu/sampler_cache_test.cpp` verifying
+    key hashing, descriptor generation, and live Dawn sampler creation on both GPUs (NVIDIA RTX 2070 SUPER and AMD RX 6600);
+    0 Dawn validation errors.

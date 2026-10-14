@@ -20,6 +20,8 @@
 #include <rex/graphics/pipeline/shader/shader.h>
 #include <rex/graphics/xenos.h>
 
+#include "sampler_cache.h"
+
 namespace rex::memory {
 class Memory;
 }  // namespace rex::memory
@@ -54,6 +56,8 @@ class TextureCache {
   // Resolve aliases are dropped when the CPU writes the memory again.
 
   size_t texture_count() const { return textures_.size(); }
+  SamplerCache& sampler_cache() { return sampler_cache_; }
+  const SamplerCache& sampler_cache() const { return sampler_cache_; }
 
  private:
   union Key {
@@ -111,7 +115,7 @@ class TextureCache {
   WebGpuSharedMemory& shared_memory_;
   std::unordered_map<Key, std::unique_ptr<Texture>, KeyHash> textures_;
   std::unordered_map<uint32_t, ResolveAlias> resolve_aliases_;
-  std::unordered_map<uint64_t, wgpu::Sampler> samplers_;
+  SamplerCache sampler_cache_;
   wgpu::TextureView black_2d_;
   wgpu::TextureView black_cube_;
 };

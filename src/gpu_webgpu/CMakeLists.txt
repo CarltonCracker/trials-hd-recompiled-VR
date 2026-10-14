@@ -79,10 +79,12 @@ add_library(rexgpu-webgpu SHARED
 )
 # Draw path (L-07, L-08, L-11, L-12).
 target_sources(rexgpu-webgpu PRIVATE
+    format_tables.cpp
     frame_recorder.cpp
     pipeline_cache.cpp
     primitive_converter.cpp
     render_target_cache.cpp
+    sampler_cache.cpp
     texture_cache.cpp
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")

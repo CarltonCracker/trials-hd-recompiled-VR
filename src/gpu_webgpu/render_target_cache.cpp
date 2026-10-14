@@ -9,6 +9,7 @@
 #include <rex/graphics/registers.h>
 #include <rex/logging.h>
 
+#include "format_tables.h"
 #include "webgpu_provider.h"
 
 namespace rex::graphics::webgpu {
@@ -24,64 +25,25 @@ RenderTargetCache::~RenderTargetCache() {
 
 wgpu::TextureFormat RenderTargetCache::GetColorHostFormat(xenos::ColorRenderTargetFormat format,
                                                           float* output_scale_out) const {
-  using F = xenos::ColorRenderTargetFormat;
-  float output_scale = 1.0f;
-  wgpu::TextureFormat host = wgpu::TextureFormat::RGBA8Unorm;
-  bool snorm16 = provider_.HasFeature(wgpu::FeatureName::TextureFormatsTier1);
-  switch (format) {
-    case F::k_8_8_8_8:
-    case F::k_8_8_8_8_GAMMA:
-      host = wgpu::TextureFormat::RGBA8Unorm;
-      break;
-    case F::k_2_10_10_10:
-    case F::k_2_10_10_10_AS_10_10_10_10:
-      host = wgpu::TextureFormat::RGB10A2Unorm;
-      break;
-    case F::k_2_10_10_10_FLOAT:
-    case F::k_2_10_10_10_FLOAT_AS_16_16_16_16:
-    case F::k_16_16_16_16_FLOAT:
-      host = wgpu::TextureFormat::RGBA16Float;
-      break;
-    case F::k_16_16:
-      // Xenos fixed point -32...32 (section 9.2).
-      host = snorm16 ? wgpu::TextureFormat::RG16Snorm : wgpu::TextureFormat::RG16Float;
-      output_scale = snorm16 ? 1.0f / 32.0f : 1.0f;
-      break;
-    case F::k_16_16_16_16:
-      host = snorm16 ? wgpu::TextureFormat::RGBA16Snorm : wgpu::TextureFormat::RGBA16Float;
-      output_scale = snorm16 ? 1.0f / 32.0f : 1.0f;
-      break;
-    case F::k_16_16_FLOAT:
-      host = wgpu::TextureFormat::RG16Float;
-      break;
-    case F::k_32_FLOAT:
-      host = wgpu::TextureFormat::R32Float;
-      break;
-    case F::k_32_32_FLOAT:
-      host = wgpu::TextureFormat::RG32Float;
-      break;
-    default:
-      break;
-  }
+  auto features = format_tables::DeviceFeatures::FromProvider(provider_);
+  auto info = format_tables::GetColorRenderTargetFormatInfo(format, features);
   if (output_scale_out) {
-    *output_scale_out = output_scale;
+    *output_scale_out = info.output_scale;
   }
-  return host;
+  return info.host_format;
 }
 
 wgpu::TextureFormat RenderTargetCache::GetDepthHostFormat(
     xenos::DepthRenderTargetFormat format) const {
-  if (format == xenos::DepthRenderTargetFormat::kD24FS8 &&
-      provider_.HasFeature(wgpu::FeatureName::Depth32FloatStencil8)) {
-    return wgpu::TextureFormat::Depth32FloatStencil8;
-  }
-  return wgpu::TextureFormat::Depth24PlusStencil8;
+  auto features = format_tables::DeviceFeatures::FromProvider(provider_);
+  auto info = format_tables::GetDepthRenderTargetFormatInfo(format, features);
+  return info.host_format;
 }
 
 bool RenderTargetCache::HostDepthFormatHasStencil(wgpu::TextureFormat format) {
-  return format == wgpu::TextureFormat::Depth32FloatStencil8 ||
-         format == wgpu::TextureFormat::Depth24PlusStencil8;
+  return format_tables::HostDepthFormatHasStencil(format);
 }
+
 
 RenderTarget* RenderTargetCache::GetOrCreate(RenderTargetKey key) {
   auto it = targets_.find(key.value);

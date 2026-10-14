@@ -59,6 +59,32 @@ target_compile_definitions(alu_test PRIVATE SPDLOG_COMPILED_LIB SPDLOG_FMT_EXTER
 target_compile_options(alu_test PRIVATE -fno-strict-aliasing -ffp-model=strict -fno-char8_t)
 target_link_libraries(alu_test PRIVATE
     ${_runtime} ${_spdlog} ${_fmt} dawn::webgpu_dawn Threads::Threads)
+add_executable(format_tables_test
+    format_tables_test.cpp
+    ${_repo}/src/gpu_webgpu/format_tables.cpp)
+target_include_directories(format_tables_test PRIVATE
+    ${_repo}/src/gpu_webgpu ${REXSDK_DIR}/include ${REXSDK_BUILD_DIR}/include
+    ${REXSDK_DIR}/thirdparty/simde ${REXSDK_DIR}/thirdparty/fmt/include
+    ${REXSDK_DIR}/thirdparty/spdlog/include)
+target_compile_definitions(format_tables_test PRIVATE SPDLOG_COMPILED_LIB SPDLOG_FMT_EXTERNAL)
+target_compile_options(format_tables_test PRIVATE -fno-strict-aliasing -ffp-model=strict -fno-char8_t)
+target_link_libraries(format_tables_test PRIVATE
+    ${_runtime} ${_spdlog} ${_fmt} dawn::webgpu_dawn Threads::Threads)
+
+add_executable(sampler_cache_test
+    sampler_cache_test.cpp
+    ${_repo}/src/gpu_webgpu/sampler_cache.cpp)
+target_include_directories(sampler_cache_test PRIVATE
+    ${_repo}/src/gpu_webgpu ${REXSDK_DIR}/include ${REXSDK_BUILD_DIR}/include
+    ${REXSDK_DIR}/thirdparty/renderdoc ${REXSDK_DIR}/thirdparty/simde
+    ${REXSDK_DIR}/thirdparty/fmt/include ${REXSDK_DIR}/thirdparty/spdlog/include)
+target_compile_definitions(sampler_cache_test PRIVATE SPDLOG_COMPILED_LIB SPDLOG_FMT_EXTERNAL)
+target_compile_options(sampler_cache_test PRIVATE -fno-strict-aliasing -ffp-model=strict -fno-char8_t)
+target_link_libraries(sampler_cache_test PRIVATE
+    ${_runtime} ${_spdlog} ${_fmt} dawn::webgpu_dawn Threads::Threads)
+
 enable_testing()
 add_test(NAME shared_memory COMMAND shared_memory_test)
 add_test(NAME alu COMMAND alu_test)
+add_test(NAME format_tables COMMAND format_tables_test)
+add_test(NAME sampler_cache COMMAND sampler_cache_test)
