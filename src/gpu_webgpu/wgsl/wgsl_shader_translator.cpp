@@ -34,6 +34,26 @@ uint64_t WgslShaderTranslator::GetDefaultPixelShaderModification(
   return modification.value;
 }
 
+std::vector<WgslShaderTranslator::TextureSlot> WgslShaderTranslator::GetTextureSlots(
+    const Shader& shader) {
+  std::vector<TextureSlot> slots;
+  const auto& bindings = shader.texture_bindings();
+  for (size_t i = 0; i < bindings.size(); ++i) {
+    const Shader::TextureBinding& binding = bindings[i];
+    if (binding.binding_index >= wgsl_binding::kMaxTexturesPerStage) {
+      continue;
+    }
+    if (slots.size() <= binding.binding_index) {
+      slots.resize(binding.binding_index + 1);
+      TextureSlot& slot = slots[binding.binding_index];
+      slot.fetch_constant = binding.fetch_constant;
+      slot.is_cube = binding.fetch_instr.dimension == xenos::FetchOpDimension::kCube;
+      slot.first_binding = i;
+    }
+  }
+  return slots;
+}
+
 uint32_t WgslShaderTranslator::GetFloatConstantArraySize(const Shader& shader) {
   const Shader::ConstantRegisterMap& map = shader.constant_register_map();
   if (map.float_dynamic_addressing) {
@@ -150,6 +170,71 @@ void WgslShaderTranslator::EmitDeclarations(std::string& out) const {
         "@group({}) @binding({}) var<storage, read> xe_shared_memory: array<u32>;\n",
         wgsl_binding::kGroupSharedMemory, wgsl_binding::kSharedMemory);
   }
+  std::vector<TextureSlot> slots = GetTextureSlots(shader);
+  for (uint32_t i = 0; i < slots.size(); ++i) {
+    uint32_t binding = GetTextureBindingNumber(shader.type(), i);
+    out += fmt::format("@group({}) @binding({}) var xe_texture_{}: {};\n",
+                       wgsl_binding::kGroupTextures, binding, i,
+                       slots[i].is_cube ? "texture_cube<f32>" : "texture_2d<f32>");
+    out += fmt::format("@group({}) @binding({}) var xe_sampler_{}: sampler;\n",
+                       wgsl_binding::kGroupTextures, binding + wgsl_binding::kSamplerOffset, i);
+  }
+  out += '\n';
+  out += R"(var<private> xe_texture_lod: f32;
+// Fetch constant post-processing: signedness (applies to the data before the
+// swizzle), exponent adjustment and the fetch constant's swizzle.
+fn xe_texture_postprocess(value: vec4f, fetch: u32) -> vec4f {
+  let word_0 = xe_fetch_word(fetch * 6u);
+  let word_1 = xe_fetch_word(fetch * 6u + 1u);
+  let word_3 = xe_fetch_word(fetch * 6u + 3u);
+  let format = word_1 & 0x3Fu;
+  // 8-bit-per-component formats are stored unorm on the host.
+  let is_8bpc = format == 2u || format == 6u || format == 8u || format == 9u || format == 10u ||
+                format == 14u;
+  var v = value;
+  for (var i = 0u; i < 4u; i++) {
+    let sign = (word_0 >> (2u + 2u * i)) & 3u;
+    if (sign == 1u && is_8bpc) {
+      let n = round(v[i] * 255.0);
+      v[i] = max(select(n, n - 256.0, n >= 128.0) / 127.0, -1.0);
+    } else if (sign == 2u) {
+      v[i] = v[i] * 2.0 - 1.0;
+    }
+  }
+  v *= exp2(f32(extractBits(bitcast<i32>(word_3), 13u, 6u)));
+  var r: vec4f;
+  for (var i = 0u; i < 4u; i++) {
+    let select_component = (word_3 >> (1u + 3u * i)) & 7u;
+    if (select_component < 4u) {
+      r[i] = v[select_component];
+    } else {
+      r[i] = select(0.0, 1.0, select_component == 5u);
+    }
+  }
+  return r;
+}
+fn xe_texture_size(fetch: u32) -> vec2f {
+  let word_2 = xe_fetch_word(fetch * 6u + 2u);
+  return vec2f(f32(word_2 & 0x1FFFu) + 1.0, f32((word_2 >> 13u) & 0x1FFFu) + 1.0);
+}
+fn xe_texture_lod_bias(fetch: u32) -> f32 {
+  return f32(extractBits(bitcast<i32>(xe_fetch_word(fetch * 6u + 4u)), 12u, 10u)) / 32.0;
+}
+// Cube coordinates (SC, TC in 1...2, face index) to a direction: the inverse
+// of the ALU cube instruction (SpirvShaderTranslator).
+fn xe_cube_direction(coordinates: vec3f) -> vec3f {
+  let sc = coordinates.x * 2.0 - 3.0;
+  let tc = coordinates.y * 2.0 - 3.0;
+  let face = u32(clamp(coordinates.z, 0.0, 5.0));
+  let negative = (face & 1u) != 0u;
+  let sign = select(1.0, -1.0, negative);
+  switch (face >> 1u) {
+    case 0u: { return vec3f(sign, -tc, select(-sc, sc, negative)); }
+    case 1u: { return vec3f(sc, sign, select(tc, -tc, negative)); }
+    default: { return vec3f(select(sc, -sc, negative), -tc, sign); }
+  }
+}
+)";
   out += '\n';
 
   if (shader.constant_register_map().float_dynamic_addressing) {
@@ -632,7 +717,7 @@ void WgslShaderTranslator::StoreResult(const InstructionResult& result, const st
       default:
         component_value = temp + "." + GetCharForSwizzle(result.components[i]);
         if (result.is_clamped) {
-          component_value = "saturate(" + component_value + ")";
+          component_value = "xe_saturate(" + component_value + ")";
         }
         break;
     }

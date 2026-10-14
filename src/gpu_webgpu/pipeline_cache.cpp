@@ -120,6 +120,72 @@ wgpu::StencilOperation ToStencilOperation(xenos::StencilOp op) {
 
 }  // namespace
 
+TextureLayoutSignature TextureLayoutSignature::Get(const Shader& vertex_shader,
+                                                   const Shader* pixel_shader) {
+  TextureLayoutSignature signature;
+  auto vertex_slots = WgslShaderTranslator::GetTextureSlots(vertex_shader);
+  signature.vertex_count = uint32_t(vertex_slots.size());
+  for (uint32_t i = 0; i < vertex_slots.size(); ++i) {
+    signature.vertex_cube_mask |= uint32_t(vertex_slots[i].is_cube) << i;
+  }
+  if (pixel_shader) {
+    auto pixel_slots = WgslShaderTranslator::GetTextureSlots(*pixel_shader);
+    signature.pixel_count = uint32_t(pixel_slots.size());
+    for (uint32_t i = 0; i < pixel_slots.size(); ++i) {
+      signature.pixel_cube_mask |= uint32_t(pixel_slots[i].is_cube) << i;
+    }
+  }
+  return signature;
+}
+
+const PipelineCache::TextureLayouts& PipelineCache::GetTextureLayouts(
+    TextureLayoutSignature signature) {
+  auto it = texture_layouts_.find(signature.value);
+  if (it != texture_layouts_.end()) {
+    return it->second;
+  }
+  std::vector<wgpu::BindGroupLayoutEntry> entries;
+  auto add_stage = [&entries](uint32_t count, uint32_t cube_mask, uint32_t base,
+                              wgpu::ShaderStage stage) {
+    for (uint32_t i = 0; i < count; ++i) {
+      wgpu::BindGroupLayoutEntry texture;
+      texture.binding = base + i;
+      texture.visibility = stage;
+      texture.texture.sampleType = wgpu::TextureSampleType::Float;
+      texture.texture.viewDimension = (cube_mask & (1u << i)) ? wgpu::TextureViewDimension::Cube
+                                                              : wgpu::TextureViewDimension::e2D;
+      entries.push_back(texture);
+      wgpu::BindGroupLayoutEntry sampler;
+      sampler.binding = base + i + wgsl_binding::kSamplerOffset;
+      sampler.visibility = stage;
+      sampler.sampler.type = wgpu::SamplerBindingType::Filtering;
+      entries.push_back(sampler);
+    }
+  };
+  add_stage(signature.pixel_count, signature.pixel_cube_mask, 0, wgpu::ShaderStage::Fragment);
+  add_stage(signature.vertex_count, signature.vertex_cube_mask, wgsl_binding::kVertexTextureBase,
+            wgpu::ShaderStage::Vertex);
+  TextureLayouts layouts;
+  wgpu::BindGroupLayoutDescriptor desc;
+  desc.label = "textures";
+  desc.entryCount = entries.size();
+  desc.entries = entries.data();
+  layouts.bind_group_layout = provider_.device().CreateBindGroupLayout(&desc);
+  std::array<wgpu::BindGroupLayout, 3> groups = {draw_layout_, shared_memory_layout_,
+                                                  layouts.bind_group_layout};
+  wgpu::PipelineLayoutDescriptor layout_desc;
+  layout_desc.label = "guest draw";
+  layout_desc.bindGroupLayoutCount = groups.size();
+  layout_desc.bindGroupLayouts = groups.data();
+  layouts.pipeline_layout = provider_.device().CreatePipelineLayout(&layout_desc);
+  return texture_layouts_.emplace(signature.value, std::move(layouts)).first->second;
+}
+
+const wgpu::BindGroupLayout& PipelineCache::GetTextureBindGroupLayout(
+    TextureLayoutSignature signature) {
+  return GetTextureLayouts(signature).bind_group_layout;
+}
+
 bool PipelineKey::operator==(const PipelineKey& other) const {
   return std::memcmp(this, &other, sizeof(*this)) == 0;
 }
@@ -190,13 +256,15 @@ bool PipelineCache::Initialize() {
   empty_desc.layout = texture_layout_;
   empty_texture_group_ = device.CreateBindGroup(&empty_desc);
 
+  // Shaders without textures share the empty group 2 layout.
+  texture_layouts_[0] = {texture_layout_, nullptr};
   std::array<wgpu::BindGroupLayout, 3> layouts = {draw_layout_, shared_memory_layout_,
                                                    texture_layout_};
   wgpu::PipelineLayoutDescriptor layout_desc;
   layout_desc.label = "guest draw";
   layout_desc.bindGroupLayoutCount = layouts.size();
   layout_desc.bindGroupLayouts = layouts.data();
-  pipeline_layout_ = device.CreatePipelineLayout(&layout_desc);
+  texture_layouts_[0].pipeline_layout = device.CreatePipelineLayout(&layout_desc);
 
   wgpu::ShaderSourceWGSL wgsl;
   wgsl.code = kNullPixelShader;
@@ -204,7 +272,7 @@ bool PipelineCache::Initialize() {
   module_desc.nextInChain = &wgsl;
   module_desc.label = "null pixel shader";
   null_pixel_shader_ = device.CreateShaderModule(&module_desc);
-  return bool(pipeline_layout_);
+  return bool(texture_layouts_[0].pipeline_layout);
 }
 
 Shader* PipelineCache::LoadShader(xenos::ShaderType type, const uint32_t* ucode_dwords,
@@ -348,7 +416,9 @@ wgpu::RenderPipeline PipelineCache::GetPipeline(const PipelineKey& key, Shader& 
     std::string label = fmt::format("{:016X}+{:016X}", key.vertex_shader_hash,
                                     key.pixel_shader_hash);
     desc.label = label.c_str();
-    desc.layout = pipeline_layout_;
+    TextureLayoutSignature signature;
+    signature.value = key.texture_layout;
+    desc.layout = GetTextureLayouts(signature).pipeline_layout;
     desc.vertex.module = vertex_module;
     desc.vertex.entryPoint = "main";
     desc.primitive.topology = wgpu::PrimitiveTopology(key.topology);

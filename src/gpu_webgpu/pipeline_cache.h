@@ -42,8 +42,21 @@ struct PipelineKey {
   uint32_t stencil_write_mask;
   int32_t depth_bias;
   float depth_bias_slope_scale;
+  uint32_t texture_layout;  // TextureLayoutSignature
 
   bool operator==(const PipelineKey& other) const;
+};
+
+// Group 2 layout: texture slot counts and cube masks per stage.
+union TextureLayoutSignature {
+  uint32_t value = 0;
+  struct {
+    uint32_t pixel_count : 4;
+    uint32_t pixel_cube_mask : 8;
+    uint32_t vertex_count : 4;
+    uint32_t vertex_cube_mask : 8;
+  };
+  static TextureLayoutSignature Get(const Shader& vertex_shader, const Shader* pixel_shader);
 };
 
 struct PipelineKeyHash {
@@ -72,7 +85,7 @@ class PipelineCache {
   const wgpu::BindGroupLayout& shared_memory_bind_group_layout() const {
     return shared_memory_layout_;
   }
-  const wgpu::BindGroupLayout& texture_bind_group_layout() const { return texture_layout_; }
+  const wgpu::BindGroupLayout& GetTextureBindGroupLayout(TextureLayoutSignature signature);
   const wgpu::BindGroup& empty_texture_bind_group() const { return empty_texture_group_; }
 
   size_t pipeline_count() const { return pipelines_.size(); }
@@ -101,7 +114,12 @@ class PipelineCache {
   wgpu::BindGroupLayout shared_memory_layout_;
   wgpu::BindGroupLayout texture_layout_;
   wgpu::BindGroup empty_texture_group_;
-  wgpu::PipelineLayout pipeline_layout_;
+  struct TextureLayouts {
+    wgpu::BindGroupLayout bind_group_layout;
+    wgpu::PipelineLayout pipeline_layout;
+  };
+  std::unordered_map<uint32_t, TextureLayouts> texture_layouts_;
+  const TextureLayouts& GetTextureLayouts(TextureLayoutSignature signature);
   wgpu::ShaderModule null_pixel_shader_;
 };
 

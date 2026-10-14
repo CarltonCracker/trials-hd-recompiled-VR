@@ -83,6 +83,7 @@ target_sources(rexgpu-webgpu PRIVATE
     pipeline_cache.cpp
     primitive_converter.cpp
     render_target_cache.cpp
+    texture_cache.cpp
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     find_package(X11 REQUIRED)

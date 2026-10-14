@@ -70,6 +70,10 @@ struct SwapSnapshot {
   uint32_t display_width = 0;  // guest video mode, for the aspect ratio
   uint32_t display_height = 0;
   uint32_t frame_index = 0;
+  // Gamma ramps (valid during the call): 256 DC_LUT_30_COLOR values and
+  // 128 x RGB DC_LUT_PWL_DATA values.
+  const uint32_t* gamma_ramp_table = nullptr;
+  const uint32_t* gamma_ramp_pwl = nullptr;
 };
 
 }  // namespace rex::graphics::webgpu

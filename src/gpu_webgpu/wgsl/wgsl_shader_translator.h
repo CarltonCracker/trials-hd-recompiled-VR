@@ -25,7 +25,11 @@ constexpr uint32_t kFetchConstants = 4;
 constexpr uint32_t kGroupSharedMemory = 1;
 constexpr uint32_t kSharedMemory = 0;
 constexpr uint32_t kGroupTextures = 2;
-constexpr uint32_t kFirstSampler = 16;
+// Pixel shader textures at 0..7, vertex shader textures at 8..15; each
+// texture's sampler at its binding + 16.
+constexpr uint32_t kMaxTexturesPerStage = 8;
+constexpr uint32_t kVertexTextureBase = 8;
+constexpr uint32_t kSamplerOffset = 16;
 }  // namespace wgsl_binding
 
 // Per-draw values the shaders read (group 0, binding 0). Layout matches the
@@ -92,6 +96,19 @@ class WgslShaderTranslator : public ShaderTranslator {
   // texture fetch is translated. Part of the translation, so set it before
   // translating anything.
   void set_untextured_fetch_value(float value) { untextured_fetch_value_ = value; }
+
+  // Texture bindings of a shader, indexed by Shader::TextureBinding
+  // binding_index (one per fetch constant).
+  struct TextureSlot {
+    uint32_t fetch_constant = 0;
+    bool is_cube = false;
+    // Index of the first fetch instruction (for filter overrides).
+    size_t first_binding = 0;
+  };
+  static std::vector<TextureSlot> GetTextureSlots(const Shader& shader);
+  static uint32_t GetTextureBindingNumber(xenos::ShaderType type, uint32_t slot) {
+    return (type == xenos::ShaderType::kVertex ? wgsl_binding::kVertexTextureBase : 0) + slot;
+  }
 
   // Size of the float constant array the module declares (packed or 256).
   static uint32_t GetFloatConstantArraySize(const Shader& shader);

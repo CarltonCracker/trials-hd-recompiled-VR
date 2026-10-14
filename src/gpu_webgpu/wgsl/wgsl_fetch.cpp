@@ -6,6 +6,7 @@
 
 #include <fmt/format.h>
 
+#include <rex/graphics/format/ucode.h>
 #include <rex/graphics/xenos.h>
 #include <rex/math.h>
 
@@ -194,10 +195,93 @@ void WgslShaderTranslator::ProcessVertexFetchInstruction(
 
 void WgslShaderTranslator::ProcessTextureFetchInstruction(
     const ParsedTextureFetchInstruction& instr) {
-  // Texture fetch and the related ops (getTextureWeights, setTexLOD, ...) are
-  // task L-04d. Until then the result is zero, like the SDK interpreter.
   BeginPredicate(instr.is_predicated, instr.predicate_condition);
-  StoreResult(instr.result, fmt::format("vec4f({:.1f})", untextured_fetch_value_));
+  switch (instr.opcode) {
+    case ucode::FetchOpcode::kSetTextureLod:
+      Line("xe_texture_lod = " + OperandScalar(instr.operands[0], 0) + ";");
+      EndPredicate();
+      return;
+    case ucode::FetchOpcode::kSetTextureGradientsHorz:
+    case ucode::FetchOpcode::kSetTextureGradientsVert:
+      // Register gradients are not used (computed or explicit LOD only).
+      EndPredicate();
+      return;
+    case ucode::FetchOpcode::kTextureFetch:
+      break;
+    default:
+      // getWeights, getGradients, getCompTexLOD, getBorderColorFrac.
+      StoreResult(instr.result, "vec4f(0.0)");
+      EndPredicate();
+      return;
+  }
+  if (!instr.result.GetUsedResultComponents()) {
+    StoreResult(instr.result, "vec4f(0.0)");
+    EndPredicate();
+    return;
+  }
+  if (untextured_fetch_value_ != 0.0f) {
+    StoreResult(instr.result, fmt::format("vec4f({:.1f})", untextured_fetch_value_));
+    EndPredicate();
+    return;
+  }
+  uint32_t fetch = instr.operands[1].storage_index;
+  std::vector<TextureSlot> slots = GetTextureSlots(current_shader());
+  uint32_t slot = UINT32_MAX;
+  for (uint32_t i = 0; i < slots.size(); ++i) {
+    if (slots[i].fetch_constant == fetch) {
+      slot = i;
+      break;
+    }
+  }
+  bool is_cube = instr.dimension == xenos::FetchOpDimension::kCube;
+  if (slot == UINT32_MAX || slots[slot].is_cube != is_cube ||
+      instr.dimension == xenos::FetchOpDimension::k3DOrStacked) {
+    // 3D and stacked textures are not used by Trials; mismatched dimensions
+    // would need a second binding.
+    StoreResult(instr.result, "vec4f(0.0)");
+    EndPredicate();
+    return;
+  }
+
+  uint32_t id = unique_id_++;
+  Line(fmt::format("let xe_tc{} = {};", id, OperandVector(instr.operands[0])));
+  std::string coordinates;
+  const auto& attributes = instr.attributes;
+  if (is_cube) {
+    std::string face = fmt::format("xe_tc{}.z", id);
+    if (attributes.offset_z != 0.0f) {
+      face = fmt::format("({} + {:.9g})", face, attributes.offset_z);
+    }
+    coordinates =
+        fmt::format("xe_cube_direction(vec3f(xe_tc{}.xy, {}))", id, face);
+  } else {
+    std::string uv = fmt::format("xe_tc{}.xy", id);
+    bool needs_size = attributes.unnormalized_coordinates || attributes.offset_x != 0.0f ||
+                      attributes.offset_y != 0.0f;
+    if (needs_size) {
+      Line(fmt::format("let xe_ts{} = xe_texture_size({}u);", id, fetch));
+      if (attributes.offset_x != 0.0f || attributes.offset_y != 0.0f) {
+        uv = fmt::format("({} + vec2f({:.9g}, {:.9g}){})", uv, attributes.offset_x,
+                         attributes.offset_y,
+                         attributes.unnormalized_coordinates ? "" : fmt::format(" / xe_ts{}", id));
+      }
+      if (attributes.unnormalized_coordinates) {
+        uv = fmt::format("({} / xe_ts{})", uv, id);
+      }
+    }
+    coordinates = uv;
+  }
+  std::string bias = fmt::format("({:.9g} + xe_texture_lod_bias({}u))", attributes.lod_bias, fetch);
+  std::string sample;
+  if (is_pixel_shader() && attributes.use_computed_lod && !attributes.use_register_lod) {
+    sample = fmt::format("textureSampleBias(xe_texture_{}, xe_sampler_{}, {}, clamp({}, -16.0, 15.0))",
+                         slot, slot, coordinates, bias);
+  } else {
+    std::string lod = attributes.use_register_lod ? "xe_texture_lod" : "0.0";
+    sample = fmt::format("textureSampleLevel(xe_texture_{}, xe_sampler_{}, {}, {} + {})", slot,
+                         slot, coordinates, lod, bias);
+  }
+  StoreResult(instr.result, fmt::format("xe_texture_postprocess({}, {}u)", sample, fetch));
   EndPredicate();
 }
 

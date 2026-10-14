@@ -22,6 +22,7 @@
 #include "pipeline_cache.h"
 #include "primitive_converter.h"
 #include "render_target_cache.h"
+#include "texture_cache.h"
 #include "webgpu_presenter.h"
 #include "webgpu_provider.h"
 #include "wgsl/blit.wgsl.h"
@@ -56,6 +57,7 @@ struct BlitResources {
   wgpu::PipelineLayout pipeline_layout;
   wgpu::RenderPipeline pipeline;
   wgpu::Buffer constants;
+  wgpu::Buffer gamma_ramp;
 };
 
 }  // namespace
@@ -63,7 +65,11 @@ struct BlitResources {
 struct WebGpuBackendState {
   std::unordered_map<uint32_t, ResolvedRegion> resolved_regions;
   BlitResources blit;
+  // Texture bind groups of the current frame by (layout, views, samplers).
+  std::unordered_map<uint64_t, wgpu::BindGroup> texture_bind_groups;
 };
+
+static WebGpuBackendState& State();
 
 WebGpuBackend::WebGpuBackend(ui::webgpu::WebGpuProvider& provider, ui::Presenter* presenter)
     : provider_(provider), presenter_(presenter) {}
@@ -75,6 +81,8 @@ WebGpuBackend::~WebGpuBackend() {
   }
   draw_bind_group_ = nullptr;
   shared_memory_bind_group_ = nullptr;
+  State().texture_bind_groups.clear();
+  texture_cache_.reset();
   render_target_cache_.reset();
   pipeline_cache_.reset();
   primitive_processor_.reset();
@@ -109,6 +117,10 @@ bool WebGpuBackend::Initialize(memory::Memory& memory, const RegisterFile& regis
   }
   pipeline_cache_ = std::make_unique<PipelineCache>(provider_);
   if (!pipeline_cache_->Initialize()) {
+    return false;
+  }
+  texture_cache_ = std::make_unique<TextureCache>(provider_, memory, *shared_memory_);
+  if (!texture_cache_->Initialize()) {
     return false;
   }
   render_target_cache_ = std::make_unique<RenderTargetCache>(
@@ -161,9 +173,15 @@ bool WebGpuBackend::Initialize(memory::Memory& memory, const RegisterFile& regis
   blit_entries[1].binding = 1;
   blit_entries[1].visibility = wgpu::ShaderStage::Fragment;
   blit_entries[1].buffer.type = wgpu::BufferBindingType::Uniform;
+  wgpu::BindGroupLayoutEntry gamma_entry;
+  gamma_entry.binding = 2;
+  gamma_entry.visibility = wgpu::ShaderStage::Fragment;
+  gamma_entry.buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
   wgpu::BindGroupLayoutDescriptor blit_layout_desc;
-  blit_layout_desc.entryCount = blit_entries.size();
-  blit_layout_desc.entries = blit_entries.data();
+  std::array<wgpu::BindGroupLayoutEntry, 3> all_blit_entries = {blit_entries[0], blit_entries[1],
+                                                                gamma_entry};
+  blit_layout_desc.entryCount = all_blit_entries.size();
+  blit_layout_desc.entries = all_blit_entries.data();
   blit.layout = device.CreateBindGroupLayout(&blit_layout_desc);
   wgpu::PipelineLayoutDescriptor blit_pipeline_layout_desc;
   blit_pipeline_layout_desc.bindGroupLayoutCount = 1;
@@ -187,6 +205,11 @@ bool WebGpuBackend::Initialize(memory::Memory& memory, const RegisterFile& regis
   blit_constants_desc.size = 16;
   blit_constants_desc.usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst;
   blit.constants = device.CreateBuffer(&blit_constants_desc);
+  wgpu::BufferDescriptor gamma_desc;
+  gamma_desc.label = "gamma ramp";
+  gamma_desc.size = 128 * 3 * 4;  // The larger of the two ramps.
+  gamma_desc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
+  blit.gamma_ramp = device.CreateBuffer(&gamma_desc);
   return true;
 }
 
@@ -308,6 +331,51 @@ bool WebGpuBackend::Draw(const DrawSnapshot& draw) {
     }
     shared_memory_->RequestRange(fetch.address << 2, fetch.size << 2);
   }
+  // Textures (loading may also submit).
+  TextureLayoutSignature texture_signature =
+      TextureLayoutSignature::Get(*vertex_shader, pixel_shader);
+  wgpu::BindGroup texture_bind_group = pipeline_cache_->empty_texture_bind_group();
+  if (texture_signature.value) {
+    std::vector<wgpu::BindGroupEntry> entries;
+    uint64_t bind_group_hash = texture_signature.value;
+    auto add_stage = [&](const Shader& shader, uint32_t base) {
+      auto slots = WgslShaderTranslator::GetTextureSlots(shader);
+      for (uint32_t i = 0; i < slots.size(); ++i) {
+        xenos::xe_gpu_texture_fetch_t fetch = regs.GetTextureFetch(slots[i].fetch_constant);
+        wgpu::TextureView view = texture_cache_->GetView(fetch, slots[i].is_cube);
+        wgpu::Sampler sampler = texture_cache_->GetSampler(
+            fetch, shader.texture_bindings()[slots[i].first_binding].fetch_instr.attributes,
+            shader.type() == xenos::ShaderType::kVertex);
+        wgpu::BindGroupEntry texture_entry;
+        texture_entry.binding = base + i;
+        texture_entry.textureView = view;
+        entries.push_back(texture_entry);
+        wgpu::BindGroupEntry sampler_entry;
+        sampler_entry.binding = base + i + wgsl_binding::kSamplerOffset;
+        sampler_entry.sampler = sampler;
+        entries.push_back(sampler_entry);
+        bind_group_hash = (bind_group_hash * 0x100000001B3ull) ^ uint64_t(uintptr_t(view.Get()));
+        bind_group_hash = (bind_group_hash * 0x100000001B3ull) ^ uint64_t(uintptr_t(sampler.Get()));
+      }
+    };
+    if (pixel_shader) {
+      add_stage(*pixel_shader, 0);
+    }
+    add_stage(*vertex_shader, wgsl_binding::kVertexTextureBase);
+    auto& bind_groups = State().texture_bind_groups;
+    auto it = bind_groups.find(bind_group_hash);
+    if (it != bind_groups.end()) {
+      texture_bind_group = it->second;
+    } else {
+      wgpu::BindGroupDescriptor desc;
+      desc.label = "textures";
+      desc.layout = pipeline_cache_->GetTextureBindGroupLayout(texture_signature);
+      desc.entryCount = entries.size();
+      desc.entries = entries.data();
+      texture_bind_group = provider_.device().CreateBindGroup(&desc);
+      bind_groups.emplace(bind_group_hash, texture_bind_group);
+    }
+  }
   frame_recorder_->ReserveUniforms(4 * 4096);
 
   PrimitiveProcessor::ProcessingResult primitive;
@@ -377,6 +445,7 @@ bool WebGpuBackend::Draw(const DrawSnapshot& draw) {
   PipelineKey key;
   std::memset(&key, 0, sizeof(key));
   key.vertex_shader_hash = vertex_shader->ucode_data_hash();
+  key.texture_layout = texture_signature.value;
   key.vertex_shader_modification = vertex_modification.value;
   key.pixel_shader_hash = pixel_shader ? pixel_shader->ucode_data_hash() : 0;
   key.pixel_shader_modification = pixel_shader ? pixel_modification.value : 0;
@@ -548,7 +617,7 @@ bool WebGpuBackend::Draw(const DrawSnapshot& draw) {
   pass.SetPipeline(pipeline);
   pass.SetBindGroup(0, draw_bind_group_, offsets.size(), offsets.data());
   pass.SetBindGroup(1, shared_memory_bind_group_);
-  pass.SetBindGroup(2, pipeline_cache_->empty_texture_bind_group());
+  pass.SetBindGroup(2, texture_bind_group);
   pass.SetViewport(float(viewport_x), float(viewport_y), float(viewport_width),
                    float(viewport_height), viewport.z_min, viewport.z_max);
   pass.SetScissorRect(scissor_x, scissor_y, scissor_width, scissor_height);
@@ -703,6 +772,8 @@ void WebGpuBackend::Swap(const SwapSnapshot& swap) {
     // Everything drawn this frame goes to the GPU before the output refresh.
     frame_recorder_->Submit();
     primitive_processor_->EndFrame();
+    // Bind groups keep their views alive; start over every frame.
+    State().texture_bind_groups.clear();
     auto it = State().resolved_regions.find(swap.frontbuffer_ptr & 0x1FFFFFFF);
     if (it == State().resolved_regions.end()) {
       it = State().resolved_regions.find(swap.frontbuffer_ptr);
@@ -724,7 +795,7 @@ void WebGpuBackend::Swap(const SwapSnapshot& swap) {
   // its own locks (lock order in webgpu_provider.h).
   presenter_->RefreshGuestOutput(
       output_width, output_height, swap.display_width, swap.display_height,
-      [this, region](ui::Presenter::GuestOutputRefreshContext& context) -> bool {
+      [this, region, &swap](ui::Presenter::GuestOutputRefreshContext& context) -> bool {
         auto& webgpu_context =
             static_cast<ui::webgpu::WebGpuPresenter::WebGpuGuestOutputRefreshContext&>(context);
         context.SetIs8bpc(true);
@@ -742,13 +813,27 @@ void WebGpuBackend::Swap(const SwapSnapshot& swap) {
         wgpu::RenderPassEncoder pass = encoder.BeginRenderPass(&pass_desc);
         if (region.target && region.target->sample_count == 1) {
           BlitResources& blit = State().blit;
-          int32_t offset[4] = {int32_t(region.x), int32_t(region.y), 0, 0};
-          provider_.queue().WriteBuffer(blit.constants, 0, offset, sizeof(offset));
-          std::array<wgpu::BindGroupEntry, 2> entries;
+          // The 256-entry table for 8-bit frontbuffers, PWL for 10-bit ones
+          // (as in the Vulkan backend).
+          xenos::ColorRenderTargetFormat format =
+              xenos::ColorRenderTargetFormat(region.target->key.format);
+          bool pwl = format == xenos::ColorRenderTargetFormat::k_2_10_10_10 ||
+                     format == xenos::ColorRenderTargetFormat::k_2_10_10_10_AS_10_10_10_10;
+          const uint32_t* ramp = pwl ? swap.gamma_ramp_pwl : swap.gamma_ramp_table;
+          uint32_t gamma_mode = ramp ? (pwl ? 2u : 1u) : 0u;
+          if (ramp) {
+            provider_.queue().WriteBuffer(blit.gamma_ramp, 0, ramp,
+                                          (pwl ? 128 * 3 : 256) * sizeof(uint32_t));
+          }
+          int32_t constants[4] = {int32_t(region.x), int32_t(region.y), int32_t(gamma_mode), 0};
+          provider_.queue().WriteBuffer(blit.constants, 0, constants, sizeof(constants));
+          std::array<wgpu::BindGroupEntry, 3> entries;
           entries[0].binding = 0;
           entries[0].textureView = region.target->view;
           entries[1].binding = 1;
           entries[1].buffer = blit.constants;
+          entries[2].binding = 2;
+          entries[2].buffer = blit.gamma_ramp;
           wgpu::BindGroupDescriptor bind_group_desc;
           bind_group_desc.layout = blit.layout;
           bind_group_desc.entryCount = entries.size();
