@@ -78,7 +78,6 @@ class FrameRecorder {
   uint64_t pass_serial() const { return pass_serial_; }
 
   // Ends the pass, writes the uniform ring and submits everything recorded.
-  // Also the WebGpuSharedMemory submit_pending callback.
   bool Submit();
   uint64_t submission_count() const { return submission_count_; }
 

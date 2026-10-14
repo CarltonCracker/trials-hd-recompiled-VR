@@ -1,6 +1,7 @@
 // rexgpu-webgpu - desktop shared-memory mirror. Guest bytes stay big-endian.
 #include "guest_memory_mirror.h"
 
+#include <cstring>
 #include <memory>
 #include <string>
 #include <utility>
@@ -12,9 +13,9 @@ namespace rex::graphics::webgpu {
 
 WebGpuSharedMemory::WebGpuSharedMemory(memory::Memory& memory, const wgpu::Instance& instance,
                                      const wgpu::Device& device,
-                                     std::function<bool()> submit_pending)
-    : SharedMemory(memory), instance_(instance), device_(device), queue_(device.GetQueue()),
-      submit_pending_(std::move(submit_pending)) {}
+                                     std::function<GuestMemoryUpload(uint64_t)> allocate_upload)
+    : SharedMemory(memory), instance_(instance), device_(device),
+      allocate_upload_(std::move(allocate_upload)) {}
 
 WebGpuSharedMemory::~WebGpuSharedMemory() {
   // Cancel guest watches before releasing GPU resources. ShutdownCommon is
@@ -27,7 +28,7 @@ bool WebGpuSharedMemory::Initialize() {
     return true;
   }
   wgpu::Limits limits;
-  if (!submit_pending_ || device_.GetLimits(&limits) != wgpu::Status::Success ||
+  if (!allocate_upload_ || device_.GetLimits(&limits) != wgpu::Status::Success ||
       limits.maxBufferSize < kBufferSize || limits.maxStorageBufferBindingSize < kBufferSize) {
     // shortcut: require desktop 512 MiB limits; add windowed bindings for mobile/browser bring-up.
     REXGPU_ERROR("WebGPU shared memory requires 512 MiB buffer and storage-binding limits");
@@ -74,17 +75,39 @@ bool WebGpuSharedMemory::UploadRanges(
   if (upload_page_ranges.empty()) {
     return true;
   }
-  if (!buffer_ || !submit_pending_()) {
+  if (!buffer_) {
     return false;
   }
+  uint64_t size = 0;
+  for (const auto& [first_page, page_count] : upload_page_ranges) {
+    size += uint64_t(page_count) << page_size_log2();
+  }
+  auto upload = allocate_upload_(size);
+  if (!upload.data || !upload.source || !upload.encoder) {
+    REXGPU_ERROR("WebGPU shared-memory upload allocation failed ({} bytes)", size);
+    return false;
+  }
+  auto* data = static_cast<uint8_t*>(upload.data);
+  uint64_t offset = 0;
   for (const auto& [first_page, page_count] : upload_page_ranges) {
     const uint32_t start = first_page << page_size_log2();
     const uint32_t length = page_count << page_size_log2();
-    // Protect BEFORE Dawn copies the source, so a concurrent guest write
-    // invalidates these pages instead of being hidden by a later valid mark.
+    // Protect BEFORE copying, so concurrent guest writes invalidate the pages.
     MakeRangeValid(start, length, false);
-    queue_.WriteBuffer(buffer_, start, memory().TranslatePhysical(start), length);
+    std::memcpy(data + offset, memory().TranslatePhysical(start), length);
+    offset += length;
   }
+  if (upload.source.GetMapState() == wgpu::BufferMapState::Mapped) {
+    upload.source.Unmap();
+  }
+  offset = upload.offset;
+  for (const auto& [first_page, page_count] : upload_page_ranges) {
+    const uint32_t start = first_page << page_size_log2();
+    const uint32_t length = page_count << page_size_log2();
+    upload.encoder.CopyBufferToBuffer(upload.source, offset, buffer_, start, length);
+    offset += length;
+  }
+  // Encoded commands retain the source; its slices remain unique until submission.
   return true;
 }
 

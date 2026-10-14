@@ -8,14 +8,22 @@
 
 namespace rex::graphics::webgpu {
 
+struct GuestMemoryUpload {
+  void* data = nullptr;  // CPU space valid until the next allocation.
+  wgpu::Buffer source;
+  uint64_t offset = 0;
+  wgpu::CommandEncoder encoder;
+};
+
 class WebGpuSharedMemory final : public SharedMemory {
  public:
   // All calls, including destruction and inherited RequestRange(s), run on
   // the CP thread under the provider's device mutex. Memory must outlive us.
-  // submit_pending must end/submit earlier encoders before a dirty upload:
-  // WriteBuffer is queue work, not a copy inside the current command encoder.
+  // allocate_upload reserves unique source bytes, ends any render pass and
+  // returns the encoder. Ring bytes must be uploaded before its submission.
   WebGpuSharedMemory(memory::Memory& memory, const wgpu::Instance& instance,
-                     const wgpu::Device& device, std::function<bool()> submit_pending);
+                     const wgpu::Device& device,
+                     std::function<GuestMemoryUpload(uint64_t)> allocate_upload);
   ~WebGpuSharedMemory() override;
 
   bool Initialize();
@@ -28,9 +36,8 @@ class WebGpuSharedMemory final : public SharedMemory {
  private:
   wgpu::Instance instance_;
   wgpu::Device device_;
-  wgpu::Queue queue_;
   wgpu::Buffer buffer_;
-  std::function<bool()> submit_pending_;
+  std::function<GuestMemoryUpload(uint64_t)> allocate_upload_;
 };
 
 }  // namespace rex::graphics::webgpu

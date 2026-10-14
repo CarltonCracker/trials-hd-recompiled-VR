@@ -74,6 +74,19 @@ std::vector<uint8_t> Read(const wgpu::Instance& instance, const wgpu::Device& de
   return Map(instance, result, size);
 }
 
+rex::graphics::webgpu::GuestMemoryUpload MappedUpload(
+    const wgpu::Device& device, const wgpu::CommandEncoder& encoder, uint64_t size) {
+  rex::graphics::webgpu::GuestMemoryUpload upload;
+  wgpu::BufferDescriptor desc;
+  desc.size = size;
+  desc.usage = wgpu::BufferUsage::CopySrc;
+  desc.mappedAtCreation = true;
+  upload.source = device.CreateBuffer(&desc);
+  upload.data = upload.source.GetMappedRange(0, size);
+  upload.encoder = encoder;
+  return upload;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -107,7 +120,8 @@ int main(int argc, char** argv) {
   std::atomic<unsigned> errors{0};
   {
     auto limited_device = CreateDevice(instance, adapter, nullptr, errors);
-    WebGpuSharedMemory limited(memory, instance, limited_device, [] { return true; });
+    WebGpuSharedMemory limited(memory, instance, limited_device,
+                               [](uint64_t) { return rex::graphics::webgpu::GuestMemoryUpload{}; });
     CHECK(!limited.Initialize());  // default 128 MiB storage binding is insufficient
     CHECK(!limited.buffer());
   }
@@ -126,30 +140,56 @@ int main(int argc, char** argv) {
   }
   std::memcpy(guest, expected.data(), size);
 
-  {
+  for (bool use_ring : {false, true}) {
     unsigned uploads = 0;
+    unsigned submissions = 0;
     bool allow_upload = true;
     wgpu::CommandEncoder pending;
-    WebGpuSharedMemory mirror(memory, instance, device, [&] {
+    wgpu::BufferDescriptor ring_desc;
+    ring_desc.size = size * 4;
+    ring_desc.usage = wgpu::BufferUsage::CopySrc | wgpu::BufferUsage::CopyDst;
+    auto ring = device.CreateBuffer(&ring_desc);
+    std::vector<uint8_t> ring_data;
+    auto submit = [&] {
+      CHECK(pending);
+      if (!ring_data.empty()) {
+        device.GetQueue().WriteBuffer(ring, 0, ring_data.data(), ring_data.size());
+        ring_data.clear();
+      }
+      auto commands = pending.Finish();
+      device.GetQueue().Submit(1, &commands);
+      pending = nullptr;
+      ++submissions;
+    };
+    WebGpuSharedMemory mirror(memory, instance, device, [&](uint64_t length) {
       ++uploads;
       if (!allow_upload) {
-        return false;
+        return rex::graphics::webgpu::GuestMemoryUpload{};
       }
-      if (pending) {
-        auto commands = pending.Finish();
-        device.GetQueue().Submit(1, &commands);
-        pending = nullptr;
-      }
-      return true;
+      if (!pending) { pending = device.CreateCommandEncoder(); }
+      if (!use_ring) { return MappedUpload(device, pending, length); }
+      rex::graphics::webgpu::GuestMemoryUpload upload;
+      upload.offset = ring_data.size();
+      CHECK(upload.offset + length <= ring.GetSize());
+      ring_data.resize(upload.offset + length);
+      upload.data = ring_data.data() + upload.offset;
+      upload.source = ring;
+      upload.encoder = pending;
+      return upload;
     });
+    auto read = [&](uint32_t offset, size_t length) {
+      if (pending) { submit(); }
+      return Read(instance, device, mirror.buffer(), offset, length);
+    };
     CHECK(mirror.Initialize());
     CHECK(mirror.Initialize());  // doesn't register duplicate guest watches
     CHECK(mirror.buffer().GetSize() == WebGpuSharedMemory::kBufferSize);
     CHECK(mirror.RequestRange(physical + 3, size - 6));
     CHECK(uploads == 1);
-    CHECK(Read(instance, device, mirror.buffer(), physical, size) == expected);
+    CHECK(submissions == 0);  // uploads only encode copies, never submit
+    CHECK(read(physical, size) == expected);
     CHECK(mirror.RequestRange(physical, size));
-    CHECK(uploads == 1);  // clean pages require neither submission nor upload
+    CHECK(uploads == 1);  // clean pages require neither encoder access nor upload
     CHECK(!mirror.RequestRange(WebGpuSharedMemory::kBufferSize, 1));
     CHECK(!mirror.RequestRange(WebGpuSharedMemory::kBufferSize - 4, 8));
     CHECK(mirror.RequestRange(WebGpuSharedMemory::kBufferSize, 0));
@@ -163,22 +203,32 @@ int main(int argc, char** argv) {
     expected[7] ^= 0xFF;
     CHECK(mirror.RequestRange(physical, size));
     CHECK(uploads == 2);
+    auto middle = ReadbackBuffer(device, size);
+    pending.CopyBufferToBuffer(mirror.buffer(), physical, middle, 0, size);
+    auto intermediate = expected;
+    guest[9] ^= 0xAA;
+    expected[9] ^= 0xAA;
+    CHECK(mirror.RequestRange(physical, size));
+    CHECK(uploads == 3);
+    CHECK(submissions == 1);  // two source slices, two old consumers, no submit
+    submit();
     CHECK(Map(instance, old, size) == previous);
-    CHECK(Read(instance, device, mirror.buffer(), physical, size) == expected);
+    CHECK(Map(instance, middle, size) == intermediate);
+    CHECK(read(physical, size) == expected);
 
     // Preserve partial-page GPU writes on a clean request.
     const std::array<uint8_t, 4> gpu_bytes = {1, 2, 3, 4};
     device.GetQueue().WriteBuffer(mirror.buffer(), physical + 16, gpu_bytes.data(), gpu_bytes.size());
     mirror.RangeWrittenByGpu(physical + 16, uint32_t(gpu_bytes.size()));
     CHECK(mirror.RequestRange(physical, size));
-    CHECK(uploads == 2);
+    CHECK(uploads == 3);
     auto gpu_expected = expected;
     std::memcpy(gpu_expected.data() + 16, gpu_bytes.data(), gpu_bytes.size());
-    CHECK(Read(instance, device, mirror.buffer(), physical, size) == gpu_expected);
+    CHECK(read(physical, size) == gpu_expected);
     mirror.ClearCache();
     CHECK(mirror.RequestRange(physical, size));
-    CHECK(uploads == 3);
-    CHECK(Read(instance, device, mirror.buffer(), physical, size) == gpu_expected);
+    CHECK(uploads == 4);
+    CHECK(read(physical, size) == gpu_expected);
 
     // A CPU reuse of that GPU-written page must restore the guest's bytes.
     guest[24] ^= 0x55;
@@ -187,8 +237,8 @@ int main(int argc, char** argv) {
     CHECK(!mirror.RequestRange(physical, size));
     allow_upload = true;
     CHECK(mirror.RequestRange(physical, size));
-    CHECK(uploads == 5);
-    CHECK(Read(instance, device, mirror.buffer(), physical, size) == expected);
+    CHECK(uploads == 6);
+    CHECK(read(physical, size) == expected);
 
     mirror.InvalidateAllPages();
     const std::pair<uint32_t, uint32_t> ranges[] = {
@@ -196,15 +246,19 @@ int main(int argc, char** argv) {
         {physical + 16, 32},  // overlapping requests, out of order
     };
     CHECK(mirror.RequestRanges(ranges, std::size(ranges)));
-    CHECK(uploads == 6);  // one flush for the whole dirty request
-    CHECK(Read(instance, device, mirror.buffer(), physical, size) == expected);
+    CHECK(uploads == 7);  // one staging allocation for the whole dirty request
+    CHECK(read(physical, size) == expected);
   }
   // Destruction unregisters callbacks; writing/reinitializing must remain safe.
   guest[0] = 42;
   {
-    WebGpuSharedMemory mirror(memory, instance, device, [] { return true; });
+    auto encoder = device.CreateCommandEncoder();
+    WebGpuSharedMemory mirror(memory, instance, device,
+                               [&](uint64_t size) { return MappedUpload(device, encoder, size); });
     CHECK(mirror.Initialize());
     CHECK(mirror.RequestRange(physical, page_size));
+    auto commands = encoder.Finish();
+    device.GetQueue().Submit(1, &commands);
     CHECK(Read(instance, device, mirror.buffer(), physical, 4)[0] == 42);
   }
   memory.SystemHeapFree(address);

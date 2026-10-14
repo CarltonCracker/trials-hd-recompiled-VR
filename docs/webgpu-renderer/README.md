@@ -1041,7 +1041,7 @@ as a storage buffer in every shader. WebGPU's default `maxStorageBufferBindingSi
   reads (luminance) go back through the readback manager (8.10). GPU-only consumers
   read the host copy directly ("resolve-to-texture alias", 8.8).
 
-**L-06 implementation in progress (pi-gpt, 2026-10-14):**
+**L-06 implementation verified (pi-gpt, 2026-10-14):**
 `guest_memory_mirror.{h,cpp}` implements `WebGpuSharedMemory : SharedMemory` for
 7.6.3's desktop buffer. It owns no separate page tracker and does not change the SDK.
 Construct with `(memory, provider.instance(), provider.device(), allocate_upload)`;
@@ -1071,7 +1071,11 @@ holding an old-data consumer followed by a newer upload, with no forced submissi
 Measured device limits: RTX 2070 SUPER `maxBufferSize` 1048575 MiB and
 `maxStorageBufferBindingSize` 2047 MiB; RX 6600 (RADV NAVI23) 4095 MiB for both.
 Thus the desktop mirror fits both GPUs (section 14 question 12 answered).
-Full M3 integration and the <0.3 ms/frame budget are not verified yet.
+Latest pooled M3 menu capture matches the Vulkan reference at 40.99 dB PSNR
+(0.180% of channel samples differ by >16). RX 6600 riding profiles estimate
+~0.082 ms/frame in the mirror, ~0.236 ms including SDK requests, with one
+submission/frame. These are sampling-derived CPU estimates, not exact timers;
+Metal and later full-scene renderer parity remain separate acceptance work.
 
 ### 8.4 Shader translator: Xenos microcode → WGSL
 
@@ -1850,7 +1854,7 @@ debugging. Several can run in parallel once L-01 to L-03 exist.
 | L-04f | done 2026-10-14 c27112b | **Rect-list expansion VS** and other host VS types (`kRectangleListAsTriangleStrip`, point list if ever needed). | L-04e | `shader.h` `HostVertexShaderType`, DXBC translator | resolve/clear/full-screen rect passes draw correctly |
 | L-04g | todo | **memexport → compute.** Emit the memexport VS as a compute entry point writing a storage buffer (formats, endian, `eA` addressing); dispatch per point; make the results visible to later draws. | L-04b, L-06 | `spirv_translator_memexport.cpp`, section 5.6 | particles move like in the Vulkan build |
 | L-05 | todo (partial, claude-opus-5.5 2026-10-14: see notes log) | **`tools/xenos2wgsl` and the differential test harness**: translate every cached shader, validate with Tint, run VS bodies as compute and compare against the SDK `ShaderInterpreter` on recorded inputs (inputs stay local). | L-04a, S-02 | `interpreter.cpp` | `xenos2wgsl --validate --diff` passes 74/74 |
-| L-06 | claimed pi-gpt 2026-10-14 | **Guest memory mirror.** Desktop `WebGpuSharedMemory : SharedMemory` with a 512 MiB buffer and SDK page watches (7.6.3 supersedes the older per-range design); ordered dirty uploads and memexport/resolve destination handling. Streaming classification remains measurement-led (S-34). | L-03 | 8.3, `shared_memory.{h,cpp}`, `mmio_handler.cpp` | correct data in M3 with < 0.3 ms per frame CPU in this code |
+| L-06 | done pi-gpt 2026-10-14 (commit follows) | **Guest memory mirror.** Desktop `WebGpuSharedMemory : SharedMemory` with a 512 MiB buffer and SDK page watches (7.6.3 supersedes the older per-range design); ordered dirty uploads and memexport/resolve destination handling. Streaming classification remains measurement-led (S-34). | L-03 | 8.3, `shared_memory.{h,cpp}`, `mmio_handler.cpp` | correct data in M3 with < 0.3 ms per frame CPU in this code |
 | L-07 | todo (partial, claude-opus-5.5 2026-10-14: see notes log) | **Pipeline cache and binding model.** Keys, bind group layouts, dynamic offsets, async creation, pipeline pre-creation list, WGSL cache, Dawn blob cache. | L-01, L-04a | 8.5, `vulkan/pipeline_cache.cpp` | no hitch after the first run; pipeline count logged |
 | L-08 | todo (partial, claude-opus-5.5 2026-10-14: see notes log) | **Render-target cache.** Keys, sizing (draw extent estimator), formats with feature fallbacks, 4x MSAA, `depth32float-stencil8`, scaling 1x/2x/3x (and non-integer if feasible), clear detection, aliasing detection and the minimal transfer path S-04 shows to be necessary. | L-03, S-23 | 8.7, `pipeline/render_target/cache.cpp`, `vulkan/render_target_cache.cpp` | all RT configs of 5.3 render; aliasing events logged |
 | L-09 | claimed claude-opus-5.5 2026-10-14 | **Resolve engine.** Classification (clear, GPU-consumed, CPU-visible, frontbuffer), conversions of section 5.7, resolve-to-texture aliases in the texture cache, MSAA sample selection, CPU-visible writes through the readback manager. | L-08, L-10 | 8.8, `util/draw.cpp` (`ResolveInfo`), XeSL resolve sources | shadows, fog, bloom and exposure match the Vulkan build |
@@ -2156,6 +2160,9 @@ finding: `YYYY-MM-DD <agent> <task ID>: what changed; evidence; what is left`.
   the SDK request path (23/800). Gameplay remains **1 submission/frame**.
   These are sampling estimates, not exact timers or a whole-renderer performance
   claim. Two-GPU mapped/ring tests and the isolated production plugin build
+  pass. Latest M3 capture comparison completed: **40.99 dB PSNR** against the
+  local Vulkan menu reference, 0.180% of channel samples >16 off. L-06 is
+  complete; capture files and game data stay local.
   L-24 stress passed 30 runs / 30,000 FIFO callbacks: idle CPU 0.008–0.017 ms
   per 150 ms wait, 200 × 1 ms waits cost 0.870–2.217 ms CPU, maximum observed
   callback latency 0.248 ms. Same-renderer old/new-runtime live checks are running.

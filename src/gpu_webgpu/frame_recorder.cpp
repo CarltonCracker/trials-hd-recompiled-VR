@@ -29,7 +29,8 @@ bool FrameRecorder::Initialize() {
   uniform_staging_.reserve(1 << 20);
   desc.label = "converted index ring";
   desc.size = kIndexRingSize;
-  desc.usage = wgpu::BufferUsage::Index | wgpu::BufferUsage::CopyDst;
+  desc.usage = wgpu::BufferUsage::Index | wgpu::BufferUsage::CopyDst |
+               wgpu::BufferUsage::CopySrc;
   index_ring_ = provider_.device().CreateBuffer(&desc);
   index_staging_.reserve(1 << 20);
   return uniform_ring_ && index_ring_;

@@ -19,7 +19,7 @@ The default SDK paths refer to `thirdparty/rexglue-sdk` and the existing
 `REXSDK_DIR`, `REXSDK_LIBRARY_DIR` or `REXSDK_BUILD_DIR` if your SDK build differs.
 
 - **Shared memory:** raw bytes, page caching, physical-alias write faults,
-  submit-before-upload ordering, GPU-written pages, cache clearing, upload retry,
+  encoder-ordered updates without forced submissions, GPU-written pages, cache clearing, retry,
   bounds, callback teardown and rejection of insufficient storage limits.
 - **ALU:** authored microcode for all 80 defined vector/scalar opcodes, compared
   with the SDK interpreter. Includes saturation, swizzles/modifiers, previous
