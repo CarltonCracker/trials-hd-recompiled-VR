@@ -1,12 +1,11 @@
-# Opens the settings with the Guide button, selects Throttle's first key slot
-# with A (it waits for a key), cancels that with B, then closes the menu with B.
-# Run: INPUT=tests/headless/settings_menu.txt tools/headless_run.sh 38 --vulkan_device=0
+# Opens settings with F1, selects Throttle's first key slot with A (waits for a
+# key), cancels with B, then closes the menu with F1.
+# Run: INPUT=tests/headless/settings_menu.txt tools/headless_run.sh 40 --vulkan_device=1 --vulkan_headless_surface=true
 wait 24
-pad guide 1
-wait 0.2
-pad guide 0
+focus trials
+tap F1
 wait 1.5
-shot settings_open
+capture settings_open
 pad down 1
 wait 0.15
 pad down 0
@@ -15,14 +14,16 @@ pad a 1
 wait 0.15
 pad a 0
 wait 1
-shot settings_waiting
+capture settings_waiting
 pad b 1
 wait 0.15
 pad b 0
 wait 1
-shot settings_cancelled
+capture settings_cancelled
 pad b 1
 wait 0.15
 pad b 0
 wait 1.5
-shot settings_closed
+tap F1
+wait 1.5
+capture settings_closed

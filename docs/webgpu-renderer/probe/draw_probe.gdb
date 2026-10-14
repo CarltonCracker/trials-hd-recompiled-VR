@@ -17,7 +17,9 @@ OUT = os.environ.get('PROBE_OUT', 'draws.bin')
 WINDOWS = [(float(a), int(b)) for a, b in (w.split(':') for w in os.environ.get('PROBE_WINDOWS', '27:2,58:3').split(','))]
 start = time.monotonic()
 out = open(OUT, 'wb')
-state = {'win': 0, 'swaps': -1, 'off': None, 'draws': 0, 'copies': 0}
+state = {'win': 0, 'swaps': -1, 'off': None, 'draws': 0, 'copies': 0,
+         'pmb': None, 'strip_count': 0, 'auto_strip_count': 0, 'strip_indices': 0, 'strip_ffff': 0,
+         'other_indexed_count': 0, 'other_indices': 0, 'other_ffff': 0}
 CTX_LO, CTX_N = 0x2000, 0x400
 FET_LO, FET_N = 0x4800, 0x200
 
@@ -30,6 +32,19 @@ def offsets(this):
         ho = int(gdb.parse_and_eval('(long)&((rex::graphics::Shader*)0)->ucode_data_hash_'))
         state['off'] = (rf, vso, pso, ho)
     return state['off']
+
+def get_pmb(this):
+    if state['pmb'] is None:
+        try:
+            cp = '((rex::graphics::CommandProcessor*)0x%x)' % this
+            state['pmb'] = int(gdb.parse_and_eval(cp + '->memory_->physical_membase_'))
+        except Exception as e:
+            try:
+                cp = '((rex::graphics::CommandProcessor*)0x%x)' % this
+                state['pmb'] = int(gdb.parse_and_eval(cp + '->memory_->mapping_base_'))
+            except Exception as e2:
+                print('PMB lookup error:', e, e2, flush=True)
+    return state['pmb']
 
 def active():
     if state['win'] >= len(WINDOWS):
@@ -52,6 +67,47 @@ def record(kind, this, prim=0, count=0, ib=0, major=0):
     fet = rd(mem, rf + FET_LO * 4, FET_N * 4)
     hdr = struct.pack('<4sIIIIQQ', kind, state['win'], prim, count, major, vh, ph)
     out.write(hdr + ibf + ctx + fet)
+
+    # S-06: Scan index buffers from guest memory
+    if kind == b'DRAW':
+        if prim == 6 and not ib:
+            state['auto_strip_count'] += 1
+        elif ib:
+            pmb = get_pmb(this)
+            if pmb:
+                fmt, endian, cnt, gbase = struct.unpack_from('<IIII', ibf)
+                if cnt > 0 and gbase > 0:
+                    host_addr = pmb + (gbase & 0x1FFFFFFF)
+                    is_strip = (prim == 6)
+                    if is_strip:
+                        state['strip_count'] += 1
+                    else:
+                        state['other_indexed_count'] += 1
+                    try:
+                        if fmt == 0:  # 16-bit
+                            raw = rd(mem, host_addr, cnt * 2)
+                            endian_char = '>' if endian == 1 else '<'
+                            indices = struct.unpack(f'{endian_char}{cnt}H', raw)
+                            ffff = sum(1 for idx in indices if idx == 0xFFFF)
+                            if is_strip:
+                                state['strip_indices'] += cnt
+                                state['strip_ffff'] += ffff
+                            else:
+                                state['other_indices'] += cnt
+                                state['other_ffff'] += ffff
+                        else:  # 32-bit
+                            raw = rd(mem, host_addr, cnt * 4)
+                            endian_char = '>' if endian == 1 else '<'
+                            indices = struct.unpack(f'{endian_char}{cnt}I', raw)
+                            ffff = sum(1 for idx in indices if idx == 0xFFFFFFFF)
+                            if is_strip:
+                                state['strip_indices'] += cnt
+                                state['strip_ffff'] += ffff
+                            else:
+                                state['other_indices'] += cnt
+                                state['other_ffff'] += ffff
+                    except Exception as e:
+                        print('Index read error at', hex(host_addr), ':', e, flush=True)
 
 class Draw(gdb.Breakpoint):
     def stop(self):
@@ -84,6 +140,10 @@ class Swap(gdb.Breakpoint):
         _, n = WINDOWS[state['win']]
         if state['swaps'] >= n:
             print('PROBE window %d done: %d draws, %d copies, t=%.1f' % (state['win'], state['draws'], state['copies'], time.monotonic() - start), flush=True)
+            print('PROBE strips: %d indexed strip draws (%d indices, %d equal to 0xFFFF); %d auto-indexed strip draws' %
+                  (state['strip_count'], state['strip_indices'], state['strip_ffff'], state['auto_strip_count']), flush=True)
+            print('PROBE other indexed: %d draws, %d total indices, %d equal to 0xFFFF' %
+                  (state['other_indexed_count'], state['other_indices'], state['other_ffff']), flush=True)
             state['win'] += 1
             state['swaps'] = -1
             state['draws'] = state['copies'] = 0

@@ -2,7 +2,7 @@
 # Run: INPUT=tests/headless/ride_tutorial.txt tools/headless_run.sh 70
 # Menu -> track using the virtual controller only, then hold the throttle.
 wait 22
-shot pad_menu
+capture pad_menu
 pad a 1
 wait 0.1
 pad a 0
@@ -23,10 +23,10 @@ pad a 1      # select bike and play track
 wait 0.1
 pad a 0
 wait 12
-shot pad_loaded
+capture pad_loaded
 axis rt 32767
 wait 3
-shot pad_t3
+capture pad_t3
 wait 5
-shot pad_t8
+capture pad_t8
 axis rt 0

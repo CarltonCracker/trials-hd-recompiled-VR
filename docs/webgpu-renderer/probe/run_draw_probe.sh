@@ -24,6 +24,6 @@ WRAP
 chmod +x "$wrap"
 cd "$root"
 PATH="$root/.venv/bin:$PATH" LOG_LEVEL=info INPUT=tests/headless/ride_middle_name_danger.txt \
-  TRIALS_HD_EXE="$wrap" tools/headless_run.sh 95 --vulkan_device=1 --vulkan_headless_surface=true \
+  TRIALS_HD_EXE="$wrap" tools/headless_run.sh "${PROBE_SECS:-95}" --vulkan_device=1 --vulkan_headless_surface=true \
   --host_vsync=false --dump_shaders=out/shader_dump
 grep PROBE "$out/gdb.log" || true

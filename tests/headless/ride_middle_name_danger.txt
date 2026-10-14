@@ -1,6 +1,6 @@
 # Benchmark: rides 'Middle Name: Danger' (explosions, particles) and captures frames.
 # The game's frame rate is logged once per second with --log_guest_fps=true:
-#   LOG_LEVEL=info INPUT=tests/headless/ride_middle_name_danger.txt tools/headless_run.sh 85 \
+#   LOG_LEVEL=info INPUT=tests/headless/ride_middle_name_danger.txt tools/headless_run.sh 150 \
 #     --vulkan_device=1 --vulkan_headless_surface=true --log_guest_fps=true \
 #     --draw_resolution_scale_x=2 --draw_resolution_scale_y=2
 # Captures (capture <name>) land in out/run/<name>.png.
@@ -35,6 +35,17 @@ capture t2_loaded
 axis rt 32767
 wait 10
 capture t2_ride1
+pad start 1
+wait 0.1
+pad start 0
+wait 1
+capture t2_pause
+pad start 1
+wait 0.1
+pad start 0
+wait 1
 wait 10
 capture t2_ride2
+wait 60
 axis rt 0
+capture t2_results
