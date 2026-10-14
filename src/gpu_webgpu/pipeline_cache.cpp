@@ -13,6 +13,7 @@
 #include <rex/graphics/registers.h>
 #include <rex/logging.h>
 
+#include "pipeline_state.h"
 #include "webgpu_provider.h"
 
 REXCVAR_DEFINE_BOOL(webgpu_untextured, false, "GPU/WebGPU",
@@ -27,96 +28,6 @@ namespace rex::graphics::webgpu {
 namespace {
 
 constexpr char kNullPixelShader[] = "@fragment fn main() {}\n";
-
-wgpu::BlendFactor ToBlendFactor(xenos::BlendFactor factor) {
-  using F = xenos::BlendFactor;
-  switch (factor) {
-    case F::kZero:
-      return wgpu::BlendFactor::Zero;
-    case F::kOne:
-      return wgpu::BlendFactor::One;
-    case F::kSrcColor:
-      return wgpu::BlendFactor::Src;
-    case F::kOneMinusSrcColor:
-      return wgpu::BlendFactor::OneMinusSrc;
-    case F::kSrcAlpha:
-      return wgpu::BlendFactor::SrcAlpha;
-    case F::kOneMinusSrcAlpha:
-      return wgpu::BlendFactor::OneMinusSrcAlpha;
-    case F::kDstColor:
-      return wgpu::BlendFactor::Dst;
-    case F::kOneMinusDstColor:
-      return wgpu::BlendFactor::OneMinusDst;
-    case F::kDstAlpha:
-      return wgpu::BlendFactor::DstAlpha;
-    case F::kOneMinusDstAlpha:
-      return wgpu::BlendFactor::OneMinusDstAlpha;
-    case F::kConstantColor:
-    case F::kConstantAlpha:
-      return wgpu::BlendFactor::Constant;
-    case F::kOneMinusConstantColor:
-    case F::kOneMinusConstantAlpha:
-      return wgpu::BlendFactor::OneMinusConstant;
-    case F::kSrcAlphaSaturate:
-      return wgpu::BlendFactor::SrcAlphaSaturated;
-    default:
-      return wgpu::BlendFactor::One;
-  }
-}
-
-// Alpha factors must not use color-only variants.
-wgpu::BlendFactor ToAlphaBlendFactor(xenos::BlendFactor factor) {
-  using F = xenos::BlendFactor;
-  switch (factor) {
-    case F::kSrcColor:
-      return wgpu::BlendFactor::SrcAlpha;
-    case F::kOneMinusSrcColor:
-      return wgpu::BlendFactor::OneMinusSrcAlpha;
-    case F::kDstColor:
-      return wgpu::BlendFactor::DstAlpha;
-    case F::kOneMinusDstColor:
-      return wgpu::BlendFactor::OneMinusDstAlpha;
-    case F::kSrcAlphaSaturate:
-      return wgpu::BlendFactor::One;
-    default:
-      return ToBlendFactor(factor);
-  }
-}
-
-wgpu::BlendOperation ToBlendOperation(xenos::BlendOp op) {
-  switch (op) {
-    case xenos::BlendOp::kSubtract:
-      return wgpu::BlendOperation::Subtract;
-    case xenos::BlendOp::kMin:
-      return wgpu::BlendOperation::Min;
-    case xenos::BlendOp::kMax:
-      return wgpu::BlendOperation::Max;
-    case xenos::BlendOp::kRevSubtract:
-      return wgpu::BlendOperation::ReverseSubtract;
-    default:
-      return wgpu::BlendOperation::Add;
-  }
-}
-
-wgpu::CompareFunction ToCompareFunction(xenos::CompareFunction function) {
-  static constexpr wgpu::CompareFunction kFunctions[] = {
-      wgpu::CompareFunction::Never,        wgpu::CompareFunction::Less,
-      wgpu::CompareFunction::Equal,        wgpu::CompareFunction::LessEqual,
-      wgpu::CompareFunction::Greater,      wgpu::CompareFunction::NotEqual,
-      wgpu::CompareFunction::GreaterEqual, wgpu::CompareFunction::Always,
-  };
-  return kFunctions[uint32_t(function) & 7];
-}
-
-wgpu::StencilOperation ToStencilOperation(xenos::StencilOp op) {
-  static constexpr wgpu::StencilOperation kOperations[] = {
-      wgpu::StencilOperation::Keep,           wgpu::StencilOperation::Zero,
-      wgpu::StencilOperation::Replace,        wgpu::StencilOperation::IncrementClamp,
-      wgpu::StencilOperation::DecrementClamp, wgpu::StencilOperation::Invert,
-      wgpu::StencilOperation::IncrementWrap,  wgpu::StencilOperation::DecrementWrap,
-  };
-  return kOperations[uint32_t(op) & 7];
-}
 
 }  // namespace
 
@@ -353,22 +264,9 @@ wgpu::RenderPipeline PipelineCache::GetPipeline(const PipelineKey& key, Shader& 
       if (key.blend_controls[i] != UINT32_MAX) {
         reg::RB_BLENDCONTROL blend_control;
         blend_control.value = key.blend_controls[i];
-        wgpu::BlendState& blend = blends[i];
-        blend.color.srcFactor = ToBlendFactor(blend_control.color_srcblend);
-        blend.color.dstFactor = ToBlendFactor(blend_control.color_destblend);
-        blend.color.operation = ToBlendOperation(blend_control.color_comb_fcn);
-        blend.alpha.srcFactor = ToAlphaBlendFactor(blend_control.alpha_srcblend);
-        blend.alpha.dstFactor = ToAlphaBlendFactor(blend_control.alpha_destblend);
-        blend.alpha.operation = ToBlendOperation(blend_control.alpha_comb_fcn);
-        // Min and max ignore the factors in WebGPU; they must be One.
-        for (wgpu::BlendComponent* component : {&blend.color, &blend.alpha}) {
-          if (component->operation == wgpu::BlendOperation::Min ||
-              component->operation == wgpu::BlendOperation::Max) {
-            component->srcFactor = wgpu::BlendFactor::One;
-            component->dstFactor = wgpu::BlendFactor::One;
-          }
+        if (TranslateBlendControl(blend_control, blends[i])) {
+          target.blend = &blends[i];
         }
-        target.blend = &blend;
       }
     }
     wgpu::FragmentState fragment;
@@ -381,35 +279,12 @@ wgpu::RenderPipeline PipelineCache::GetPipeline(const PipelineKey& key, Shader& 
     if (wgpu::TextureFormat(key.depth_stencil_format) != wgpu::TextureFormat::Undefined) {
       reg::RB_DEPTHCONTROL depth_control;
       depth_control.value = key.depth_control;
-      depth_stencil.format = wgpu::TextureFormat(key.depth_stencil_format);
-      depth_stencil.depthWriteEnabled =
-          depth_control.z_enable && depth_control.z_write_enable ? wgpu::OptionalBool::True
-                                                                 : wgpu::OptionalBool::False;
-      depth_stencil.depthCompare = depth_control.z_enable
-                                       ? ToCompareFunction(depth_control.zfunc)
-                                       : wgpu::CompareFunction::Always;
-      if (depth_control.stencil_enable) {
-        depth_stencil.stencilFront.compare = ToCompareFunction(depth_control.stencilfunc);
-        depth_stencil.stencilFront.failOp = ToStencilOperation(depth_control.stencilfail);
-        depth_stencil.stencilFront.depthFailOp = ToStencilOperation(depth_control.stencilzfail);
-        depth_stencil.stencilFront.passOp = ToStencilOperation(depth_control.stencilzpass);
-        if (depth_control.backface_enable) {
-          depth_stencil.stencilBack.compare = ToCompareFunction(depth_control.stencilfunc_bf);
-          depth_stencil.stencilBack.failOp = ToStencilOperation(depth_control.stencilfail_bf);
-          depth_stencil.stencilBack.depthFailOp =
-              ToStencilOperation(depth_control.stencilzfail_bf);
-          depth_stencil.stencilBack.passOp = ToStencilOperation(depth_control.stencilzpass_bf);
-        } else {
-          depth_stencil.stencilBack = depth_stencil.stencilFront;
-        }
-        depth_stencil.stencilReadMask = key.stencil_read_mask;
-        depth_stencil.stencilWriteMask = key.stencil_write_mask;
-      } else {
-        depth_stencil.stencilReadMask = 0;
-        depth_stencil.stencilWriteMask = 0;
-      }
-      depth_stencil.depthBias = key.depth_bias;
-      depth_stencil.depthBiasSlopeScale = key.depth_bias_slope_scale;
+      reg::RB_STENCILREFMASK stencil_mask;
+      stencil_mask.stencilmask = key.stencil_read_mask;
+      stencil_mask.stencilwritemask = key.stencil_write_mask;
+      TranslateDepthStencilState(depth_control, stencil_mask,
+                                 wgpu::TextureFormat(key.depth_stencil_format),
+                                 key.depth_bias, key.depth_bias_slope_scale, depth_stencil);
     }
 
     wgpu::RenderPipelineDescriptor desc;

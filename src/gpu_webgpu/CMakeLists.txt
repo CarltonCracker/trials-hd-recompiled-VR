@@ -82,6 +82,7 @@ target_sources(rexgpu-webgpu PRIVATE
     format_tables.cpp
     frame_recorder.cpp
     pipeline_cache.cpp
+    pipeline_state.cpp
     primitive_converter.cpp
     render_target_cache.cpp
     sampler_cache.cpp

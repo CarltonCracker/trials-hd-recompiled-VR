@@ -20,6 +20,7 @@
 #include "frame_recorder.h"
 #include "guest_memory_mirror.h"
 #include "pipeline_cache.h"
+#include "pipeline_state.h"
 #include "primitive_converter.h"
 #include "render_target_cache.h"
 #include "texture_cache.h"
@@ -647,18 +648,12 @@ bool WebGpuBackend::Draw(const DrawSnapshot& draw) {
                                         ? index_format
                                         : wgpu::IndexFormat::Undefined);
   auto pa_su_sc_mode_cntl = regs.Get<reg::PA_SU_SC_MODE_CNTL>();
-  wgpu::CullMode cull_mode = wgpu::CullMode::None;
-  if (primitive_polygonal) {
-    if (pa_su_sc_mode_cntl.cull_front && pa_su_sc_mode_cntl.cull_back) {
-      return true;  // Everything is culled.
-    }
-    cull_mode = pa_su_sc_mode_cntl.cull_front  ? wgpu::CullMode::Front
-                : pa_su_sc_mode_cntl.cull_back ? wgpu::CullMode::Back
-                                               : wgpu::CullMode::None;
+  RasterizerState rasterizer = TranslateRasterizerState(pa_su_sc_mode_cntl, primitive_polygonal);
+  if (rasterizer.all_culled) {
+    return true;  // Everything is culled.
   }
-  key.cull_mode = uint32_t(cull_mode);
-  key.front_face =
-      uint32_t(pa_su_sc_mode_cntl.face == 0 ? wgpu::FrontFace::CCW : wgpu::FrontFace::CW);
+  key.cull_mode = uint32_t(rasterizer.cull_mode);
+  key.front_face = uint32_t(rasterizer.front_face);
   key.unclipped_depth = regs.Get<reg::PA_CL_CLIP_CNTL>().clip_disable;
   key.sample_count = targets.sample_count;
   static constexpr Register kBlendControlRegisters[] = {
@@ -671,19 +666,14 @@ bool WebGpuBackend::Draw(const DrawSnapshot& draw) {
       continue;
     }
     key.color_formats[i] = uint32_t(target->host_format);
-    key.color_write_masks[i] = (color_mask >> (4 * i)) & 0xF;
+    key.color_write_masks[i] = uint32_t(TranslateColorWriteMask(color_mask, i));
     auto blend_control = regs.Get<reg::RB_BLENDCONTROL>(kBlendControlRegisters[i]);
-    bool blending_disabled =
-        blend_control.color_srcblend == xenos::BlendFactor::kOne &&
-        blend_control.color_destblend == xenos::BlendFactor::kZero &&
-        blend_control.color_comb_fcn == xenos::BlendOp::kAdd &&
-        blend_control.alpha_srcblend == xenos::BlendFactor::kOne &&
-        blend_control.alpha_destblend == xenos::BlendFactor::kZero &&
-        blend_control.alpha_comb_fcn == xenos::BlendOp::kAdd;
+    wgpu::BlendState dummy_blend;
+    bool blend_active = TranslateBlendControl(blend_control, dummy_blend);
     // Unorm/snorm/float formats used here are all blendable except 32-bit float.
     bool blendable = target->host_format != wgpu::TextureFormat::R32Float &&
                      target->host_format != wgpu::TextureFormat::RG32Float;
-    key.blend_controls[i] = (blending_disabled || !blendable) ? UINT32_MAX : blend_control.value;
+    key.blend_controls[i] = (blend_active && blendable) ? blend_control.value : UINT32_MAX;
     static constexpr Register kColorInfoRegisters[] = {
         XE_GPU_REG_RB_COLOR_INFO, XE_GPU_REG_RB_COLOR1_INFO, XE_GPU_REG_RB_COLOR2_INFO,
         XE_GPU_REG_RB_COLOR3_INFO};
@@ -696,16 +686,11 @@ bool WebGpuBackend::Draw(const DrawSnapshot& draw) {
     auto stencil_ref_mask = regs.Get<reg::RB_STENCILREFMASK>();
     key.stencil_read_mask = stencil_ref_mask.stencilmask;
     key.stencil_write_mask = stencil_ref_mask.stencilwritemask;
-    float slope, constant;
-    draw_util::GetPreferredFacePolygonOffset(regs, primitive_polygonal, slope, constant);
-    constant *= regs.Get<reg::RB_DEPTH_INFO>().depth_format ==
-                        xenos::DepthRenderTargetFormat::kD24S8
-                    ? draw_util::kD3D10PolygonOffsetFactorUnorm24
-                    : draw_util::kD3D10PolygonOffsetFactorFloat24;
-    slope *= xenos::kPolygonOffsetScaleSubpixelUnit *
-             float(std::max(render_target_cache_->scale_x(), render_target_cache_->scale_y()));
-    key.depth_bias = int32_t(std::lround(constant));
-    key.depth_bias_slope_scale = slope;
+    DepthBiasState bias = CalculateDepthBias(regs, primitive_polygonal,
+                                             render_target_cache_->scale_x(),
+                                             render_target_cache_->scale_y());
+    key.depth_bias = bias.depth_bias;
+    key.depth_bias_slope_scale = bias.depth_bias_slope_scale;
   }
   wgpu::RenderPipeline pipeline = pipeline_cache_->GetPipeline(key, *vertex_shader, pixel_shader);
   if (!pipeline) {

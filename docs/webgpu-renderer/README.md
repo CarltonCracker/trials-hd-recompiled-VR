@@ -1824,7 +1824,7 @@ ambiguity, it stops and writes the question into the task's notes instead of gue
 | --- | --- | --- | --- | --- | --- |
 | S-23 | done 2026-10-14 | S | `format_tables.{h,cpp}`: Xenos color/depth RT format → `wgpu::TextureFormat`, Xenos texture format → host format and load shader, with fallbacks by feature (sections 9.2, 9.3). Unit tests for every Trials format. | L-02 | all Trials formats and fallbacks pass unit tests (`format_tables_test`) |
 | S-24 | done 2026-10-14 | S | `sampler_cache.{h,cpp}`: fetch constant → sampler key → `wgpu::SamplerDescriptor` (clamp, filters, aniso, LOD bias, min/max LOD), cached. Unit tests. | L-02 | address modes, filters, aniso rules, key hashing, and live Dawn sampler creation pass on both GPUs (`sampler_cache_test 0/1`) |
-| S-25 | todo | S | Blend, depth and stencil state translation: Xenos `RB_BLENDCONTROL`, `RB_DEPTHCONTROL`, `RB_STENCILREFMASK`, `RB_COLOR_MASK`, `PA_SU_SC_MODE_CNTL` → WebGPU structs, including constant-color factors and depth bias. Unit tests per value in section 5.4. | L-07 (key layout) | tests pass |
+| S-25 | done 2026-10-14 | S | Blend, depth and stencil state translation: Xenos `RB_BLENDCONTROL`, `RB_DEPTHCONTROL`, `RB_STENCILREFMASK`, `RB_COLOR_MASK`, `PA_SU_SC_MODE_CNTL` → WebGPU structs, including constant-color factors and depth bias. Unit tests per value in section 5.4. | L-07 (key layout) | tests pass (`pipeline_state_test 0/1`) |
 | S-26 | done 2026-10-14 | S | Per-draw debug dump in the WebGPU backend (`webgpu_dump_frame=N`), same record format as `probe/draw_probe.gdb`, so `analyze_draws.py` and a diff script compare the two backends. | L-03 | dump of one frame matches the Vulkan probe's draw count; verified with `analyze_draws.py` and `tools/diff_draws.py` |
 | S-27 | todo | S | WebGPU debug labels: every pass, pipeline and draw labeled with guest draw index, shader hashes and RT key; push and pop debug groups per guest pass. | L-12 | labels visible in a RenderDoc capture |
 | S-28 | todo | S | GPU timestamp profiling per pass category (shadow, scene, post, resolve, UI), printed once per second like the old `gpu_profile`. | L-12 | per-category ms in the log |
@@ -1848,7 +1848,7 @@ debugging. Several can run in parallel once L-01 to L-03 exist.
 | L-03 | done 2026-10-14 df64e32 | **Front-end split.** `DrawSnapshot` / `ResolveSnapshot` / `SwapSnapshot` built from the register file in `IssueDraw`/`IssueCopy`/`IssueSwap`, independent of WebGPU, so the D3D front-end (L-17) can fill the same structs. | L-01 | 7.4, `command_processor.h` | snapshots logged for a frame; S-26 possible |
 | L-04a | done 2026-10-14 d24de8c | **WGSL translator: control flow.** `WgslShaderTranslator : ShaderTranslator`; `loop { switch (pc) }` state machine; `exec`/`jmp`/`call`/`loop` with constant-driven loop counters; predicates; bool constants; `a0` dynamic register indexing. | L-01 | 8.4, `translator.h/.cpp`, `spirv_translator.cpp` | all 74 shaders emit structurally valid WGSL (Tint) with ALU stubbed |
 | L-04b | done pi-gpt 2026-10-14 13a680a | **ALU.** Vector and scalar pipes, all opcodes used by Trials (section 5.6) and the rest of Xenos, saturation, Xenos float rules (`mul` with zero, `rsq(0)`, `max`/`min` NaN behavior), `kill*`, `setp_*`, `cube`. | L-04a | `spirv_translator_alu.cpp`, `dxbc_translator_alu.cpp`, `interpreter.cpp` | differential tests vs the SDK interpreter pass for every ALU opcode |
-| L-04c | todo | **Vertex fetch via vertex pulling.** Fetch constants, strides, offsets, all formats of section 5.6 plus the remaining Xenos vertex formats, endianness, index source (direct vs converted primitive). | L-04a, S-18 | `spirv_translator_fetch.cpp` | VS outputs match the interpreter on recorded vertex data |
+| L-04c | claimed pi-gpt 2026-10-14 | **Vertex fetch via vertex pulling.** Fetch constants, strides, offsets, all formats of section 5.6 plus the remaining Xenos vertex formats, endianness, index source (direct vs converted primitive). | L-04a, S-18 | `spirv_translator_fetch.cpp` | VS outputs match the interpreter on recorded vertex data |
 | L-04d | done 2026-10-14 1d3409f | **Texture fetch.** `tfetch2D`/`Cube`, LOD modes (`setTexLOD`, register LOD, computed), exp adjust (word 3), signedness, integer number format, swizzle, gradients, vertex-stage fetch; resolve-alias textures with different host formats. | L-04a, S-23 | `spirv_translator_fetch.cpp`, SDK patch fixes (5.7) | textured menus match the Vulkan captures |
 | L-04e | todo | **Outputs.** Position transform (viewport, half-pixel offset, `PA_CL_VTE_CNTL`), interpolators, point coordinate, facing, up to 4 color outputs with format conversions and exponent bias, alpha test, depth conventions (reverse-Z, float24). | L-04a | `spirv_translator_rb.cpp` (host-RT parts), `draw_util` | geometry silhouettes match (M3) |
 | L-04f | done 2026-10-14 c27112b | **Rect-list expansion VS** and other host VS types (`kRectangleListAsTriangleStrip`, point list if ever needed). | L-04e | `shader.h` `HostVertexShaderType`, DXBC translator | resolve/clear/full-screen rect passes draw correctly |
@@ -1873,7 +1873,7 @@ debugging. Several can run in parallel once L-01 to L-03 exist.
 | L-22 | todo | **Review duty.** A large model reviews each small-model task's diff and evidence before merge (correctness against the Xenos semantics, no game content, tests real). | ongoing | this section | review notes on each task |
 | L-23 | done 2026-10-14 (not yet committed) | **CPU pass before the renderer** (this session): command-processor register path, no-effect draw skip, native guest `memcpy`/`memset`, event-driven `WaitMultiple`, idle-dialog repaint fix, command-processor idle and `WAIT_REG_MEM` backoff. | — | notes log | 720p uncapped ~145 → ~183 FPS (now GPU-bound); 60 FPS-cap process CPU 150% → 121% |
 | L-24 | done pi-gpt 2026-10-14 bb9fbb5 | **Event-driven alertable waits.** Alertable waits (`Wait`, `SignalAndWait`, `WaitMultiple` with `is_alertable`) still wake every 1 ms (`kAlertablePollSlice`) to look for queued user callbacks (APCs); `QueueUserCallback` only sends a signal, which doesn't end a condition-variable wait. Wake the waiting thread when a callback is queued (per-thread wake target or waiter lists on conditions), without the thundering herd of a single global wakeup. | L-23 | `src/core/threading_posix.cpp` (`QueueUserCallback`, `kAlertablePollSlice`) | game threads' idle CPU drops; no APC latency regression (audio, file IO) |
-| L-25 | done pi-gpt 2026-10-14 (existing SDK implementation; verification commit follows) | **Exit-time teardown under live threads.** TSan shows static destructors (loggers, input key tables, cvar registry) running while guest threads still run when the process quits, i.e. use-after-free at exit. Follow the Skate 3 SDK fork's approach (flush logs, then `_Exit` on quit instead of tearing down under live guest threads), or stop the guest threads first. | — | TSan reports in the notes log; Skate 3 SDK commit `705b78f` | no TSan exit-time reports; clean exit code |
+| L-25 | done pi-gpt 2026-10-14 ce9f69e (existing SDK implementation) | **Exit-time teardown under live threads.** TSan shows static destructors (loggers, input key tables, cvar registry) running while guest threads still run when the process quits, i.e. use-after-free at exit. Follow the Skate 3 SDK fork's approach (flush logs, then `_Exit` on quit instead of tearing down under live guest threads), or stop the guest threads first. | — | TSan reports in the notes log; Skate 3 SDK commit `705b78f` | no TSan exit-time reports; clean exit code |
 
 ### 16.5 Order and parallelism
 
@@ -2195,6 +2195,10 @@ finding: `YYYY-MM-DD <agent> <task ID>: what changed; evidence; what is left`.
   SDK remain separate issues. Logs/binaries stay in `out/exit-test/`.
   No teardown code added: SDK HEAD already implements flush followed by `_Exit`.
   This closes the narrow L-25 acceptance, not the other sanitizer issues.
+- 2026-10-14 pi-gpt next task: claiming L-04c vertex-fetch differential coverage.
+  Reuse the authored GPU/interpreter fixture and existing fetch implementation;
+  scope is translator fetch code and synthetic tests, not Claude's active
+  resolve/texture integration. Preserve small-model helper/test claims.
 - 2026-10-14 antigravity (Tier S tasks completion):
   - **S-01:** Executed 7 headless test scripts (`main_menu_nav.txt`, `settings_menu.txt`,
     `credits.txt`, `ride_tutorial.txt`, `ride_middle_name_danger.txt`, `ride_hello_world.txt`,
@@ -2269,4 +2273,14 @@ finding: `YYYY-MM-DD <agent> <task ID>: what changed; evidence; what is left`.
     Created `tools/diff_draws.py` to diff draw streams draw-by-draw across backends (primitive, count, major mode, shader hashes,
     index buffers, and 22 key context registers). Verified against `docs/webgpu-renderer/probe/analyze_draws.py` and authored
     self-test passed 100% in `ctest`.
+  - **S-25:** Implemented fixed-function pipeline state translation in `src/gpu_webgpu/pipeline_state.{h,cpp}`:
+    formalized translation of `RB_BLENDCONTROL`, `RB_DEPTHCONTROL`, `RB_STENCILREFMASK`, `RB_COLOR_MASK`, and
+    `PA_SU_SC_MODE_CNTL` to WebGPU structures. Translated blend factors with alpha promotion (`SrcColor` -> `SrcAlpha`),
+    WebGPU Min/Max rule (factors clamped to `One`), reverse-Z `GreaterEqual` depth compare, front and back stencil
+    operations, per-RT-slot color write masks (`0xF` -> `Red | Green | Blue | Alpha`), winding / cull modes (accounting
+    for non-polygonal topologies), and subpixel depth bias / slope-scale offsets. Wired translation into `PipelineCache`
+    and `WebGpuBackend`. Authored comprehensive unit tests in `tests/gpu_webgpu/pipeline_state_test.cpp` verifying
+    all Section 5.4 blend modes, stencil operations, rasterizer states, depth bias scaling, and live Dawn render
+    pipeline compilation across both GPUs (NVIDIA RTX 2070 SUPER and AMD RX 6600) with 0 validation errors.
+
 
