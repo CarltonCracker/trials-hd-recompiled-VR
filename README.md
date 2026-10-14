@@ -169,7 +169,9 @@ resolution with 2560x1440 rendering (supersampled) or 1280x720 (upscaled).
 
 The main menu is the game's own, with all of its buttons. Achievements opens the
 host achievements overlay. Leaderboards and Download Content require unavailable
-Xbox LIVE services and retain the game's offline / not-signed-in behavior.
+Xbox LIVE services and retain the game's offline / not-signed-in behavior. The
+"Offline warning" message box the game shows before a track (scores can't be saved
+to Xbox LIVE leaderboards) is skipped (`src/offline_warning.cpp`).
 
 With no audio device the game continues with silent audio. With several GPUs, pick
 one with `--vulkan_device=N` (the device list is printed at startup).

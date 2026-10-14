@@ -59,6 +59,7 @@ set(TRIALSHD_SOURCES
     src/fps_unlock.cpp
     src/gpu_wait.cpp
     src/achievements_hook.cpp
+    src/offline_warning.cpp
     src/package_license.cpp
     src/virtual_pad.cpp
 )
