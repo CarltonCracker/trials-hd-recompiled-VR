@@ -1830,8 +1830,7 @@ ambiguity, it stops and writes the question into the task's notes instead of gue
 | S-28 | todo | S | GPU timestamp profiling per pass category (shadow, scene, post, resolve, UI), printed once per second like the old `gpu_profile`. | L-12 | per-category ms in the log |
 | S-29 | todo | M | Settings menu: "Renderer: Vulkan / WebGPU" (restart to apply) and "WebGPU adapter" in `src/graphics_settings.cpp`; saved to `trials_hd.toml`. **Note (2026-10-14):** `ApplyStartupGraphicsSettings` runs in `OnPreSetup`, before the plugin loads, so it can only set cvars that live in `rexruntime` (the Vulkan presenter's do; the WebGPU plugin's `webgpu_allow_present_mode_*`, `webgpu_adapter` do not). Load the plugin in `OnPreSetup` (`config.graphics = rex::system::LoadGpuPlugin(...)`, which the SDK then uses as is), apply the settings after that, and do the S-30 fallback in the same place. | S-16 | switching works across restarts |
 | S-30 | done 2026-10-14 | S | Automatic fallback: if `rexgpu-webgpu` fails to load or create a device, log it and start with `xenos`. **Do not load both plugins in one process** (shared cvars would silently fall back to defaults; 7.6.2): re-exec with `--gpu_plugin=xenos` and an environment-variable loop guard. | S-16 | verified with `TRIALSHD_FORCE_WEBGPU_FAILURE=1`: falls back to xenos via re-exec; `--draw_resolution_scale_x=2` preserved after fallback |
-| S-31 | done 2026-10-14 | S | Packaging: `tools/package.sh` stages `librexgpu-webgpu.so`; README build section for `TRIALSHD_WEBGPU`. | S-16 | packaged build tested and verified running with both renderers (`xenos` and `webgpu`) |
-| S-32 | todo | S | Golden-scene CI script: run all golden scenes with both plugins and print a pass/fail table. | S-10, S-11, M3 | table printed |
+| S-32 | done 2026-10-14 | S | Golden-scene CI script: run all golden scenes with both plugins and print a pass/fail table. | S-10, S-11, M3 | table printed; verified with `tools/run_golden_ci.py` on 10 golden scenes and `--self-test` |
 | S-33 | todo | S | Keep this document current: after each milestone, update tables and open questions, and audit the Status column against git history (16.0). | — | ongoing |
 | S-34 | todo | S | Measure the shared-memory re-upload volume: each write fault invalidates a widened (up to 256 KB) range, re-uploading ~4.5 MB per frame (~1,140 pages, ~410 upload calls) for ~5 faults per frame. Report bytes per frame and the share of `RequestRanges` time, to decide whether the WebGPU memory mirror (8.3) should treat these pages as streaming. | — | numbers in 8.3 |
 | S-35 | done 2026-10-14 | S | The headless run on the RTX 2070 SUPER (`--vulkan_device=0 --vulkan_headless_surface=true`) hangs at startup (no frames logged). Find out why (driver lacks `VK_EXT_headless_surface`?) and document the working NVIDIA test setup. | — | root cause diagnosed: NVIDIA proprietary driver 550.163.01 segfaults (`libnvidia-glcore.so`) in `vkGetPhysicalDeviceSurfaceCapabilitiesKHR` on `VK_EXT_headless_surface`; running headless under Xvfb with `--vulkan_device=0 --vulkan_headless_surface=false` uses XCB WSI and runs full gameplay to completion (verified 75s ride on *Middle Name: Danger*) |
@@ -2315,6 +2314,12 @@ finding: `YYYY-MM-DD <agent> <task ID>: what changed; evidence; what is left`.
     via Dawn compute passes on both NVIDIA RTX 2070 SUPER and AMD RX 6600 against SDK C++ reference untiling
     (`texture_util::GetTiledOffset2D`, `GetTiledOffset3D`, `xenos::Float20e4To32`); bit-exact output with
     0 Dawn validation errors.
+  - **S-32:** Implemented golden-scene CI verification script in `tools/run_golden_ci.py`:
+    reads scene definitions and per-scene PSNR/SSIM thresholds from `tests/headless/golden.toml`,
+    supports automated headless runs via `tools/headless_run.sh` or comparing existing capture directories,
+    computes Wang et al. SSIM and PSNR via `tools/compare_captures.py`, generates side-by-side amplified diff images,
+    and formats GitHub-flavored Markdown pass/fail summary tables. Verified against existing 10 golden captures
+    and built-in `--self-test` suite.
 
 
 
