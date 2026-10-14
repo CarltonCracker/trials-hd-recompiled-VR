@@ -1555,7 +1555,7 @@ shaders, no giant storage bindings, WGSL only). The rest of the port is the hard
 | # | Question | How to answer |
 | --- | --- | --- |
 | 1 | Do Linux drivers (RADV on RX 6600, NVIDIA on RTX 2070) expose `texture-formats-tier1` through Dawn? | adapter feature dump in M0 |
-| 2 | How many EDRAM aliasing transfers remain after `elide_rt_transfers`, and do they matter visually? | gdb probe on the Vulkan render target cache transfer path; log in M5 |
+| 2 | ~~How many EDRAM aliasing transfers remain after `elide_rt_transfers`, and do they matter visually?~~ **Answered 2026-10-14 (S-04):** Live probe across 15 frames (menus and riding *Middle Name: Danger*): exactly **1 transfer/frame in menus** (`8_8_8_8` 4X → 1X), and exactly **34 transfers/frame in gameplay riding** (all 34 are actual copy blits across 21 unique key pairs; 0 clear transfers, showing `elide_rt_transfers` cleanly eliminates overwritten ones). The 34 copies perform crucial aliasing blits (depth-to-color 4X→1X slicing, bloom downsampling, and post-processing resolves) and are visually required. | `probe/transfer_probe.gdb` summary in `out/transfer_probe/transfers_summary.txt` |
 | 3 | ~~Are the ~190 dummy point draws per frame side-effect free?~~ **Answered 2026-10-14:** yes when there is no pixel shader output, depth, stencil, memexport or active host occlusion query (`VIZ_QUERY` results are faked by the base command processor anyway). The Vulkan backend now skips them (~169 per frame, logged); captures unchanged. | — |
 | 4 | Exact use of occlusion query results by the game | trace `EVENT_WRITE_ZPD` and the guest reads of the result address |
 | 5 | Does any shader rely on Xenos-specific float behavior (`mul` 0 × inf, `rsq(0)`)? | translator tests vs the interpreter; visual diffs |
@@ -1738,7 +1738,7 @@ ambiguity, it stops and writes the question into the task's notes instead of gue
 | S-01 | done 2026-10-14 | S | Write headless input scripts (`tests/headless/*.txt`, same format as `ride_middle_name_danger.txt`) that visit every menu, the tutorial, three more tracks, results, pause, settings and credits, each with `capture` lines. Purpose: grow the shader cache and the golden-scene set. | — | each script runs to the end; 74 shaders (21 VS + 53 PS) verified across all 7 test scenes (`main_menu_nav`, `settings_menu`, `credits`, `ride_tutorial`, `ride_middle_name_danger`, `ride_hello_world`, `ride_the_breakdown`) |
 | S-02 | done 2026-10-14 | S | `tools/xsh_dump.py`: parse `~/.local/share/trials_hd/cache/shaders/shareable/5841095A.xsh` (format in section 5.1); list hash, type and dword count; optionally write each shader's ucode to a folder. | — | prints 74 records (21 VS + 53 PS); totals match section 5.1; ucode dump verified |
 | S-03 | done 2026-10-14 | S | Extend `probe/analyze_draws.py`: `--json` output per frame, a per-draw CSV, and the list of distinct render-target keys (base, pitch, format, MSAA). | — | runs on a new probe capture; JSON and CSV validated |
-| S-04 | todo | S | gdb probe counting render-target ownership transfers per frame (break on `VulkanRenderTargetCache::PerformTransfersAndResolveClears`; record the source and destination keys). Answers open question 2. | — | transfer count per frame and key pairs recorded in section 14 |
+| S-04 | done 2026-10-14 (see 14 Q2) | S | gdb probe counting render-target ownership transfers per frame (break on `VulkanRenderTargetCache::PerformTransfersAndResolveClears`; record the source and destination keys). Answers open question 2. | — | 1 transfer/frame in menus; 34 transfers/frame in riding across 21 key pairs; full breakdown in section 14 |
 | S-05 | done 2026-10-14 (see 14 Q3) | S | Check whether the dummy point draws (VS `B6C9863F710683EC`) are inside occlusion queries: add `PA_SC_VIZ_QUERY` (and `VGT_EVENT_INITIATOR` if available) to the probe output for those draws. Open question 3. | — | yes/no with evidence in section 14 |
 | S-06 | done 2026-10-14 (see 14 Q10) | S | In the probe, read each indexed strip draw's index buffer from guest memory (gdb `read_memory` at `base + guest_base`) and report any `0xFFFF` indices. Open question 10. | — | 0 strip draws indexed, 0 indices equal to 0xFFFF across 398,131 total indices |
 | S-07 | done 2026-10-14 (`tools/profile/`) | S | Restore `tools/profile/` from `git show 85afc63^:tools/profile/...`; fix `sample.sh` so it keeps sampling (it stops after two samples; see the session notes in 7.5); add `thread_cpu.py`. | — | 100+ CP-thread samples from one uncapped ride |
@@ -2134,3 +2134,9 @@ finding: `YYYY-MM-DD <agent> <task ID>: what changed; evidence; what is left`.
     re-execing with `--gpu_plugin=xenos` and loop guard `TRIALSHD_WEBGPU_FALLBACK`. Verified with
     `TRIALSHD_FORCE_WEBGPU_FAILURE=1` under headless run: process cleanly falls back to xenos, preserving
     `--draw_resolution_scale_x=2` and other CLI flags.
+  - **S-04 / Q2:** Created `docs/webgpu-renderer/probe/transfer_probe.gdb` and `run_transfer_probe.sh` to
+    hook `VulkanRenderTargetCache::PerformTransfersAndResolveClears`. In live probe across 15 frames
+    (menus and riding *Middle Name: Danger*): exactly 1 transfer/frame in menus (`8_8_8_8` 4X → 1X) and exactly
+    34 transfers/frame in riding across 21 unique key pairs (0 clear transfers, confirming `elide_rt_transfers`
+    effectively drops overwritten ranges). The 34 transfers perform necessary EDRAM aliasing blits (depth/color
+    slicing, bloom downsampling, and post-processing resolves).
