@@ -807,8 +807,9 @@ the same objects for every render pipeline. Only group 2 varies.
 
 #### 7.6.6 Front-end/back-end interface: `DrawSnapshot`, `ResolveSnapshot`, `SwapSnapshot`
 
-The backend sees guest GPU state **only** through these structs (in
-`src/gpu_webgpu/draw_snapshot.h`). It never reaches into `CommandProcessor` members.
+The backend sees guest GPU state **only** through these structs (implemented in
+`src/gpu_webgpu/draw_snapshot.h`, which is authoritative; namespace `rex::graphics::webgpu`
+like the SDK's `rex::graphics::vulkan`, for upstreaming). It never reaches into `CommandProcessor` members.
 That way the D3D front-end (L-17) is a different producer of the same structs.
 
 The snapshots carry a `RegisterFile` rather than a decoded state struct because the
@@ -819,7 +820,7 @@ front-end fills a `RegisterFile` of its own (0x5003 dwords, about 80 KiB, one in
 from that shadow.
 
 ```cpp
-namespace rex::gpu_webgpu {
+namespace rex::graphics::webgpu {
 
 // A set bit may be a false positive. A clear bit must be exact. Set all bits when unsure.
 enum DrawDirty : uint32_t {
@@ -867,6 +868,8 @@ struct SwapSnapshot {
   uint32_t frontbuffer_ptr;            // as in CommandProcessor::IssueSwap
   uint32_t frontbuffer_width;
   uint32_t frontbuffer_height;
+  uint32_t display_width;               // guest video mode (VdQueryVideoMode), for the aspect ratio
+  uint32_t display_height;
   uint32_t frame_index;
   // The gamma ramp is read through the CP's existing OnGammaRamp*Written hooks, not here.
 };
@@ -878,7 +881,7 @@ class WebGpuBackend {                  // consumer; one instance, owned by the C
   void Swap(const SwapSnapshot& swap);
 };
 
-}  // namespace rex::gpu_webgpu
+}  // namespace rex::graphics::webgpu
 ```
 
 Rules:
@@ -1453,8 +1456,8 @@ Each milestone ends with a headless run on Linux and a short note in this docume
 
 | # | Status | Milestone | Done when |
 | --- | --- | --- | --- |
-| M0 | todo | Dawn builds (prefix build, pinned); `tools/webgpu_smoke` restored and extended: SDL3 window on X11 **and** Wayland, triangle, resize, VSync on/off, adapter list, and a synthetic 1,500-draw frame to measure Dawn's CPU cost per draw (7.5) | smoke runs on the RX 6600 and RTX 2070; µs/draw recorded here |
-| M1 | todo | `rexgpu-webgpu` plugin skeleton: provider, presenter (clear color + letterbox), ImGui drawer, command processor that accepts everything and draws nothing. Game boots and runs with `--gpu_plugin=webgpu`; F1 settings menu works | menus navigable blind; headless run completes |
+| M0 | in progress (Dawn builds; S-13..S-15 open) | Dawn builds (prefix build, pinned); `tools/webgpu_smoke` restored and extended: SDL3 window on X11 **and** Wayland, triangle, resize, VSync on/off, adapter list, and a synthetic 1,500-draw frame to measure Dawn's CPU cost per draw (7.5) | smoke runs on the RX 6600 and RTX 2070; µs/draw recorded here |
+| M1 | in progress (L-02: boots, presents, captures; F1 menu check open) | `rexgpu-webgpu` plugin skeleton: provider, presenter (clear color + letterbox), ImGui drawer, command processor that accepts everything and draws nothing. Game boots and runs with `--gpu_plugin=webgpu`; F1 settings menu works | menus navigable blind; headless run completes |
 | M2 | todo | `tools/xenos2wgsl`: all 74 cached shaders translate and pass Tint validation; interpreter comparison for vertex shaders | 74/74 valid |
 | M3 | todo | First geometry: guest memory ranges, vertex pulling, constants, RT cache for `k_8_8_8_8` + depth, triangle lists/strips, frontbuffer resolve → present. Untextured silhouettes of the menu and track | silhouettes match Vulkan captures |
 | M4 | todo | Textures: BC1/BC3/8888/k_8/cube loads, samplers, swizzles, signedness, exp adjust | menus pixel-close to Vulkan |
@@ -1716,11 +1719,11 @@ ambiguity, it stops and writes the question into the task's notes instead of gue
 
 | ID | Status | Tier | Task | Depends | Done when |
 | --- | --- | --- | --- | --- | --- |
-| S-12 | todo | S | `tools/build_dawn.sh`: clone or update Dawn at a pinned commit (an argument, default `088a8d00efd1c70b58c549d355401d115904b648` from L-01) into `thirdparty/dawn`, configure with the options of section 10.2 (including `CMAKE_POSITION_INDEPENDENT_CODE=ON`), install to `out/dawn-install`. Option names were checked against the pin in 7.6.1. | L-01 (pin) | script builds from scratch; option names confirmed |
+| S-12 | done 2026-10-14 (this commit) | S | `tools/build_dawn.sh`: clone or update Dawn at a pinned commit (an argument, default `088a8d00efd1c70b58c549d355401d115904b648` from L-01) into `thirdparty/dawn`, configure with the options of section 10.2 (including `CMAKE_POSITION_INDEPENDENT_CODE=ON`), install to `out/dawn-install`. Option names were checked against the pin in 7.6.1. | L-01 (pin) | script builds from scratch; option names confirmed |
 | S-13 | todo | S | Restore `tools/webgpu_smoke` and `src/webgpu/webgpu_context.*` from `530381a^`; port the surface code to SDL3 window properties for **X11 and Wayland**; add an adapter list and VSync on/off. | S-12 | triangle on both GPUs, on X11 and on a Wayland session |
 | S-14 | todo | S | Add an adapter feature and limit dump to `webgpu_smoke` (`--info`). Record RX 6600 and RTX 2070 results (open question 1: `texture-formats-tier1`, `depth32float-stencil8`, `texture-compression-bc`, `timestamp-query`, `depth-clip-control`; open question 12: `maxBufferSize`, `maxStorageBufferBindingSize`, `maxImmediateSize`). | S-13 | results table in section 9.1 |
 | S-15 | todo | S | Dawn CPU-overhead benchmark in `webgpu_smoke --bench`: 1,500 draws per frame across 30 render passes, 60 pipelines, per-draw dynamic-offset uniforms and 3 bind groups. Report µs per draw with and without validation (`skip_validation` toggle), and with the device created with and without `ImplicitDeviceSynchronization` (the per-call lock cost, 7.6.4). Use the binding model of 7.6.5 (5 dynamic offsets in group 0). | S-13 | numbers in 7.5 |
-| S-16 | todo | S | CMake option `TRIALSHD_WEBGPU` and an empty `rexgpu-webgpu` target per section 10.3 that builds, gets staged next to `trials_hd`, and loads (`--gpu_plugin=webgpu` reaches `rex_gpu_create`). | L-01 | log line from the plugin's create function |
+| S-16 | done 2026-10-14 (this commit) | S | CMake option `TRIALSHD_WEBGPU` and an empty `rexgpu-webgpu` target per section 10.3 that builds, gets staged next to `trials_hd`, and loads (`--gpu_plugin=webgpu` reaches `rex_gpu_create`). | L-01 | log line from the plugin's create function |
 
 #### Shaders we own (not game shaders), each with a test
 
@@ -1730,7 +1733,7 @@ ambiguity, it stops and writes the question into the task's notes instead of gue
 | S-18 | todo | S | `wgsl_prelude.wgsl` helpers with tests against the SDK's C++ (`include/rex/graphics/xenos.h`): endian swaps (8in16, 8in32, 16in32), float24 (20e4) ↔ float32, 7e3 ↔ float32, signed and unsigned 10:10:10:2 unpack, 16-bit snorm/float unpack, Xenos `k_16_16` RT ±32 scaling. | S-17 | all helper tests pass |
 | S-19 | todo | S | Port texture-load compute shaders to WGSL, **one task per shader**: `texture_load_32bpb`, `_64bpb`, `_8bpb`, `_128bpb` (BC block copies), `_depth_float`. Source: Xenia's XeSL at the SDK's revision (or `tint` from the SDK's SPIR-V headers, then clean up). Test: same input buffer through the SDK's Vulkan SPIR-V version and the WGSL version, outputs compared byte for byte. | S-17 | identical output on synthetic tiled inputs (never commit game data) |
 | S-20 | todo | S | Port the gamma shaders (`apply_gamma_table`, `apply_gamma_pwl`) to WGSL with tests. | S-17 | matches CPU reference |
-| S-21 | todo | S | WGSL for the ImGui immediate drawer (textured, vertex-colored quads, scissor). | S-13 | renders the ImGui demo window in `webgpu_smoke` |
+| S-21 | claimed claude-opus-5.5 2026-10-14 (inside L-02) | S | WGSL for the ImGui immediate drawer (textured, vertex-colored quads, scissor). | S-13 | renders the ImGui demo window in `webgpu_smoke` |
 | S-22 | todo | S | Index swap compute shader (16-bit and 32-bit, 8in16/8in32), plus quad-list → triangle-list and fan → list conversion in WGSL, with tests against `PrimitiveProcessor`'s CPU code. | S-17 | identical index output |
 
 #### Mechanical renderer pieces (after the large-model skeleton exists)
@@ -1743,7 +1746,7 @@ ambiguity, it stops and writes the question into the task's notes instead of gue
 | S-26 | todo | S | Per-draw debug dump in the WebGPU backend (`webgpu_dump_frame=N`), same record format as `probe/draw_probe.gdb`, so `analyze_draws.py` and a diff script compare the two backends. | L-03 | dump of one frame matches the Vulkan probe's draw count |
 | S-27 | todo | S | WebGPU debug labels: every pass, pipeline and draw labeled with guest draw index, shader hashes and RT key; push and pop debug groups per guest pass. | L-12 | labels visible in a RenderDoc capture |
 | S-28 | todo | S | GPU timestamp profiling per pass category (shadow, scene, post, resolve, UI), printed once per second like the old `gpu_profile`. | L-12 | per-category ms in the log |
-| S-29 | todo | S | Settings menu: "Renderer: Vulkan / WebGPU" (restart to apply) and "WebGPU adapter" in `src/graphics_settings.cpp`; saved to `trials_hd.toml`. | S-16 | switching works across restarts |
+| S-29 | todo | M | Settings menu: "Renderer: Vulkan / WebGPU" (restart to apply) and "WebGPU adapter" in `src/graphics_settings.cpp`; saved to `trials_hd.toml`. **Note (2026-10-14):** `ApplyStartupGraphicsSettings` runs in `OnPreSetup`, before the plugin loads, so it can only set cvars that live in `rexruntime` (the Vulkan presenter's do; the WebGPU plugin's `webgpu_allow_present_mode_*`, `webgpu_adapter` do not). Load the plugin in `OnPreSetup` (`config.graphics = rex::system::LoadGpuPlugin(...)`, which the SDK then uses as is), apply the settings after that, and do the S-30 fallback in the same place. | S-16 | switching works across restarts |
 | S-30 | todo | S | Automatic fallback: if `rexgpu-webgpu` fails to load or create a device, log it and start with `xenos`. **Do not load both plugins in one process** (shared cvars would silently fall back to defaults; 7.6.2): re-exec with `--gpu_plugin=xenos` and an environment-variable loop guard. | S-16 | forced failure falls back; `draw_resolution_scale_x` from the config is honored after the fallback |
 | S-31 | todo | S | Packaging: `tools/package.sh` stages `librexgpu-webgpu.so`; README build section for `TRIALSHD_WEBGPU`. | S-16 | packaged build runs with both renderers |
 | S-32 | todo | S | Golden-scene CI script: run all golden scenes with both plugins and print a pass/fail table. | S-10, S-11, M3 | table printed |
@@ -1759,8 +1762,8 @@ debugging. Several can run in parallel once L-01 to L-03 exist.
 | ID | Status | Task | Depends | Read first | Done when |
 | --- | --- | --- | --- | --- | --- |
 | L-01 | done 2026-10-14 88f1289 | **Integration design.** Pin Dawn; confirm which SDK graphics sources the plugin compiles (vs. `rexruntime`) without duplicate state; decide device threading (Dawn implicit synchronization vs. single thread); write the bind-group layout and `DrawSnapshot` spec as a design note in this doc. | — | 7, 8.1–8.2, 10.3, SDK `src/graphics/CMakeLists.txt` | design note merged; S-12/S-16 unblocked |
-| L-02 | todo | **M1 skeleton.** `WebGpuGraphicsSystem`, `WebGpuProvider`, `WebGpuPresenter` (clear color, letterbox, headless offscreen mode, `CaptureGuestOutput`), `WebGpuImmediateDrawer`, a `WebGpuCommandProcessor` that accepts all packets and draws nothing. The game boots and the settings menu works. | L-01, S-16, S-21 | `src/ui/vulkan/vulkan_presenter.cpp`, `include/rex/ui/presenter.h`, `src/graphics/graphics_system.cpp` | headless menu navigation completes with `--gpu_plugin=webgpu` |
-| L-03 | todo | **Front-end split.** `DrawSnapshot` / `ResolveSnapshot` / `SwapSnapshot` built from the register file in `IssueDraw`/`IssueCopy`/`IssueSwap`, independent of WebGPU, so the D3D front-end (L-17) can fill the same structs. | L-01 | 7.4, `command_processor.h` | snapshots logged for a frame; S-26 possible |
+| L-02 | claimed claude-opus-5.5 2026-10-14 | **M1 skeleton.** `WebGpuGraphicsSystem`, `WebGpuProvider`, `WebGpuPresenter` (clear color, letterbox, headless offscreen mode, `CaptureGuestOutput`), `WebGpuImmediateDrawer`, a `WebGpuCommandProcessor` that accepts all packets and draws nothing. The game boots and the settings menu works. | L-01, S-16, S-21 | `src/ui/vulkan/vulkan_presenter.cpp`, `include/rex/ui/presenter.h`, `src/graphics/graphics_system.cpp` | headless menu navigation completes with `--gpu_plugin=webgpu` |
+| L-03 | done 2026-10-14 (this commit) | **Front-end split.** `DrawSnapshot` / `ResolveSnapshot` / `SwapSnapshot` built from the register file in `IssueDraw`/`IssueCopy`/`IssueSwap`, independent of WebGPU, so the D3D front-end (L-17) can fill the same structs. | L-01 | 7.4, `command_processor.h` | snapshots logged for a frame; S-26 possible |
 | L-04a | todo | **WGSL translator: control flow.** `WgslShaderTranslator : ShaderTranslator`; `loop { switch (pc) }` state machine; `exec`/`jmp`/`call`/`loop` with constant-driven loop counters; predicates; bool constants; `a0` dynamic register indexing. | L-01 | 8.4, `translator.h/.cpp`, `spirv_translator.cpp` | all 74 shaders emit structurally valid WGSL (Tint) with ALU stubbed |
 | L-04b | todo | **ALU.** Vector and scalar pipes, all opcodes used by Trials (section 5.6) and the rest of Xenos, saturation, Xenos float rules (`mul` with zero, `rsq(0)`, `max`/`min` NaN behavior), `kill*`, `setp_*`, `cube`. | L-04a | `spirv_translator_alu.cpp`, `dxbc_translator_alu.cpp`, `interpreter.cpp` | differential tests vs the SDK interpreter pass for every ALU opcode |
 | L-04c | todo | **Vertex fetch via vertex pulling.** Fetch constants, strides, offsets, all formats of section 5.6 plus the remaining Xenos vertex formats, endianness, index source (direct vs converted primitive). | L-04a, S-18 | `spirv_translator_fetch.cpp` | VS outputs match the interpreter on recorded vertex data |
@@ -1870,3 +1873,36 @@ finding: `YYYY-MM-DD <agent> <task ID>: what changed; evidence; what is left`.
     written (7.6.5, 7.6.6).
   - Open: S-14 must confirm 512 MiB buffer and binding limits (open question 12). No
     Dawn build was run at the pin yet (S-12).
+- 2026-10-14 claude-opus-5.5 S-12: `tools/build_dawn.sh` (pin, options of 10.2 plus PIC,
+  `DAWN_BUILD_PROTOBUF=OFF`, macOS branch). Builds and installs to `out/dawn-install`.
+  **This machine is unstable under full build load:** across 4 build attempts clang crashed
+  6 times on different files (`free(): invalid pointer`, `free(): invalid next size`,
+  segfaults, one 10-minute hang on a file that compiles in 5 s alone), and Python crashed
+  once in Dawn's configure step (`free(): invalid size`). Retrying finished the build; 37 of
+  37 recompiled Dawn objects matched the installed ones byte for byte. Same failure class as
+  the game's intermittent `malloc_consolidate` abort (L-20): suspect RAM/CPU stability
+  (memtest86+, XMP/EXPO or undervolt settings) before more software debugging.
+- 2026-10-14 claude-opus-5.5 S-16: `TRIALSHD_WEBGPU` option, `src/gpu_webgpu/` target with
+  the 18 SDK sources, postfixes, staged by `rexglue_setup_target(... GPU_PLUGINS xenos
+  webgpu)` and `trials_hd_stage_libs`. `-Wl,--exclude-libs,ALL` hides Dawn/Tint/Abseil
+  symbols (17,030 exports → 19). `--gpu_plugin=webgpu` loads it (log line from
+  `rex_gpu_create`).
+- 2026-10-14 claude-opus-5.5 L-02 (in progress): provider (adapter list, `webgpu_adapter`,
+  `webgpu_validation`, `webgpu_backend_validation`, all adapter limits requested, optional
+  features of 9.1), presenter (Xlib/Wayland/Metal surfaces, present modes, letterboxed
+  bilinear guest output, UI drawers, `CaptureGuestOutput` readback), ImGui drawer (S-21's
+  WGSL), CP accepting everything. The game boots and runs the menu script on WebGPU; the
+  capture is the 1280x720 placeholder color; Xvfb screenshots show it painted on llvmpipe
+  and the RTX 2070. Findings: **Dawn native has no XCB surface support** (only Xlib), so
+  the presenter opens its own Xlib connection (`x11_display.cpp`); a resolve is a draw in
+  EDRAM copy mode (`IssueDraw` must forward it to `IssueCopy`); RTX 2070 limits:
+  `maxBufferSize` 1 TiB, `maxStorageBufferBindingSize` 2047 MiB, `maxImmediateSize` 64
+  (open question 12: yes on NVIDIA; RX 6600 still to log). Open: F1 settings menu check.
+- 2026-10-14 claude-opus-5.5 L-03: `draw_snapshot.h`, `WebGpuBackend` (consumer), CP builds
+  Draw/Resolve/SwapSnapshots with dirty bits from `WriteRegister`/`WriteRegistersFromMem`
+  overrides (context-register lookup table). `--webgpu_trace_frame=N` logs one frame's
+  snapshots (checked: frame 3000 on the title screen, 72 draws, 1 resolve, 1 swap).
+- 2026-10-14 claude-opus-5.5: **for agents working in parallel:** the RelWithDebInfo build
+  dir now has `TRIALSHD_WEBGPU=ON`; don't run two builds in the same build directory at
+  once. Run headless scripts with `PATH=$PWD/.venv/bin:$PATH` (sourcing `activate` does not
+  always take effect in agent shells).
