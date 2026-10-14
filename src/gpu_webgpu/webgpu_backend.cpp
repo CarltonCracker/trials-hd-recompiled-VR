@@ -31,6 +31,13 @@
 REXCVAR_DEFINE_INT32(webgpu_trace_frame, -1, "GPU/WebGPU",
                      "Log every draw, resolve and swap the backend receives in this guest frame "
                      "(-1 = off)");
+REXCVAR_DEFINE_INT32(webgpu_dump_frame, -1, "GPU/WebGPU",
+                     "First guest frame to dump per-draw probe records to webgpu_dump_file "
+                     "(-1 = off)");
+REXCVAR_DEFINE_INT32(webgpu_dump_count, 1, "GPU/WebGPU",
+                     "Number of consecutive frames to dump (default 1)");
+REXCVAR_DEFINE_STRING(webgpu_dump_file, "draws_webgpu.bin", "GPU/WebGPU",
+                      "Output file for per-draw debug dump");
 
 // Defined with the SDK's texture cache base (pipeline/texture/cache.cpp).
 REXCVAR_DECLARE(int32_t, draw_resolution_scale_x);
@@ -88,6 +95,11 @@ WebGpuBackend::~WebGpuBackend() {
   primitive_processor_.reset();
   shared_memory_.reset();
   frame_recorder_.reset();
+  if (dump_file_) {
+    std::fflush(dump_file_);
+    std::fclose(dump_file_);
+    dump_file_ = nullptr;
+  }
 }
 
 static WebGpuBackendState& State() {
@@ -241,6 +253,161 @@ bool WebGpuBackend::IsTracedFrame(uint32_t frame_index) const {
   return traced >= 0 && uint32_t(traced) == frame_index;
 }
 
+#pragma pack(push, 1)
+struct ProbeHeader {
+  char kind[4];
+  uint32_t win = 0;
+  uint32_t prim = 0;
+  uint32_t count = 0;
+  uint32_t major = 0;
+  uint64_t vh = 0;
+  uint64_t ph = 0;
+};
+static_assert(sizeof(ProbeHeader) == 36);
+
+struct ProbeIndexBuffer {
+  uint32_t format = 0;
+  uint32_t endianness = 0;
+  uint32_t count = 0;
+  uint32_t guest_base = 0;
+  uint64_t length = 0;
+};
+static_assert(sizeof(ProbeIndexBuffer) == 24);
+
+struct ProbeRecord {
+  ProbeHeader header;
+  ProbeIndexBuffer ib;
+  uint32_t ctx_regs[0x400]{};    // 0x2000..0x23FF (4096 B)
+  uint32_t fetch_regs[0x200]{};  // 0x4800..0x49FF (2048 B)
+};
+static_assert(sizeof(ProbeRecord) == 6204);
+#pragma pack(pop)
+
+void WebGpuBackend::EnsureDumpOpen(uint32_t frame_index) {
+  if (dump_file_) {
+    return;
+  }
+  int32_t dump_start = REXCVAR_GET(webgpu_dump_frame);
+  if (dump_start < 0) {
+    return;
+  }
+  int32_t dump_count = std::max(1, REXCVAR_GET(webgpu_dump_count));
+  if (int32_t(frame_index) < dump_start || int32_t(frame_index) >= dump_start + dump_count) {
+    return;
+  }
+  std::string path = REXCVAR_GET(webgpu_dump_file);
+  dump_file_ = std::fopen(path.c_str(), "wb");
+  if (!dump_file_) {
+    REXGPU_ERROR("Failed to open per-draw dump file: {}", path);
+    return;
+  }
+  // Leading SWAP record (win = 0, prim = 0)
+  ProbeRecord rec{};
+  std::memcpy(rec.header.kind, "SWAP", 4);
+  rec.header.win = 0;
+  rec.header.prim = 0;
+  std::fwrite(&rec, sizeof(rec), 1, dump_file_);
+  dump_swaps_written_ = 1;
+  dump_records_written_ = 1;
+}
+
+void WebGpuBackend::DumpDraw(const DrawSnapshot& draw) {
+  int32_t dump_start = REXCVAR_GET(webgpu_dump_frame);
+  if (dump_start < 0) {
+    return;
+  }
+  int32_t dump_count = std::max(1, REXCVAR_GET(webgpu_dump_count));
+  if (int32_t(draw.frame_index) < dump_start ||
+      int32_t(draw.frame_index) >= dump_start + dump_count) {
+    return;
+  }
+  EnsureDumpOpen(draw.frame_index);
+  if (!dump_file_) {
+    return;
+  }
+
+  ProbeRecord rec{};
+  std::memcpy(rec.header.kind, "DRAW", 4);
+  rec.header.win = 0;
+  rec.header.prim = static_cast<uint32_t>(draw.primitive_type);
+  rec.header.count = draw.index_count;
+  rec.header.major = draw.major_mode_explicit ? 1 : 0;
+  rec.header.vh = ShaderHash(draw.vertex_shader);
+  rec.header.ph = ShaderHash(draw.pixel_shader);
+  if (draw.indexed) {
+    rec.ib.format = static_cast<uint32_t>(draw.index_buffer.format);
+    rec.ib.endianness = static_cast<uint32_t>(draw.index_buffer.endianness);
+    rec.ib.count = draw.index_buffer.count;
+    rec.ib.guest_base = draw.index_buffer.guest_base;
+    rec.ib.length = draw.index_buffer.length_bytes;
+  }
+  std::memcpy(rec.ctx_regs, &draw.regs->values[0x2000], sizeof(rec.ctx_regs));
+  std::memcpy(rec.fetch_regs, &draw.regs->values[0x4800], sizeof(rec.fetch_regs));
+  std::fwrite(&rec, sizeof(rec), 1, dump_file_);
+  ++dump_records_written_;
+}
+
+void WebGpuBackend::DumpResolve(const ResolveSnapshot& resolve) {
+  int32_t dump_start = REXCVAR_GET(webgpu_dump_frame);
+  if (dump_start < 0) {
+    return;
+  }
+  int32_t dump_count = std::max(1, REXCVAR_GET(webgpu_dump_count));
+  if (int32_t(resolve.frame_index) < dump_start ||
+      int32_t(resolve.frame_index) >= dump_start + dump_count) {
+    return;
+  }
+  EnsureDumpOpen(resolve.frame_index);
+  if (!dump_file_) {
+    return;
+  }
+
+  ProbeRecord rec{};
+  std::memcpy(rec.header.kind, "COPY", 4);
+  rec.header.win = 0;
+  rec.header.prim = 0;
+  rec.header.count = 0;
+  rec.header.major = 0;
+  rec.header.vh = 0;
+  rec.header.ph = 0;
+  std::memcpy(rec.ctx_regs, &resolve.regs->values[0x2000], sizeof(rec.ctx_regs));
+  std::memcpy(rec.fetch_regs, &resolve.regs->values[0x4800], sizeof(rec.fetch_regs));
+  std::fwrite(&rec, sizeof(rec), 1, dump_file_);
+  ++dump_records_written_;
+}
+
+void WebGpuBackend::DumpSwap(const SwapSnapshot& swap) {
+  int32_t dump_start = REXCVAR_GET(webgpu_dump_frame);
+  if (dump_start < 0) {
+    return;
+  }
+  int32_t dump_count = std::max(1, REXCVAR_GET(webgpu_dump_count));
+  if (int32_t(swap.frame_index) < dump_start ||
+      int32_t(swap.frame_index) >= dump_start + dump_count) {
+    return;
+  }
+  EnsureDumpOpen(swap.frame_index);
+  if (!dump_file_) {
+    return;
+  }
+
+  // Trailing SWAP record for the end of this frame
+  ProbeRecord rec{};
+  std::memcpy(rec.header.kind, "SWAP", 4);
+  rec.header.win = 0;
+  rec.header.prim = dump_swaps_written_++;
+  std::fwrite(&rec, sizeof(rec), 1, dump_file_);
+  ++dump_records_written_;
+
+  if (int32_t(swap.frame_index) + 1 >= dump_start + dump_count) {
+    std::fflush(dump_file_);
+    std::fclose(dump_file_);
+    dump_file_ = nullptr;
+    REXGPU_INFO("webgpu dump: frame(s) [{}..{}] dumped to {} ({} records)",
+                dump_start, swap.frame_index, REXCVAR_GET(webgpu_dump_file), dump_records_written_);
+  }
+}
+
 namespace {
 
 wgpu::PrimitiveTopology ToTopology(xenos::PrimitiveType type, bool& supported) {
@@ -316,6 +483,7 @@ bool WebGpuBackend::Draw(const DrawSnapshot& draw) {
         ShaderHash(draw.pixel_shader), draw.dirty, regs.values[XE_GPU_REG_RB_SURFACE_INFO],
         regs.values[XE_GPU_REG_RB_COLOR_INFO], regs.values[XE_GPU_REG_RB_DEPTH_INFO]);
   }
+  DumpDraw(draw);
   std::lock_guard lock(provider_.device_mutex());
   if (!shared_memory_) {
     return false;
@@ -699,6 +867,7 @@ bool WebGpuBackend::Resolve(const ResolveSnapshot& resolve) {
         info.copy_dest_info.value, info.copy_dest_base, info.color_original_base,
         info.depth_original_base, info.height_div_8);
   }
+  DumpResolve(resolve);
   std::lock_guard lock(provider_.device_mutex());
   if (!render_target_cache_) {
     return false;
@@ -795,6 +964,7 @@ void WebGpuBackend::Swap(const SwapSnapshot& swap) {
                 swap.frame_index, swap.frontbuffer_ptr, swap.frontbuffer_width,
                 swap.frontbuffer_height, swap.display_width, swap.display_height);
   }
+  DumpSwap(swap);
   ResolvedRegion region;
   {
     std::lock_guard lock(provider_.device_mutex());

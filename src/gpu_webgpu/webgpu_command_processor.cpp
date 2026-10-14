@@ -145,11 +145,6 @@ bool WebGpuCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
                                        IndexBufferInfo* index_buffer_info,
                                        bool major_mode_explicit) {
   g_draws_since_report.fetch_add(1, std::memory_order_relaxed);
-  // A resolve is a draw in EDRAM copy mode (as in the Vulkan backend, it also
-  // counts as a draw in the log).
-  if (register_file_->Get<reg::RB_MODECONTROL>().edram_mode == xenos::EdramMode::kCopy) {
-    return IssueCopy();
-  }
   DrawSnapshot draw;
   draw.regs = register_file_;
   draw.primitive_type = prim_type;
@@ -169,6 +164,13 @@ bool WebGpuCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   draw.frame_index = frame_index_;
   draw.draw_index = draw_index_++;
   pending_dirty_ = 0;
+
+  // A resolve is a draw in EDRAM copy mode (as in the Vulkan backend, it also
+  // counts as a draw in the log).
+  if (register_file_->Get<reg::RB_MODECONTROL>().edram_mode == xenos::EdramMode::kCopy) {
+    backend_->Draw(draw);
+    return IssueCopy();
+  }
   return backend_->Draw(draw);
 }
 

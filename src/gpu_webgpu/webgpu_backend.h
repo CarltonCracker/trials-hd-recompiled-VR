@@ -5,6 +5,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstdio>
 #include <memory>
 
 #include <webgpu/webgpu_cpp.h>
@@ -57,6 +58,14 @@ class WebGpuBackend {
 
  private:
   bool IsTracedFrame(uint32_t frame_index) const;
+  void EnsureDumpOpen(uint32_t frame_index);
+  void DumpDraw(const DrawSnapshot& draw);
+  void DumpResolve(const ResolveSnapshot& resolve);
+  void DumpSwap(const SwapSnapshot& swap);
+
+  FILE* dump_file_ = nullptr;
+  uint32_t dump_swaps_written_ = 0;
+  uint32_t dump_records_written_ = 0;
 
   ui::webgpu::WebGpuProvider& provider_;
   ui::Presenter* presenter_;

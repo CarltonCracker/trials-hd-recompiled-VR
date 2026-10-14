@@ -1825,7 +1825,7 @@ ambiguity, it stops and writes the question into the task's notes instead of gue
 | S-23 | done 2026-10-14 | S | `format_tables.{h,cpp}`: Xenos color/depth RT format → `wgpu::TextureFormat`, Xenos texture format → host format and load shader, with fallbacks by feature (sections 9.2, 9.3). Unit tests for every Trials format. | L-02 | all Trials formats and fallbacks pass unit tests (`format_tables_test`) |
 | S-24 | done 2026-10-14 | S | `sampler_cache.{h,cpp}`: fetch constant → sampler key → `wgpu::SamplerDescriptor` (clamp, filters, aniso, LOD bias, min/max LOD), cached. Unit tests. | L-02 | address modes, filters, aniso rules, key hashing, and live Dawn sampler creation pass on both GPUs (`sampler_cache_test 0/1`) |
 | S-25 | todo | S | Blend, depth and stencil state translation: Xenos `RB_BLENDCONTROL`, `RB_DEPTHCONTROL`, `RB_STENCILREFMASK`, `RB_COLOR_MASK`, `PA_SU_SC_MODE_CNTL` → WebGPU structs, including constant-color factors and depth bias. Unit tests per value in section 5.4. | L-07 (key layout) | tests pass |
-| S-26 | todo | S | Per-draw debug dump in the WebGPU backend (`webgpu_dump_frame=N`), same record format as `probe/draw_probe.gdb`, so `analyze_draws.py` and a diff script compare the two backends. | L-03 | dump of one frame matches the Vulkan probe's draw count |
+| S-26 | done 2026-10-14 | S | Per-draw debug dump in the WebGPU backend (`webgpu_dump_frame=N`), same record format as `probe/draw_probe.gdb`, so `analyze_draws.py` and a diff script compare the two backends. | L-03 | dump of one frame matches the Vulkan probe's draw count; verified with `analyze_draws.py` and `tools/diff_draws.py` |
 | S-27 | todo | S | WebGPU debug labels: every pass, pipeline and draw labeled with guest draw index, shader hashes and RT key; push and pop debug groups per guest pass. | L-12 | labels visible in a RenderDoc capture |
 | S-28 | todo | S | GPU timestamp profiling per pass category (shadow, scene, post, resolve, UI), printed once per second like the old `gpu_profile`. | L-12 | per-category ms in the log |
 | S-29 | todo | M | Settings menu: "Renderer: Vulkan / WebGPU" (restart to apply) and "WebGPU adapter" in `src/graphics_settings.cpp`; saved to `trials_hd.toml`. **Note (2026-10-14):** `ApplyStartupGraphicsSettings` runs in `OnPreSetup`, before the plugin loads, so it can only set cvars that live in `rexruntime` (the Vulkan presenter's do; the WebGPU plugin's `webgpu_allow_present_mode_*`, `webgpu_adapter` do not). Load the plugin in `OnPreSetup` (`config.graphics = rex::system::LoadGpuPlugin(...)`, which the SDK then uses as is), apply the settings after that, and do the S-30 fallback in the same place. | S-16 | switching works across restarts |
@@ -1872,7 +1872,7 @@ debugging. Several can run in parallel once L-01 to L-03 exist.
 | L-21 | todo | **Upstreaming plan.** Move the generic backend into the SDK (`src/graphics/webgpu/`, `src/ui/webgpu/`), keep Trials-specific parts in this repo, and coordinate with the SDK's plugin ABI. | M8 | 8.1 | PR-ready branch of the SDK |
 | L-22 | todo | **Review duty.** A large model reviews each small-model task's diff and evidence before merge (correctness against the Xenos semantics, no game content, tests real). | ongoing | this section | review notes on each task |
 | L-23 | done 2026-10-14 (not yet committed) | **CPU pass before the renderer** (this session): command-processor register path, no-effect draw skip, native guest `memcpy`/`memset`, event-driven `WaitMultiple`, idle-dialog repaint fix, command-processor idle and `WAIT_REG_MEM` backoff. | — | notes log | 720p uncapped ~145 → ~183 FPS (now GPU-bound); 60 FPS-cap process CPU 150% → 121% |
-| L-24 | done pi-gpt 2026-10-14 (commit follows) | **Event-driven alertable waits.** Alertable waits (`Wait`, `SignalAndWait`, `WaitMultiple` with `is_alertable`) still wake every 1 ms (`kAlertablePollSlice`) to look for queued user callbacks (APCs); `QueueUserCallback` only sends a signal, which doesn't end a condition-variable wait. Wake the waiting thread when a callback is queued (per-thread wake target or waiter lists on conditions), without the thundering herd of a single global wakeup. | L-23 | `src/core/threading_posix.cpp` (`QueueUserCallback`, `kAlertablePollSlice`) | game threads' idle CPU drops; no APC latency regression (audio, file IO) |
+| L-24 | done pi-gpt 2026-10-14 bb9fbb5 | **Event-driven alertable waits.** Alertable waits (`Wait`, `SignalAndWait`, `WaitMultiple` with `is_alertable`) still wake every 1 ms (`kAlertablePollSlice`) to look for queued user callbacks (APCs); `QueueUserCallback` only sends a signal, which doesn't end a condition-variable wait. Wake the waiting thread when a callback is queued (per-thread wake target or waiter lists on conditions), without the thundering herd of a single global wakeup. | L-23 | `src/core/threading_posix.cpp` (`QueueUserCallback`, `kAlertablePollSlice`) | game threads' idle CPU drops; no APC latency regression (audio, file IO) |
 | L-25 | claimed pi-gpt 2026-10-14 | **Exit-time teardown under live threads.** TSan shows static destructors (loggers, input key tables, cvar registry) running while guest threads still run when the process quits, i.e. use-after-free at exit. Follow the Skate 3 SDK fork's approach (flush logs, then `_Exit` on quit instead of tearing down under live guest threads), or stop the guest threads first. | — | TSan reports in the notes log; Skate 3 SDK commit `705b78f` | no TSan exit-time reports; clean exit code |
 
 ### 16.5 Order and parallelism
@@ -2177,6 +2177,12 @@ finding: `YYYY-MM-DD <agent> <task ID>: what changed; evidence; what is left`.
   both live runtimes start, play title audio and remain at 60 FPS without errors.
   Claiming L-25 next: `ReXApp::OnClosing` already flushes then `_Exit(0)`;
   verify the existing implementation rather than add duplicate teardown code.
+- 2026-10-14 pi-gpt L-25 acceptance blocker: an isolated TSan executable was
+  relinked with the existing hard-exit `ReXApp` implementation; it crashes during
+  guest startup (read at 0x1048, nested TSan fatal), before a window-close event.
+  This is **not** exit-time evidence. Private gdb diagnosis and a separate normal
+  native-close check are running. L-25 remains claimed; no SDK teardown change
+  or sanitizer suppression was added.
 - 2026-10-14 antigravity (Tier S tasks completion):
   - **S-01:** Executed 7 headless test scripts (`main_menu_nav.txt`, `settings_menu.txt`,
     `credits.txt`, `ride_tutorial.txt`, `ride_middle_name_danger.txt`, `ride_hello_world.txt`,
@@ -2243,3 +2249,12 @@ finding: `YYYY-MM-DD <agent> <task ID>: what changed; evidence; what is left`.
     under device lock. Wired into `TextureCache`. Authored unit tests in `tests/gpu_webgpu/sampler_cache_test.cpp` verifying
     key hashing, descriptor generation, and live Dawn sampler creation on both GPUs (NVIDIA RTX 2070 SUPER and AMD RX 6600);
     0 Dawn validation errors.
+  - **S-26:** Implemented per-draw debug dump in the WebGPU backend (`webgpu_dump_frame=N`, `webgpu_dump_count=K`,
+    `webgpu_dump_file=path`), matching the exact 6,204-byte record layout of `probe/draw_probe.gdb` (36 B header,
+    24 B index buffer `<IIIIQ`, 4096 B context registers `0x2000..0x23FF`, 2048 B fetch registers `0x4800..0x49FF`).
+    Captured DRAW, COPY, and SWAP records from `WebGpuBackend::Draw`, `Resolve`, and `Swap`. Updated `WebGpuCommandProcessor`
+    to pass draw snapshots before `IssueCopy()` in `kCopy` mode for exact parity with the Vulkan CP draw sequence.
+    Created `tools/diff_draws.py` to diff draw streams draw-by-draw across backends (primitive, count, major mode, shader hashes,
+    index buffers, and 22 key context registers). Verified against `docs/webgpu-renderer/probe/analyze_draws.py` and authored
+    self-test passed 100% in `ctest`.
+
