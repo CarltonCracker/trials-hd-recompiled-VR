@@ -195,7 +195,7 @@ log both rates once per second):
 | --- | --- | ---: | ---: |
 | 1280x720 | 60 | 60.0 | 59.95 |
 | 1280x720 | 120 | 120.0 | 60.01 |
-| 1280x720 | Unlimited | 146.4 | 60.00 |
+| 1280x720 | Unlimited | 183.4 (GPU-bound) | 59.98 |
 | 2560x1440 | 120 | 76.5 (GPU-bound) | 60.00 |
 | 2560x1440 | Original loop (`--fps_unlock=false`) | 59.8 | 60 |
 
