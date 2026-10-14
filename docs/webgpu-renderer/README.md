@@ -1814,7 +1814,7 @@ ambiguity, it stops and writes the question into the task's notes instead of gue
 | S-17 | todo | M | Compute-shader test harness for WGSL helpers: run a WGSL function over input arrays on the GPU via Dawn and compare against a C++ reference. | S-13 | sample test passes |
 | S-18 | done 2026-10-14 | S | `wgsl_prelude.wgsl` helpers with tests against the SDK's C++ (`include/rex/graphics/xenos.h`): endian swaps (8in16, 8in32, 16in32), float24 (20e4) ↔ float32, 7e3 ↔ float32, signed and unsigned 10:10:10:2 unpack, 16-bit snorm/float unpack, Xenos `k_16_16` RT ±32 scaling. | S-17 | all helper tests pass (`wgsl_prelude_test 0/1`) |
 | S-19 | todo | S | Port texture-load compute shaders to WGSL, **one task per shader**: `texture_load_32bpb`, `_64bpb`, `_8bpb`, `_128bpb` (BC block copies), `_depth_float`. Source: Xenia's XeSL at the SDK's revision (or `tint` from the SDK's SPIR-V headers, then clean up). Test: same input buffer through the SDK's Vulkan SPIR-V version and the WGSL version, outputs compared byte for byte. | S-17 | identical output on synthetic tiled inputs (never commit game data) |
-| S-20 | todo | S | Port the gamma shaders (`apply_gamma_table`, `apply_gamma_pwl`) to WGSL with tests. | S-17 | matches CPU reference |
+| S-20 | done 2026-10-14 | S | Port the gamma shaders (`apply_gamma_table`, `apply_gamma_pwl`) to WGSL with tests. | S-17 | matches CPU reference (`gamma_test 0/1`) |
 | S-21 | done 2026-10-14 c2c132d ( inside L-02, checked with the F1 menu, not `webgpu_smoke`) | S | WGSL for the ImGui immediate drawer (textured, vertex-colored quads, scissor). | S-13 | renders the ImGui demo window in `webgpu_smoke` |
 | S-22 | todo | S | Index swap compute shader (16-bit and 32-bit, 8in16/8in32), plus quad-list → triangle-list and fan → list conversion in WGSL, with tests against `PrimitiveProcessor`'s CPU code. | S-17 | identical index output |
 
@@ -2290,6 +2290,13 @@ finding: `YYYY-MM-DD <agent> <task ID>: what changed; evidence; what is left`.
     `tests/gpu_webgpu/wgsl_prelude_test.cpp` verifying execution on physical GPUs via Dawn compute pipelines against the SDK's C++
     implementations in `include/rex/graphics/xenos.h` (`Float7e3To32`, `Float20e4To32`, `Float32To20e4`, `__builtin_bswap32`); verified
     exact bit-for-bit matches on both NVIDIA RTX 2070 SUPER and AMD RX 6600 with 0 Dawn validation errors.
+  - **S-20:** Ported gamma application shaders to WGSL compute: `src/gpu_webgpu/shaders/apply_gamma_table.wgsl`
+    (256-entry table gamma with BGR component ordering) and `src/gpu_webgpu/shaders/apply_gamma_pwl.wgsl` (128-segment
+    piecewise-linear gamma interpolation with 1/8 sub-steps and 1/(1023*64) normalization, plus mathematical
+    `xe_linear_to_pwl_gamma` and `xe_pwl_gamma_to_linear`). Validated both shaders to SPIR-V with Tint (`out/dawn-build/tint`).
+    Created GPU unit tests in `tests/gpu_webgpu/gamma_test.cpp` verifying table lookup and PWL evaluation on both
+    physical GPUs (NVIDIA RTX 2070 SUPER and AMD RX 6600) matching CPU references (`xenos::LinearToPWLGamma`); 0 Dawn validation errors.
+
 
 
 
