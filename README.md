@@ -140,7 +140,9 @@ ordinary settings, so they also work on the command line, e.g.
 ### FPS unlock
 
 `--fps_unlock=true --present_fps_limit=0 --host_vsync=false` enables uncapped
-real rendering. VSync can still limit output to the display refresh rate.
+real rendering. With VSync on, rendering is capped at the display's refresh rate
+(or the FPS limit, if lower): the presenter shows only the newest frame at each
+refresh, so rendering faster would show an uneven subset of frames.
 `--fps_unlock=false` restores the original game loop for comparison.
 
 The patch in `src/fps_unlock.cpp` replaces the game's combined frame gate and
@@ -149,19 +151,28 @@ the original **16,666 µs fixed step**, including the original five-step hitch
 limit; the physics timestep is not divided by the render rate. No optical-flow
 frames, framebuffer interpolation, or duplicated presentations are used.
 Above 60 FPS (or uncapped), the shared normal/batched world draw paths interpolate
-rigid models, animated matrix palettes, and camera poses between fixed ticks.
+rigid models, animated matrix palettes, and the camera between fixed ticks.
 Only temporary shader-upload inputs change; authoritative model matrices are not
 modified and camera/renderer inputs are restored after each draw. This adds up to
 one simulation tick of visual latency. Caps of 60 FPS or below keep original poses.
-Scene changes, missed ticks, and translation jumps over two units snap rather than
-blend. Long stalls beyond the five-step catch-up budget can still lose simulation
-time, as in the original game.
+The game draws the track through the same camera with more than one view per
+frame, so each view keeps its own history. Shadow-map cameras stay at their tick
+pose (the game samples shadows through light matrices computed per tick), while
+the models drawn into them are interpolated. Scene changes, missed ticks, and
+translation jumps over two units snap rather than blend. Long stalls beyond the
+five-step catch-up budget can still lose simulation time, as in the original game.
+Particles, effects and 2D UI still move at the 60 Hz tick rate.
 
 Headless checks cover menu navigation, riding, pause/resume, checkpoint and restart
-at 60, 120 and uncapped rates. They check shader inputs, not physical-monitor
-smoothness. Complete UI/effects/other-mode interpolation coverage is not yet
-verified. The reported glass-like 1440p artifact remains under investigation;
-true internal 1080p is not implemented (1080p display output is separate).
+at 60, 120 and uncapped rates, and check that models and the camera get distinct
+poses within a tick (`tests/check_render_pose_log.py`). They check shader inputs,
+not physical-monitor smoothness.
+
+The render resolution is an integer multiple of the game's 1280x720 frame. A
+true internal 1920x1080 option is not implemented: the game can render a smaller
+base frame (960x540 at 2x), but its menus and HUD are laid out in 1280x720 pixels
+and come out cropped and oversized. For a 1080p screen, pick the 1080p display
+resolution with 2560x1440 rendering (supersampled) or 1280x720 (upscaled).
 
 ### Main menu
 
@@ -211,19 +222,20 @@ ctest --test-dir out/build/linux-amd64-relwithdebinfo --no-tests=error --output-
 Frames captured by a script's `capture <name>` lines (taken from the game's own output,
 so they work with the headless surface) land in `out/run/<name>.png`.
 
-Verified on Linux with an RX 6600, headless Vulkan with 1280×720 captured output,
-host VSync off, and an 85-second scripted ride on *Middle Name: Danger*:
+Verified on Linux with an RX 6600, headless Vulkan, host VSync off, and the
+75-second scripted keyboard ride (`tests/headless/keyboard_ride.txt`: menus, riding,
+pause/resume, checkpoint and restart on *Middle Name: Danger*):
 
-| Render limit | Median real GPU swaps/sec | Mean fixed updates/sec |
-| --- | ---: | ---: |
-| 30 | 30.0 | 60.00 |
-| 60 | 60.0 | 60.07 |
-| 120 | 120.0 | 60.05 |
-| Unlimited | 203.9 | 59.95 |
+| Render resolution | Render limit | Real rendered FPS | Fixed updates/sec |
+| --- | --- | ---: | ---: |
+| 1280x720 | 60 | 60.0 | 59.95 |
+| 1280x720 | 120 | 120.0 | 60.01 |
+| 1280x720 | Unlimited | 146.4 | 60.00 |
+| 2560x1440 | 120 | 76.5 (GPU-bound) | 60.00 |
+| 2560x1440 | Original loop (`--fps_unlock=false`) | 59.8 | 60 |
 
-At the 2560×1440 render resolution (2×) the same RX 6600 run renders about 87 FPS
-uncapped (GPU-bound, 78 FPS median including menus and loading), with fixed updates
-still at 60 Hz; the 120 FPS limit needs the 1× render resolution on this GPU.
+Above 60 FPS every run has distinct model and camera poses within a fixed tick.
+The 120 FPS limit needs the 1x render resolution on this GPU.
 
 These are the last 15 logged samples, with positive game draws and resolves in
 every sample. Gameplay captures show normal race-timer progression, riding,

@@ -12,6 +12,7 @@
 #include <rex/ppc/func.h>
 
 #include "frame_clock.h"
+#include "graphics_settings.h"
 #include "render_pose.h"
 
 REXCVAR_DEFINE_BOOL(fps_unlock, true, "Display",
@@ -54,7 +55,7 @@ thread_local uint32_t g_draw_renderer = 0;
 thread_local uint32_t g_draw_frame = 0, g_pose_log_frames = 0, g_pose_log_second = 0;
 thread_local std::array<uint32_t, 4> g_pose_scene{};
 thread_local std::unordered_map<uint64_t, trials_hd::PoseHistory> g_model_poses;
-thread_local std::unordered_map<uint64_t, trials_hd::PoseHistory> g_camera_poses;
+thread_local std::unordered_map<uint64_t, trials_hd::PoseTracks> g_camera_poses;
 thread_local bool g_logged_rigid = false, g_logged_skin = false;
 
 uint32_t Word(uint8_t* base, uint32_t address) {
@@ -99,7 +100,11 @@ void DrawInterpolated(PPCContext& ctx, uint8_t* base, void (*draw)(PPCContext&, 
   const auto raw_view = Matrix(base, renderer + 144);
   const auto camera_key = trials_hd::CameraPoseKey(camera_id, Word(base, renderer + 624), raw_view, projection);
   const auto camera = trials_hd::InverseView(raw_view);
-  const auto camera_pose = g_camera_poses[camera_key].Sample(tick, camera, alpha);
+  // Orthographic passes (shadow maps) keep their tick camera: the game samples them through
+  // light matrices computed at tick time. Their models are still interpolated below.
+  const auto camera_pose = projection[11] != 0
+                               ? g_camera_poses[camera_key].Sample(tick, camera, alpha)
+                               : camera;
   trials_hd::ScopedRenderUpload upload(base, renderer, camera_id, ctx.r1.u32);
   for (uint32_t i = 0; i < 3; ++i) StoreFloat(base, camera_id + 48 + i * 4, camera_pose[12 + i]);
   const auto view = trials_hd::InverseView(camera_pose);
@@ -305,19 +310,26 @@ extern "C" REX_FUNC(sub_82664F98) {
   auto previous = std::chrono::steady_clock::now();
   auto report_time = previous;
   auto next_render = previous;
-  int last_limit = 0;
+  double last_rate = 0;
   uint32_t ticks = 0, renders = 0;
   uint32_t last_state_table = 0;
   bool initialized = false;
   REXLOG_INFO("FPS unlock: real rendering, original 16,666 us fixed updates");
   while (Running(base)) {
     // The SDK's cap skips presentation, not rendering. Pace the real work here.
-    const int limit = std::stoi(rex::cvar::GetFlagByName("present_fps_limit"));
-    if (limit != last_limit) {
-      next_render = std::chrono::steady_clock::now();
-      last_limit = limit;
+    // With VSync, the presenter shows only the newest frame at each refresh, so
+    // rendering faster than the display would show an uneven subset of the
+    // interpolated frames: cap at the refresh rate too.
+    double rate = std::max(std::atoi(rex::cvar::GetFlagByName("present_fps_limit").c_str()), 0);
+    if (const double refresh = trials_hd::VsyncRefreshRate(); refresh > 0 && (rate == 0 || rate > refresh)) {
+      rate = refresh;
     }
-    if (limit > 0 && initialized) {
+    if (rate != last_rate) {
+      next_render = std::chrono::steady_clock::now();
+      last_rate = rate;
+      REXLOG_INFO("FPS unlock: rendering {}", rate > 0 ? fmt::format("at up to {:.2f} FPS", rate) : "uncapped");
+    }
+    if (rate > 0 && initialized) {
       std::this_thread::sleep_until(std::min(next_render, previous + clock.UntilNextStep()));
     }
     const auto now = std::chrono::steady_clock::now();
@@ -343,12 +355,13 @@ extern "C" REX_FUNC(sub_82664F98) {
       initialized = true;
     }
     if (!Running(base)) break;
-    if (initialized && (limit <= 0 || now >= next_render)) {
-      g_render_alpha.store(limit <= 0 || limit > 60 ? clock.InterpolationFraction() : 1.f);
+    if (initialized && (rate == 0 || now >= next_render)) {
+      // At or below the 60 Hz tick rate, every frame shows a whole tick as the original did.
+      g_render_alpha.store(rate == 0 || rate > 61 ? clock.InterpolationFraction() : 1.f);
       Dispatch(ctx, base, true);
       ++renders;
-      if (limit > 0) {
-        const auto period = std::chrono::nanoseconds(1'000'000'000 / limit);
+      if (rate > 0) {
+        const auto period = std::chrono::nanoseconds(int64_t(1e9 / rate));
         next_render = now - next_render > period ? now + period : next_render + period;
       }
     }

@@ -105,13 +105,16 @@ inline RenderMatrix InterpolatePose(const RenderMatrix& a, const RenderMatrix& b
   return out;
 }
 
+// Larger changes between ticks are teleports (respawns, cuts) and snap.
+constexpr float kPoseSnapDistance = 2.f;
+
 class PoseHistory {
  public:
   RenderMatrix Sample(uint32_t tick, const RenderMatrix& pose, float alpha) {
     // shortcut: >2-unit jumps snap as teleports; use explicit reset signals to blend faster debris.
     if (!valid_ || (tick != tick_ && tick != tick_ + 1) ||
         std::hypot(pose[12] - current_[12], pose[13] - current_[13],
-                   pose[14] - current_[14]) > 2.f) {
+                   pose[14] - current_[14]) > kPoseSnapDistance) {
       previous_ = pose;
     } else if (tick != tick_) {
       previous_ = current_;
@@ -122,10 +125,54 @@ class PoseHistory {
     return InterpolatePose(previous_, current_, alpha);
   }
   uint32_t tick() const { return tick_; }
+  bool valid() const { return valid_; }
+  // How far a pose is from the latest sample: translation plus rotation/scale change.
+  float Distance(const RenderMatrix& pose) const {
+    float basis = 0;
+    for (int r = 0; r < 3; ++r)
+      for (int c = 0; c < 3; ++c) basis += std::abs(pose[r * 4 + c] - current_[r * 4 + c]);
+    return std::hypot(pose[12] - current_[12], pose[13] - current_[13], pose[14] - current_[14]) +
+           basis;
+  }
  private:
   RenderMatrix previous_{}, current_{};
   uint32_t tick_ = 0;
   bool valid_ = false;
+};
+
+// One camera object can render several views in a frame (Trials HD draws the
+// track with two different positions and fields of view through the same
+// camera and pass). Keep a history per view, matched to the nearest latest pose,
+// so the views don't keep resetting each other's history as teleports.
+class PoseTracks {
+ public:
+  RenderMatrix Sample(uint32_t tick, const RenderMatrix& pose, float alpha) {
+    PoseHistory* best = nullptr;
+    float best_distance = kPoseSnapDistance;
+    for (auto& track : tracks_) {
+      if (!track.valid() || uint32_t(tick - track.tick()) > 1) continue;
+      const float distance = track.Distance(pose);
+      if (distance < best_distance) {
+        best = &track;
+        best_distance = distance;
+      }
+    }
+    if (!best) {
+      // A new view: reuse a free or the least recently sampled track.
+      best = &tracks_[0];
+      for (auto& track : tracks_) {
+        if (!track.valid()) {
+          best = &track;
+          break;
+        }
+        if (uint32_t(tick - track.tick()) > uint32_t(tick - best->tick())) best = &track;
+      }
+      *best = {};
+    }
+    return best->Sample(tick, pose, alpha);
+  }
+ private:
+  std::array<PoseHistory, 4> tracks_{};
 };
 
 // Restore graphics-camera/renderer inputs; model matrices only live in guest-stack scratch.

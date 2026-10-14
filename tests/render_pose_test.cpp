@@ -87,6 +87,23 @@ int main() {
   cameras[mirror_key].Sample(11,Pose(-29),.5f);
   Check(Near(cameras[main_key].Sample(11,Pose(1),.75f)[12],.75f)); // Other passes cannot reset the game camera.
 
+  // Two views drawn through the same camera and pass each frame keep separate histories
+  // (one shared history snapped every sample, so the camera never interpolated).
+  PoseTracks views;
+  for (uint32_t tick = 20; tick < 23; ++tick) {
+    for (float alpha : {.25f, .75f}) {
+      const float near_view = float(tick) * .03f, far_view = 7 + float(tick) * .01f;
+      const auto first = views.Sample(tick, Pose(near_view), alpha);
+      const auto second = views.Sample(tick, Pose(far_view, .5f), alpha);
+      if (tick > 20) {
+        Check(Near(first[12], near_view - .03f * (1 - alpha)));
+        Check(Near(second[12], far_view - .01f * (1 - alpha)));
+      }
+    }
+  }
+  Check(views.Sample(23, Pose(40), .5f) == Pose(40)); // A new view or a cut snaps.
+  Check(Near(views.Sample(23, Pose(.69f), .5f)[12], .675f)); // Existing views still blend.
+
   // At 120/144/240 Hz, shader poses are distinct even though simulation stays at 60 Hz.
   for (int fps : {120,144,240}) {
     FrameClock clock;

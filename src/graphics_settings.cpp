@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <set>
 #include <string>
 #include <utility>
@@ -46,6 +47,8 @@ constexpr std::array<int, 8> kFpsLimits = {0, 240, 165, 144, 120, 90, 60, 30};
 std::string g_startup_render_scale;
 bool g_startup_vsync = true;
 bool g_startup_fps_unlock = true;
+// Refresh rate of the display mode the window is presented in (UI thread writes).
+std::atomic<float> g_refresh_rate{0.0f};
 
 int GetInt(std::string_view name) {
   try {
@@ -167,18 +170,26 @@ void ApplyDisplayMode() {
   }
   const int w = REXCVAR_GET(display_width);
   const int h = REXCVAR_GET(display_height);
+  const SDL_DisplayID display = SDL_GetDisplayForWindow(window);
+  const SDL_DisplayMode* desktop = SDL_GetDesktopDisplayMode(display);
+  float refresh_rate = desktop ? desktop->refresh_rate : 0.0f;
   if (GetBool("fullscreen")) {
     SDL_DisplayMode mode;
     if (w > 0 && h > 0 &&
-        SDL_GetClosestFullscreenDisplayMode(SDL_GetDisplayForWindow(window), w, h, 0.0f, true,
-                                            &mode)) {
+        SDL_GetClosestFullscreenDisplayMode(display, w, h, 0.0f, true, &mode)) {
       SDL_SetWindowFullscreenMode(window, &mode);  // Exclusive at the chosen size.
+      refresh_rate = mode.refresh_rate;
     } else {
       SDL_SetWindowFullscreenMode(window, nullptr);  // Borderless at desktop size.
     }
   } else if (w > 0 && h > 0) {
     SDL_SetWindowSize(window, w, h);
   }
+  g_refresh_rate.store(refresh_rate);
+}
+
+float VsyncRefreshRate() {
+  return g_startup_vsync ? g_refresh_rate.load() : 0.0f;
 }
 
 GraphicsSettingsDialog::GraphicsSettingsDialog(rex::ui::ImGuiDrawer* drawer,
