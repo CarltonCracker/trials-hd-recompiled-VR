@@ -70,6 +70,25 @@ seconds) and asks you to build again: CMake can only add the generated sources o
 they exist. The second build re-runs CMake by itself and compiles ~110 MB of generated
 C++, which takes a while and several GB of RAM. Later builds need a single command.
 
+### WebGPU renderer plugin (optional)
+
+To build the native WebGPU renderer plugin (`librexgpu-webgpu.so` via Dawn):
+
+```sh
+# 1. Build and install pinned Dawn
+tools/build_dawn.sh
+
+# 2. Configure with TRIALSHD_WEBGPU enabled
+cmake --preset linux-amd64-relwithdebinfo -DTRIALSHD_WEBGPU=ON -DCMAKE_PREFIX_PATH=$PWD/out/dawn-install
+cmake --build out/build/linux-amd64-relwithdebinfo -j$(nproc)
+```
+
+Select the WebGPU renderer at launch with:
+```sh
+./out/build/linux-amd64-relwithdebinfo/trials_hd --gpu_plugin=webgpu
+```
+If WebGPU device initialization fails, `trials_hd` automatically falls back to `xenos` (Vulkan).
+
 ## 3. Run
 
 `tools/package.sh` assembles a self-contained folder (`dist/trials_hd-linux-x86_64`)

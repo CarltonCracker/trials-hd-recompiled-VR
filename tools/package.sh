@@ -24,6 +24,9 @@ rm -rf "$out"
 mkdir -p "$out/tools"
 cp "$build/trials_hd" "$out/"
 cp "$build"/*.so "$out/"
+if ls "$build/src/gpu_webgpu"/librexgpu-webgpu*.so >/dev/null 2>&1; then
+  cp -u "$build/src/gpu_webgpu"/librexgpu-webgpu*.so "$out/"
+fi
 cp "$root/tools/stfs_extract.py" "$out/tools/"
 cat > "$out/README.txt" <<'EOF'
 Trials HD Recompiled - Linux x86-64
@@ -35,6 +38,7 @@ This folder contains no game data. You need your own copy of Trials HD (XBLA).
    You should get assets/default.xex and assets/data/*.pak.
 
 2. Run ./trials_hd   (a Vulkan-capable GPU and an Xbox-style controller are needed)
+   To select the WebGPU renderer: ./trials_hd --gpu_plugin=webgpu
 
 Graphics settings: press the controller's Guide button (or Back + Start, or F1).
 Settings are saved to trials_hd.toml next to the executable.
