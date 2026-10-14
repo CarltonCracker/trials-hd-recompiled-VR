@@ -1816,7 +1816,7 @@ ambiguity, it stops and writes the question into the task's notes instead of gue
 | S-19 | todo | S | Port texture-load compute shaders to WGSL, **one task per shader**: `texture_load_32bpb`, `_64bpb`, `_8bpb`, `_128bpb` (BC block copies), `_depth_float`. Source: Xenia's XeSL at the SDK's revision (or `tint` from the SDK's SPIR-V headers, then clean up). Test: same input buffer through the SDK's Vulkan SPIR-V version and the WGSL version, outputs compared byte for byte. | S-17 | identical output on synthetic tiled inputs (never commit game data) |
 | S-20 | done 2026-10-14 | S | Port the gamma shaders (`apply_gamma_table`, `apply_gamma_pwl`) to WGSL with tests. | S-17 | matches CPU reference (`gamma_test 0/1`) |
 | S-21 | done 2026-10-14 c2c132d ( inside L-02, checked with the F1 menu, not `webgpu_smoke`) | S | WGSL for the ImGui immediate drawer (textured, vertex-colored quads, scissor). | S-13 | renders the ImGui demo window in `webgpu_smoke` |
-| S-22 | todo | S | Index swap compute shader (16-bit and 32-bit, 8in16/8in32), plus quad-list → triangle-list and fan → list conversion in WGSL, with tests against `PrimitiveProcessor`'s CPU code. | S-17 | identical index output |
+| S-22 | done 2026-10-14 | S | Index swap compute shader (16-bit and 32-bit, 8in16/8in32), plus quad-list → triangle-list and fan → list conversion in WGSL, with tests against `PrimitiveProcessor`'s CPU code. | S-17 | identical index output (`index_swap_test 0/1`) |
 
 #### Mechanical renderer pieces (after the large-model skeleton exists)
 
@@ -2296,6 +2296,13 @@ finding: `YYYY-MM-DD <agent> <task ID>: what changed; evidence; what is left`.
     `xe_linear_to_pwl_gamma` and `xe_pwl_gamma_to_linear`). Validated both shaders to SPIR-V with Tint (`out/dawn-build/tint`).
     Created GPU unit tests in `tests/gpu_webgpu/gamma_test.cpp` verifying table lookup and PWL evaluation on both
     physical GPUs (NVIDIA RTX 2070 SUPER and AMD RX 6600) matching CPU references (`xenos::LinearToPWLGamma`); 0 Dawn validation errors.
+  - **S-22:** Implemented index buffer endian swaps and primitive topology conversion compute shaders in `src/gpu_webgpu/shaders/index_swap.wgsl`:
+    supports 16-bit and 32-bit index buffers, endian swaps (8in16, 8in32, 16in32), base index addition, auto-indexing,
+    and topology conversions matching `PrimitiveProcessor` algorithms (`quads_to_triangles_16`, `quads_to_triangles_32`,
+    `fan_to_triangles_16`, `fan_to_triangles_32`). For 16-bit conversions, outputs are packed into `u32` pairs to avoid atomics.
+    All 6 entry points validated to SPIR-V with Tint. Authored unit tests in `tests/gpu_webgpu/index_swap_test.cpp` verifying
+    all compute pipelines on physical GPUs (NVIDIA RTX 2070 SUPER and AMD RX 6600) matching CPU references byte-for-byte;
+    0 Dawn validation errors.
 
 
 

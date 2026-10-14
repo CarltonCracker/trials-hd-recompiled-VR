@@ -133,7 +133,36 @@ target_compile_options(gamma_test PRIVATE -fno-strict-aliasing -ffp-model=strict
 target_link_libraries(gamma_test PRIVATE
     ${_runtime} ${_spdlog} ${_fmt} dawn::webgpu_dawn Threads::Threads)
 
+add_executable(index_swap_test
+    index_swap_test.cpp)
+target_include_directories(index_swap_test PRIVATE
+    ${_repo}/src/gpu_webgpu
+    ${REXSDK_DIR}/include ${REXSDK_BUILD_DIR}/include
+    ${REXSDK_DIR}/thirdparty/renderdoc
+    ${REXSDK_DIR}/thirdparty/simde
+    ${REXSDK_DIR}/thirdparty/fmt/include ${REXSDK_DIR}/thirdparty/spdlog/include)
+target_compile_definitions(index_swap_test PRIVATE
+    SPDLOG_COMPILED_LIB SPDLOG_FMT_EXTERNAL
+    INDEX_SWAP_WGSL_PATH="${_repo}/src/gpu_webgpu/shaders/index_swap.wgsl")
+target_compile_options(index_swap_test PRIVATE -fno-strict-aliasing -ffp-model=strict -fno-char8_t)
+target_link_libraries(index_swap_test PRIVATE
+    ${_runtime} ${_spdlog} ${_fmt} dawn::webgpu_dawn Threads::Threads)
+
+if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/vertex_fetch_test.cpp")
+  # Reuse the interpreter/translator compilation and flags, without the ALU test main.
+  get_target_property(_fetch_sources alu_test SOURCES)
+  list(REMOVE_ITEM _fetch_sources alu_test.cpp)
+  add_executable(vertex_fetch_test vertex_fetch_test.cpp ${_fetch_sources})
+  foreach(_property INCLUDE_DIRECTORIES COMPILE_DEFINITIONS COMPILE_OPTIONS LINK_LIBRARIES)
+    get_target_property(_value alu_test ${_property})
+    set_property(TARGET vertex_fetch_test PROPERTY ${_property} ${_value})
+  endforeach()
+endif()
+
 enable_testing()
+if (TARGET vertex_fetch_test)
+  add_test(NAME vertex_fetch COMMAND vertex_fetch_test)
+endif()
 add_test(NAME shared_memory COMMAND shared_memory_test)
 add_test(NAME alu COMMAND alu_test)
 add_test(NAME format_tables COMMAND format_tables_test)
@@ -142,5 +171,6 @@ add_test(NAME diff_draws COMMAND python3 ${_repo}/tools/diff_draws.py --self-tes
 add_test(NAME pipeline_state COMMAND pipeline_state_test)
 add_test(NAME wgsl_prelude COMMAND wgsl_prelude_test)
 add_test(NAME gamma COMMAND gamma_test)
+add_test(NAME index_swap COMMAND index_swap_test)
 
 
