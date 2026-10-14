@@ -88,6 +88,11 @@ class WgslShaderTranslator : public ShaderTranslator {
   uint64_t GetDefaultPixelShaderModification(
       uint32_t dynamic_addressable_register_count) const override;
 
+  // Debugging (M3 silhouettes): texture fetches return 1 instead of 0 until
+  // texture fetch is translated. Part of the translation, so set it before
+  // translating anything.
+  void set_untextured_fetch_value(float value) { untextured_fetch_value_ = value; }
+
   // Size of the float constant array the module declares (packed or 256).
   static uint32_t GetFloatConstantArraySize(const Shader& shader);
 
@@ -149,6 +154,7 @@ class WgslShaderTranslator : public ShaderTranslator {
   void EmitPixelShaderEntryPoint(std::string& out) const;
   void EmitDeclarations(std::string& out) const;
 
+  float untextured_fetch_value_ = 0.0f;
   std::string body_;
   uint32_t indent_ = 0;
   bool exec_condition_open_ = false;

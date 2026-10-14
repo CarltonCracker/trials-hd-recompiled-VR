@@ -41,6 +41,7 @@ set(REXGPU_WEBGPU_WGSL
     shaders/guest_output.wgsl
     shaders/immediate.wgsl
     wgsl/wgsl_prelude.wgsl
+    shaders/blit.wgsl
 )
 set(_wgsl_headers)
 foreach(_wgsl IN LISTS REXGPU_WEBGPU_WGSL)
@@ -68,12 +69,20 @@ add_library(rexgpu-webgpu SHARED
     ${REXGPU_WEBGPU_TRANSLATOR_SOURCES}
     ${_wgsl_headers}
     plugin_main.cpp
+    guest_memory_mirror.cpp
     webgpu_backend.cpp
     webgpu_command_processor.cpp
     webgpu_graphics_system.cpp
     webgpu_immediate_drawer.cpp
     webgpu_presenter.cpp
     webgpu_provider.cpp
+)
+# Draw path (L-07, L-08, L-11, L-12).
+target_sources(rexgpu-webgpu PRIVATE
+    frame_recorder.cpp
+    pipeline_cache.cpp
+    primitive_converter.cpp
+    render_target_cache.cpp
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     find_package(X11 REQUIRED)

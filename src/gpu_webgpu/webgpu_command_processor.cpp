@@ -13,6 +13,7 @@
 #include <rex/kernel/xboxkrnl/video.h>
 #include <rex/logging.h>
 
+#include "pipeline_cache.h"
 #include "webgpu_backend.h"
 #include "webgpu_provider.h"
 
@@ -110,6 +111,10 @@ bool WebGpuCommandProcessor::SetupContext() {
     return false;
   }
   backend_ = std::make_unique<WebGpuBackend>(*provider_, graphics_system_->presenter());
+  if (!backend_->Initialize(*memory_, *register_file_)) {
+    REXGPU_ERROR("WebGPU: failed to initialize the backend");
+    return false;
+  }
   return true;
 }
 
@@ -133,9 +138,7 @@ void WebGpuCommandProcessor::WriteRegistersFromMem(uint32_t start_index, uint32_
 Shader* WebGpuCommandProcessor::LoadShader(xenos::ShaderType shader_type, uint32_t guest_address,
                                            const uint32_t* host_address, uint32_t dword_count) {
   pending_dirty_ |= kDirtyShaders;
-  // The shader cache and WGSL translator are tasks L-04a and L-07. The base
-  // class only stores the returned pointer for IssueDraw.
-  return nullptr;
+  return backend_->pipeline_cache().LoadShader(shader_type, host_address, dword_count);
 }
 
 bool WebGpuCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t index_count,
@@ -198,9 +201,15 @@ void WebGpuCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
     if (elapsed >= std::chrono::seconds(1)) {
       const uint32_t draws = g_draws_since_report.exchange(0);
       const uint32_t copies = g_copies_since_report.exchange(0);
-      REXGPU_INFO("guest fps: {:.1f} draws/frame: {:.1f} resolves/frame: {:.1f}",
-                  swaps / std::chrono::duration<double>(elapsed).count(), double(draws) / swaps,
-                  double(copies) / swaps);
+      static uint64_t last_submissions = 0;
+      uint64_t submissions = backend_->submission_count();
+      REXGPU_INFO(
+          "guest fps: {:.1f} draws/frame: {:.1f} resolves/frame: {:.1f} skipped draws/frame: "
+          "{:.1f} submissions/frame: {:.1f}",
+          swaps / std::chrono::duration<double>(elapsed).count(), double(draws) / swaps,
+          double(copies) / swaps, double(backend_->TakeSkippedDrawCount()) / swaps,
+          double(submissions - last_submissions) / swaps);
+      last_submissions = submissions;
       swaps = 0;
       window_start = clock::now();
     }

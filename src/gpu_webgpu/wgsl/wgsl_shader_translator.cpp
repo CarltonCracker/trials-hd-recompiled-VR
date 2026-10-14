@@ -219,8 +219,10 @@ void WgslShaderTranslator::EmitVertexShaderEntryPoint(std::string& out) const {
     if (!is_32bit) {
       loaded = extractBits(loaded, (address & 2u) << 3u, 16u);
     }
-    index = xe_endian_swap(loaded, xe_system.vertex_index_endian);
+    index = loaded;
   }
+  // Guest index buffers bound directly are read in host byte order.
+  index = xe_endian_swap(index, xe_system.vertex_index_endian);
   index = clamp(u32(i32(index) + xe_system.vertex_base_index) & 0xFFFFFFu,
                 xe_system.vertex_index_min, xe_system.vertex_index_max);
 )";

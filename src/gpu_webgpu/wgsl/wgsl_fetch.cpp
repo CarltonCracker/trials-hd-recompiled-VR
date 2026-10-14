@@ -197,7 +197,7 @@ void WgslShaderTranslator::ProcessTextureFetchInstruction(
   // Texture fetch and the related ops (getTextureWeights, setTexLOD, ...) are
   // task L-04d. Until then the result is zero, like the SDK interpreter.
   BeginPredicate(instr.is_predicated, instr.predicate_condition);
-  StoreResult(instr.result, "vec4f(0.0)");
+  StoreResult(instr.result, fmt::format("vec4f({:.1f})", untextured_fetch_value_));
   EndPredicate();
 }
 

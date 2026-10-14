@@ -22,6 +22,10 @@
 
 REXCVAR_DEFINE_BOOL(webgpu_allow_present_mode_immediate, true, "UI/WebGPU",
                     "Allow the immediate present mode (no vsync, may tear)");
+REXCVAR_DEFINE_BOOL(webgpu_headless, false, "UI/WebGPU",
+                    "Do not present to the window (headless tests and benchmarks; guest output "
+                    "captures still work), like vulkan_headless_surface")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(webgpu_allow_present_mode_mailbox, true, "UI/WebGPU",
                     "Allow the mailbox present mode (no vsync, no tearing)");
 
@@ -118,7 +122,7 @@ wgpu::RenderPipeline WebGpuPresenter::GetGuestOutputPipeline(wgpu::TextureFormat
 }
 
 Surface::TypeFlags WebGpuPresenter::GetSupportedSurfaceTypes() const {
-  if (!provider_.with_presentation()) {
+  if (!provider_.with_presentation() || REXCVAR_GET(webgpu_headless)) {
     return 0;
   }
 #if defined(__APPLE__)
