@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cmath>
 #include <thread>
+#include <unordered_map>
 
 #include <rex/cvar.h>
 #include <rex/logging.h>
@@ -11,6 +12,7 @@
 #include <rex/ppc/func.h>
 
 #include "frame_clock.h"
+#include "render_pose.h"
 
 REXCVAR_DEFINE_BOOL(fps_unlock, true, "Display",
                     "Render independently of the original fixed physics tick")
@@ -27,6 +29,8 @@ REX_EXTERN(sub_822F65A8);
 REX_EXTERN(__imp__sub_825EBF48);
 REX_EXTERN(__imp__sub_825E9220);
 REX_EXTERN(__imp__sub_825E7FC0);
+REX_EXTERN(__imp__sub_8210CAA8);
+REX_EXTERN(__imp__sub_8210CBE8);
 
 namespace {
 constexpr uint32_t kApplication = 0x827683A0;
@@ -44,8 +48,84 @@ void StoreFloat(uint8_t* base, uint32_t address, float value) {
 }
 
 std::atomic_bool g_unlocked_loop{false};
-
 bool Unlocked() { return g_unlocked_loop.load(); }
+std::atomic<float> g_render_alpha{1.f};
+thread_local uint32_t g_draw_renderer = 0;
+thread_local uint32_t g_draw_frame = 0, g_pose_log_frames = 0, g_pose_log_second = 0;
+thread_local std::array<uint32_t, 4> g_pose_scene{};
+thread_local std::unordered_map<uint64_t, trials_hd::PoseHistory> g_model_poses;
+thread_local std::unordered_map<uint64_t, trials_hd::PoseHistory> g_camera_poses;
+thread_local bool g_logged_rigid = false, g_logged_skin = false;
+
+uint32_t Word(uint8_t* base, uint32_t address) {
+  return rex::memory::load_and_swap<uint32_t>(base + address);
+}
+trials_hd::RenderMatrix Matrix(uint8_t* base, uint32_t address) {
+  trials_hd::RenderMatrix matrix;
+  for (uint32_t i = 0; i < 16; ++i) matrix[i] = Float(base, address + i * 4);
+  return matrix;
+}
+void StoreMatrix(uint8_t* base, uint32_t address, const trials_hd::RenderMatrix& matrix) {
+  for (uint32_t i = 0; i < 16; ++i) StoreFloat(base, address + i * 4, matrix[i]);
+}
+
+void DrawInterpolated(PPCContext& ctx, uint8_t* base, void (*draw)(PPCContext&, uint8_t*)) {
+  const auto renderer = ctx.r3.u32, node = ctx.r4.u32;
+  const float alpha = g_render_alpha.load();
+  if (!Unlocked() || renderer != g_draw_renderer || alpha >= 1) {
+    draw(ctx, base);
+    return;
+  }
+  const auto count = Word(base, renderer + 1064);
+  if (count == 0 || count > 30) {
+    draw(ctx, base);
+    return;
+  }
+  std::array<uint32_t, 30> pointers{};
+  for (uint32_t i = 0; i < count; ++i) {
+    pointers[i] = Word(base, renderer + 944 + i * 4);
+    if (!pointers[i]) {
+      draw(ctx, base);
+      return;
+    }
+  }
+  const auto tick = Word(base, kTickCount);
+  const auto projection = Matrix(base, renderer + 272);
+  const auto camera_id = Word(base, renderer + 28);
+  if (!camera_id) {
+    draw(ctx, base);
+    return;
+  }
+  const auto raw_view = Matrix(base, renderer + 144);
+  const auto camera_key = trials_hd::CameraPoseKey(camera_id, Word(base, renderer + 624), raw_view, projection);
+  const auto camera = trials_hd::InverseView(raw_view);
+  const auto camera_pose = g_camera_poses[camera_key].Sample(tick, camera, alpha);
+  trials_hd::ScopedRenderUpload upload(base, renderer, camera_id, ctx.r1.u32);
+  for (uint32_t i = 0; i < 3; ++i) StoreFloat(base, camera_id + 48 + i * 4, camera_pose[12 + i]);
+  const auto view = trials_hd::InverseView(camera_pose);
+  StoreMatrix(base, renderer + 144, view);
+  StoreMatrix(base, renderer + 208, trials_hd::Multiply(view, projection));
+  StoreMatrix(base, renderer + 336, camera_pose);
+  StoreMatrix(base, renderer + 400, trials_hd::Multiply(Matrix(base, renderer + 464), camera_pose));
+  for (uint32_t i = 0; i < count; ++i) {
+    const auto current = Matrix(base, pointers[i]);
+    const auto key = (uint64_t(node) << 32) | pointers[i];
+    const auto pose = g_model_poses[key].Sample(tick, current, alpha);
+    const auto scratch = upload.scratch() + i * 64;
+    StoreMatrix(base, scratch, pose);
+    rex::memory::store_and_swap<uint32_t>(base + renderer + 944 + i * 4, scratch);
+    auto& logged = count > 1 ? g_logged_skin : g_logged_rigid;
+    if (REXCVAR_GET(log_simulation_rate) && g_pose_log_frames <= 4 && projection[11] != 0 && !logged && pose != current) {
+      uint32_t component = 0;
+      for (uint32_t j = 1; j < 16; ++j)
+        if (std::abs(pose[j] - current[j]) > std::abs(pose[component] - current[component])) component = j;
+      REXLOG_INFO("render pose: frame={} tick={} alpha={:.6f} node={:08X} matrices={} component={} raw={:.7f} rendered={:.7f} camera={:08X} camera_view={:016X} camera_raw_x={:.7f} camera_rendered_x={:.7f}",
+                  g_draw_frame, tick, alpha, node, count, component, current[component], pose[component], camera_id, camera_key, camera[12], camera_pose[12]);
+      logged = true;
+    }
+  }
+  draw(ctx, base);
+}
 
 uint32_t Game(uint8_t* base) {
   return rex::memory::load_and_swap<uint32_t>(base + kApplication);
@@ -152,10 +232,38 @@ extern "C" REX_FUNC(sub_825EBF48) {
     __imp__sub_825EBF48(ctx, base);
     return;
   }
-  const auto filtered = ctx.r3.u32 + 248760;
+  const auto world = ctx.r3.u32;
+  const std::array<uint32_t, 4> scene = {world, Word(base, world + 12),
+                                      Word(base, world + 115072), Word(base, world + 115564)};
+  if (scene != g_pose_scene || g_render_alpha.load() >= 1) {
+    g_model_poses.clear();
+    g_camera_poses.clear();
+    g_pose_scene = scene;
+    g_pose_log_frames = 0;
+  }
+  const auto tick = Word(base, kTickCount);
+  std::erase_if(g_model_poses, [tick](const auto& entry) { return uint32_t(tick - entry.second.tick()) > 2; });
+  g_draw_frame = Word(base, kRenderCount);
+  if (tick / 60 != g_pose_log_second) {
+    g_pose_log_second = tick / 60;
+    g_pose_log_frames = 0;
+  }
+  ++g_pose_log_frames;
+  g_logged_rigid = g_logged_skin = false;
+  g_draw_renderer = Word(base, world + 232);
+  const auto filtered = world + 248760;
   const float value = Float(base, filtered);
   __imp__sub_825EBF48(ctx, base);
+  g_draw_renderer = 0;
   StoreFloat(base, filtered, value);
+}
+
+// The normal and batched mesh paths upload all rigid/skinned matrices through 8210D468.
+extern "C" REX_FUNC(sub_8210CAA8) {
+  DrawInterpolated(ctx, base, __imp__sub_8210CAA8);
+}
+extern "C" REX_FUNC(sub_8210CBE8) {
+  DrawInterpolated(ctx, base, __imp__sub_8210CBE8);
 }
 
 extern "C" REX_FUNC(sub_825E9220) {
@@ -236,6 +344,7 @@ extern "C" REX_FUNC(sub_82664F98) {
     }
     if (!Running(base)) break;
     if (initialized && (limit <= 0 || now >= next_render)) {
+      g_render_alpha.store(limit <= 0 || limit > 60 ? clock.InterpolationFraction() : 1.f);
       Dispatch(ctx, base, true);
       ++renders;
       if (limit > 0) {

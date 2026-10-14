@@ -112,10 +112,15 @@ if(TRIALSHD_BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests")
     add_executable(frame_clock_test tests/frame_clock_test.cpp)
     target_include_directories(frame_clock_test PRIVATE src)
     add_test(NAME frame_clock COMMAND frame_clock_test)
+    add_executable(render_pose_test tests/render_pose_test.cpp)
+    target_include_directories(render_pose_test PRIVATE src)
+    add_test(NAME render_pose COMMAND render_pose_test)
     find_package(Python3 QUIET COMPONENTS Interpreter)
     if(Python3_Interpreter_FOUND)
         add_test(NAME fps_log COMMAND ${Python3_EXECUTABLE}
                  ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_fps_log_test.py)
+        add_test(NAME render_pose_log COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_render_pose_log_test.py)
     endif()
 endif()
 

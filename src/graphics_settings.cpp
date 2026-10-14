@@ -40,7 +40,7 @@ constexpr int kGuestHeight = 720;
 constexpr int kMaxRenderScale = 3;
 
 // Render caps are independent of the original fixed update clock.
-constexpr std::array<int, 9> kFpsLimits = {0, 240, 165, 144, 120, 90, 60, 45, 30};
+constexpr std::array<int, 8> kFpsLimits = {0, 240, 165, 144, 120, 90, 60, 30};
 
 // Values in effect since startup, for "restart to apply" notes.
 std::string g_startup_render_scale;

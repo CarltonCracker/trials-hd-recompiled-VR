@@ -129,7 +129,7 @@ cancels); **Reset Keys** restores the default layout. Changes apply immediately.
 | Resolution | Window size, or the fullscreen display mode; *Desktop* = borderless at desktop resolution |
 | Render Resolution | Internal resolution: 1280x720, 2560x1440 or 3840x2160 (restart to apply) |
 | Unlock FPS | Independent real rendering with the original fixed physics tick (on by default; restart to apply) |
-| FPS Limit | Unlimited, 240, 165, 144, 120, 90, 60, 45 or 30 real rendered frames per second; independent of physics with Unlock FPS enabled |
+| FPS Limit | Unlimited, 240, 165, 144, 120, 90, 60 or 30 real rendered frames per second; independent of physics with Unlock FPS enabled |
 | VSync | Tear-free presentation (restart to apply) |
 
 **Save** writes the settings (keys included) to `trials_hd.toml` next to the executable. They are
@@ -148,9 +148,20 @@ separates its update-worker and render-worker synchronization. Game updates keep
 the original **16,666 µs fixed step**, including the original five-step hitch
 limit; the physics timestep is not divided by the render rate. No optical-flow
 frames, framebuffer interpolation, or duplicated presentations are used.
-Physics-driven transforms still change on fixed ticks; this patch does not add
-sub-tick transform interpolation. Long stalls beyond the five-step catch-up
-budget can still lose simulation time, as in the original game.
+Above 60 FPS (or uncapped), the shared normal/batched world draw paths interpolate
+rigid models, animated matrix palettes, and camera poses between fixed ticks.
+Only temporary shader-upload inputs change; authoritative model matrices are not
+modified and camera/renderer inputs are restored after each draw. This adds up to
+one simulation tick of visual latency. Caps of 60 FPS or below keep original poses.
+Scene changes, missed ticks, and translation jumps over two units snap rather than
+blend. Long stalls beyond the five-step catch-up budget can still lose simulation
+time, as in the original game.
+
+Headless checks cover menu navigation, riding, pause/resume, checkpoint and restart
+at 60, 120 and uncapped rates. They check shader inputs, not physical-monitor
+smoothness. Complete UI/effects/other-mode interpolation coverage is not yet
+verified. The reported glass-like 1440p artifact remains under investigation;
+true internal 1080p is not implemented (1080p display output is separate).
 
 ### Main menu
 

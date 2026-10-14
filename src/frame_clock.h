@@ -26,6 +26,7 @@ class FrameClock {
   }
 
   Duration UntilNextStep() const { return kStep - pending_; }
+  float InterpolationFraction() const { return float(pending_.count()) / float(kStep.count()); }
 
  private:
   Duration pending_{};
