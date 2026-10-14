@@ -232,7 +232,7 @@ pause/resume, checkpoint and restart on *Middle Name: Danger*):
 | --- | --- | ---: | ---: |
 | 1280x720 | 60 | 60.0 | 59.95 |
 | 1280x720 | 120 | 120.0 | 60.01 |
-| 1280x720 | Unlimited | 146.4 | 60.00 |
+| 1280x720 | Unlimited | 183.4 (GPU-bound) | 59.98 |
 | 2560x1440 | 120 | 76.5 (GPU-bound) | 60.00 |
 | 2560x1440 | Original loop (`--fps_unlock=false`) | 59.8 | 60 |
 
@@ -265,6 +265,7 @@ also occur with the original loop; no guest access violations occurred in these 
 | `tools/headless_run.sh`, `tools/xwd_to_png.py` | Run under Xvfb with logging and periodic screenshots |
 | `tools/xsend.py` | Scripted key and controller input for headless runs (`INPUT=script tools/headless_run.sh`; keys go through X, buttons through a virtual gamepad) |
 | `tools/bench_summary.py`, `tests/check_fps_log.py` | Summarize benchmark logs; check fixed updates stay at 60 Hz |
+| `tools/profile/` | CPU profiling without `perf`: gdb stack sampler (`sample.sh`, `summarize.py`) and per-thread CPU use (`thread_cpu.py`) |
 | `tools/package.sh` | Assembles a runnable build folder in `dist/` (no game data) |
 
 ## Legal

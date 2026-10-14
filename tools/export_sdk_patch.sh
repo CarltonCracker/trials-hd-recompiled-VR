@@ -39,6 +39,22 @@ commit by CMake at configure time; regenerate with tools/export_sdk_patch.sh).
   other threads); logging: reserve the category registry (read lock-free)
 - macOS: user data under Application Support and Apple Silicon presentation defaults
 - ui/overlay: achievements close callback and input gating
+- command processor CPU: sequential register writes (type-0 packets) go
+  through the range path, context registers (0x2000-0x3FFF) are bulk-copied,
+  the unknown-register debug check is a bit test instead of a big switch, the
+  memexport readback cvar lookup only runs for memexport draws, and
+  SharedMemory::RequestRanges reuses its scratch vector (720p uncapped on an
+  RX 6600: ~145 -> ~183 FPS, now GPU-bound)
+- vulkan: skip draws with no observable effect (no pixel shader output,
+  depth, stencil, memexport or occlusion query: ~170 per frame in Trials HD),
+  counted in the log_guest_fps line
+- command processor idle: shorter spin before waiting for new commands, and
+  WAIT_REG_MEM naps after a short spin instead of yielding for the whole wait
+- threading: event-driven WaitMultiple (sleeps until a condition changes
+  instead of polling every millisecond and spinning near each timeout)
+- ui: dialogs say whether they need continuous repaint; the always-present
+  achievement toast only does while showing one (the window was repainted
+  ~1400 times per second with VSync off)
 
 EOF
   git -C "$sdk" diff
