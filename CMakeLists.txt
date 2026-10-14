@@ -162,3 +162,15 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/xex_dump")
     add_executable(xex_dump EXCLUDE_FROM_ALL tools/xex_dump/xex_dump.cpp)
     target_link_libraries(xex_dump PRIVATE rex::runtime)
 endif()
+
+# Standalone check of the WebGPU stack: window, surface, features/limits, and CPU benchmark.
+if(TRIALSHD_WEBGPU)
+    find_package(Threads REQUIRED)
+    find_package(Dawn REQUIRED)
+    add_library(trials_hd_webgpu STATIC src/webgpu/webgpu_context.cpp)
+    target_include_directories(trials_hd_webgpu PUBLIC src)
+    target_link_libraries(trials_hd_webgpu PUBLIC dawn::webgpu_dawn SDL3::SDL3)
+
+    add_executable(webgpu_smoke tools/webgpu_smoke/main.cpp)
+    target_link_libraries(webgpu_smoke PRIVATE trials_hd_webgpu)
+endif()

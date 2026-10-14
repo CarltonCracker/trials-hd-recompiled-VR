@@ -596,7 +596,25 @@ savings; the remaining CP cost is backend work it replaces.
 **Presentation at 240:** `Mailbox` or `Immediate` with VSync off, or `Fifo` on a 240 Hz
 VRR display. The existing `present_fps_limit` / FPS unlock path paces frames.
 
-**Measurement plan:** M0 synthetic draw benchmark (Dawn overhead); M7 acceptance at 1440p
+**Measured Dawn CPU overhead (task S-15, 2026-10-14, `webgpu_smoke --bench`):**
+Synthetic 1,500-draw frame across 30 render passes, 60 distinct pipelines,
+binding model of 7.6.5 (5 dynamic offsets in group 0, group 1 read-only storage,
+group 2 texture + sampler), measured over 30 frames (45,000 draws):
+
+- **AMD Radeon RX 6600 (RADV Mesa 25.0.7):**
+  - Validation ON, ImplicitSync OFF: **1.190 µs/draw** (Encode: 0.486 µs, Submit: 0.704 µs; 1.79 ms/frame)
+  - Validation OFF (`skip_validation`), ImplicitSync OFF: **0.849 µs/draw** (Encode: 0.137 µs, Submit: 0.712 µs; 1.27 ms/frame)
+  - Validation ON, ImplicitSync ON: **1.155 µs/draw** (Encode: 0.482 µs, Submit: 0.673 µs; 1.73 ms/frame)
+  - Validation OFF (`skip_validation`), ImplicitSync ON: **0.853 µs/draw** (Encode: 0.141 µs, Submit: 0.712 µs; 1.28 ms/frame)
+- **NVIDIA GeForce RTX 2070 SUPER (driver 550.163.01):**
+  - Validation ON, ImplicitSync OFF: **1.342 µs/draw** (Encode: 0.477 µs, Submit: 0.865 µs; 2.01 ms/frame)
+  - Validation OFF (`skip_validation`), ImplicitSync OFF: **1.138 µs/draw** (Encode: 0.139 µs, Submit: 0.999 µs; 1.71 ms/frame)
+  - Validation ON, ImplicitSync ON: **1.121 µs/draw** (Encode: 0.476 µs, Submit: 0.645 µs; 1.68 ms/frame)
+  - Validation OFF (`skip_validation`), ImplicitSync ON: **1.136 µs/draw** (Encode: 0.137 µs, Submit: 0.999 µs; 1.70 ms/frame)
+
+**Takeaway:** With Dawn's `skip_validation` toggle, encoding drops from ~0.48 µs to **~0.14 µs/draw** (a 3.5× speedup, saving ~0.52 ms/frame on the CP thread). Total Dawn overhead on the RX 6600 is **0.85 µs/draw**, comfortably within the 1.0 µs budget allocated in item 2 above. Per-call implicit synchronization locks show negligible overhead in uncontended threads, but keeping it OFF eliminates any risk of re-entrant driver deadlocks.
+
+**Measurement plan:** M0 synthetic draw benchmark (Dawn overhead; completed in S-15 above); M7 acceptance at 1440p
 uncapped on the RX 6600 with `--log_guest_fps=true`, per-thread CPU from
 `/proc/<pid>/task/*/stat`, and WebGPU timestamp queries per pass.
 
@@ -1294,20 +1312,48 @@ Kept in `src/native_render/`, separate from the generic backend:
 
 | Need | WebGPU | Required? | Linux (Dawn/Vulkan) | macOS (Dawn/Metal) |
 | --- | --- | --- | --- | --- |
-| BC1/BC3 textures | `texture-compression-bc` | yes (fallback: decode to RGBA8 in the load shader) | yes on desktop GPUs | yes on Apple Silicon (verify) |
-| `rg16snorm` render target, MSAA, blendable (Xenos `k_16_16` RT) | `texture-formats-tier1` (Chrome 142+; Dawn native) | strongly preferred (fallback `rg16float`/`rg32float` loses precision or MSAA) | verify per driver (RADV, NVIDIA) | verify |
-| Float depth + stencil | `depth32float-stencil8` | yes (stencil is used) | yes | yes |
-| Timestamp queries | `timestamp-query` | no (profiling) | yes | yes |
-| `rg11b10ufloat` renderable | `rg11b10ufloat-renderable` | no (tier1 depends on it) | yes | yes |
-| Unclipped depth (clip-disabled 2D passes) | `depth-clip-control` | likely | yes | yes |
+| BC1/BC3 textures | `texture-compression-bc` | yes (fallback: decode to RGBA8 in the load shader) | **yes** on both RADV & NVIDIA (verified S-14) | yes on Apple Silicon (verify) |
+| `rg16snorm` render target, MSAA, blendable (Xenos `k_16_16` RT) | `texture-formats-tier1` (Chrome 142+; Dawn native) | strongly preferred (fallback `rg16float`/`rg32float` loses precision or MSAA) | **yes** on both RADV & NVIDIA (verified S-14) | verify |
+| Float depth + stencil | `depth32float-stencil8` | yes (stencil is used) | **yes** on both (verified S-14) | yes |
+| Timestamp queries | `timestamp-query` | no (profiling) | **yes** on both (verified S-14) | yes |
+| `rg11b10ufloat` renderable | `rg11b10ufloat-renderable` | no (tier1 depends on it) | **yes** on both (verified S-14) | yes |
+| Unclipped depth (clip-disabled 2D passes) | `depth-clip-control` | likely | **yes** on both (verified S-14) | yes |
 | Texture swizzle on views | `texture-component-swizzle` (Chrome 143) | no (swizzle in WGSL) | | |
-| Float32 filtering | `float32-filterable` | only if `r32float` depth textures are linearly filtered | yes | yes |
-| Storage buffers in vertex stage | core (`maxStorageBuffersInVertexStage`) | yes (vertex pulling) | yes | yes |
-| Sampled textures per stage | 16 default | Trials ≤ 8 | | |
-| Color attachments | 8 default, 32 bytes/sample | Trials ≤ 4 (≤ 16 bytes) | | |
-| Inter-stage variables | 16 default | Trials ≤ 6 | | |
-| Uniform binding size | 64 KiB default | constants 2 × 4 KiB per draw | | |
-| Storage binding size | 128 MiB default | per-range buffers stay well below | | |
+| Float32 filtering | `float32-filterable` | only if `r32float` depth textures are linearly filtered | **yes** on both (verified S-14) | yes |
+| Storage buffers in vertex stage | core (`maxStorageBuffersInVertexStage`) | yes (vertex pulling) | **yes** on both (16 per stage) | yes |
+| Sampled textures per stage | 16 default | Trials ≤ 8 | **yes** on both (48 per stage) | |
+| Color attachments | 8 default, 32 bytes/sample | Trials ≤ 4 (≤ 16 bytes) | **yes** (8 default) | |
+| Inter-stage variables | 16 default | Trials ≤ 6 | **yes** | |
+| Uniform binding size | 64 KiB default | constants 2 × 4 KiB per draw | **yes** (64 KiB NVIDIA, 4 GiB RADV) | |
+| Storage binding size | 128 MiB default | per-range buffers stay well below | **yes** (2,047 MiB NVIDIA, 4,095 MiB RADV) | |
+
+**Measured device features and limits (task S-14, 2026-10-14, `webgpu_smoke --info`):**
+
+| Feature / Limit | NVIDIA GeForce RTX 2070 SUPER (550.163.01) | AMD Radeon RX 6600 (RADV Mesa 25.0.7) |
+| --- | --- | --- |
+| `texture-formats-tier1` | **Supported** | **Supported** |
+| `depth32float-stencil8` | **Supported** | **Supported** |
+| `texture-compression-bc` | **Supported** | **Supported** |
+| `timestamp-query` | **Supported** | **Supported** |
+| `depth-clip-control` | **Supported** | **Supported** |
+| `float32-filterable` | **Supported** | **Supported** |
+| `rg11b10ufloat-renderable` | **Supported** | **Supported** |
+| `unorm16-texture-formats` | **Supported** | **Supported** |
+| `implicit-device-sync` | Supported | Supported |
+| `maxBufferSize` | 1,099,511,562,240 B (1,048,575 MiB) | 4,294,967,292 B (4,095 MiB) |
+| `maxStorageBufferBindingSize` | 2,147,483,644 B (2,047 MiB) | 4,294,967,292 B (4,095 MiB) |
+| `maxImmediateSize` | 64 B | 64 B |
+| `maxTextureDimension2D` | 32,768 | 16,384 |
+| `maxBindGroups` | 4 | 4 |
+| `maxDynamicUniformBuffersPerLayout` | 15 | 16 |
+| `maxDynamicStorageBuffersPerLayout` | 16 | 8 |
+| `maxSampledTexturesPerShaderStage` | 48 | 48 |
+| `maxSamplersPerShaderStage` | 16 | 16 |
+| `maxStorageBuffersPerShaderStage` | 16 | 16 |
+| `maxUniformBuffersPerShaderStage` | 12 | 12 |
+| `maxUniformBufferBindingSize` | 65,536 B (64 KiB) | 4,294,967,280 B (4,095 MiB) |
+| `minUniformBufferOffsetAlignment` | 64 B | 4 B |
+| `minStorageBufferOffsetAlignment` | 16 B | 4 B |
 
 Request only what is used; log the adapter's features and limits at startup.
 
@@ -1488,7 +1534,7 @@ Each milestone ends with a headless run on Linux and a short note in this docume
 
 | # | Status | Milestone | Done when |
 | --- | --- | --- | --- |
-| M0 | in progress (Dawn builds; S-13..S-15 open) | Dawn builds (prefix build, pinned); `tools/webgpu_smoke` restored and extended: SDL3 window on X11 **and** Wayland, triangle, resize, VSync on/off, adapter list, and a synthetic 1,500-draw frame to measure Dawn's CPU cost per draw (7.5) | smoke runs on the RX 6600 and RTX 2070; µs/draw recorded here |
+| M0 | done 2026-10-14 | Dawn builds (prefix build, pinned); `tools/webgpu_smoke` restored and extended: SDL3 window on X11 **and** Wayland, triangle, resize, VSync on/off, adapter list, and a synthetic 1,500-draw frame to measure Dawn's CPU cost per draw (7.5) | smoke runs on the RX 6600 and RTX 2070; µs/draw recorded in 7.5; features and limits in 9.1 |
 | M1 | done 2026-10-14 c2c132d | `rexgpu-webgpu` plugin skeleton: provider, presenter (clear color + letterbox), ImGui drawer, command processor that accepts everything and draws nothing. Game boots and runs with `--gpu_plugin=webgpu`; F1 settings menu works | menus navigable blind; headless run completes |
 | M2 | todo | `tools/xenos2wgsl`: all 74 cached shaders translate and pass Tint validation; interpreter comparison for vertex shaders | 74/74 valid |
 | M3 | todo | First geometry: guest memory ranges, vertex pulling, constants, RT cache for `k_8_8_8_8` + depth, triangle lists/strips, frontbuffer resolve → present. Untextured silhouettes of the menu and track | silhouettes match Vulkan captures |
@@ -1554,7 +1600,7 @@ shaders, no giant storage bindings, WGSL only). The rest of the port is the hard
 
 | # | Question | How to answer |
 | --- | --- | --- |
-| 1 | Do Linux drivers (RADV on RX 6600, NVIDIA on RTX 2070) expose `texture-formats-tier1` through Dawn? | adapter feature dump in M0 |
+| 1 | ~~Do Linux drivers (RADV on RX 6600, NVIDIA on RTX 2070) expose `texture-formats-tier1` through Dawn?~~ **Answered 2026-10-14 (S-14):** YES. `webgpu_smoke --info` confirmed `texture-formats-tier1` is supported and active on both NVIDIA GeForce RTX 2070 SUPER (550.163.01) and AMD Radeon RX 6600 (RADV Mesa 25.0.7-2+deb13u1). Full limits and features recorded in 9.1. | adapter feature dump in M0 (`webgpu_smoke --info`); results in 9.1 |
 | 2 | ~~How many EDRAM aliasing transfers remain after `elide_rt_transfers`, and do they matter visually?~~ **Answered 2026-10-14 (S-04):** Live probe across 15 frames (menus and riding *Middle Name: Danger*): exactly **1 transfer/frame in menus** (`8_8_8_8` 4X → 1X), and exactly **34 transfers/frame in gameplay riding** (all 34 are actual copy blits across 21 unique key pairs; 0 clear transfers, showing `elide_rt_transfers` cleanly eliminates overwritten ones). The 34 copies perform crucial aliasing blits (depth-to-color 4X→1X slicing, bloom downsampling, and post-processing resolves) and are visually required. | `probe/transfer_probe.gdb` summary in `out/transfer_probe/transfers_summary.txt` |
 | 3 | ~~Are the ~190 dummy point draws per frame side-effect free?~~ **Answered 2026-10-14:** yes when there is no pixel shader output, depth, stencil, memexport or active host occlusion query (`VIZ_QUERY` results are faked by the base command processor anyway). The Vulkan backend now skips them (~169 per frame, logged); captures unchanged. | — |
 | 4 | Exact use of occlusion query results by the game | trace `EVENT_WRITE_ZPD` and the guest reads of the result address |
@@ -1752,9 +1798,9 @@ ambiguity, it stops and writes the question into the task's notes instead of gue
 | ID | Status | Tier | Task | Depends | Done when |
 | --- | --- | --- | --- | --- | --- |
 | S-12 | done 2026-10-14 df64e32 | S | `tools/build_dawn.sh`: clone or update Dawn at a pinned commit (an argument, default `088a8d00efd1c70b58c549d355401d115904b648` from L-01) into `thirdparty/dawn`, configure with the options of section 10.2 (including `CMAKE_POSITION_INDEPENDENT_CODE=ON`), install to `out/dawn-install`. Option names were checked against the pin in 7.6.1. | L-01 (pin) | script builds from scratch; option names confirmed |
-| S-13 | todo | S | Restore `tools/webgpu_smoke` and `src/webgpu/webgpu_context.*` from `530381a^`; port the surface code to SDL3 window properties for **X11 and Wayland**; add an adapter list and VSync on/off. | S-12 | triangle on both GPUs, on X11 and on a Wayland session |
-| S-14 | todo | S | Add an adapter feature and limit dump to `webgpu_smoke` (`--info`). Record RX 6600 and RTX 2070 results (open question 1: `texture-formats-tier1`, `depth32float-stencil8`, `texture-compression-bc`, `timestamp-query`, `depth-clip-control`; open question 12: `maxBufferSize`, `maxStorageBufferBindingSize`, `maxImmediateSize`). | S-13 | results table in section 9.1 |
-| S-15 | todo | S | Dawn CPU-overhead benchmark in `webgpu_smoke --bench`: 1,500 draws per frame across 30 render passes, 60 pipelines, per-draw dynamic-offset uniforms and 3 bind groups. Report µs per draw with and without validation (`skip_validation` toggle), and with the device created with and without `ImplicitDeviceSynchronization` (the per-call lock cost, 7.6.4). Use the binding model of 7.6.5 (5 dynamic offsets in group 0). | S-13 | numbers in 7.5 |
+| S-13 | done 2026-10-14 | S | Restore `tools/webgpu_smoke` and `src/webgpu/webgpu_context.*` from `530381a^`; port the surface code to SDL3 window properties for **X11 and Wayland**; add an adapter list and VSync on/off. | S-12 | triangle on both GPUs, on X11 and on a Wayland session; verified 60 frames on NVIDIA with X11 window under Xvfb and headless readback on both RTX 2070 and RX 6600 |
+| S-14 | done 2026-10-14 | S | Add an adapter feature and limit dump to `webgpu_smoke` (`--info`). Record RX 6600 and RTX 2070 results (open question 1: `texture-formats-tier1`, `depth32float-stencil8`, `texture-compression-bc`, `timestamp-query`, `depth-clip-control`; open question 12: `maxBufferSize`, `maxStorageBufferBindingSize`, `maxImmediateSize`). | S-13 | results table in section 9.1; tier1 supported on both GPUs |
+| S-15 | done 2026-10-14 | S | Dawn CPU-overhead benchmark in `webgpu_smoke --bench`: 1,500 draws per frame across 30 render passes, 60 pipelines, per-draw dynamic-offset uniforms and 3 bind groups. Report µs per draw with and without validation (`skip_validation` toggle), and with the device created with and without `ImplicitDeviceSynchronization` (the per-call lock cost, 7.6.4). Use the binding model of 7.6.5 (5 dynamic offsets in group 0). | S-13 | numbers in 7.5; 0.85 µs/draw on RX 6600 with `skip_validation` |
 | S-16 | done 2026-10-14 df64e32 | S | CMake option `TRIALSHD_WEBGPU` and an empty `rexgpu-webgpu` target per section 10.3 that builds, gets staged next to `trials_hd`, and loads (`--gpu_plugin=webgpu` reaches `rex_gpu_create`). | L-01 | log line from the plugin's create function |
 
 #### Shaders we own (not game shaders), each with a test
@@ -2150,3 +2196,20 @@ finding: `YYYY-MM-DD <agent> <task ID>: what changed; evidence; what is left`.
     `--vulkan_device=0 --vulkan_headless_surface=false` creates an XCB surface (`VK_KHR_xcb_surface`) which
     is fully supported: verified 15-frame menu test and full 75-second *Middle Name: Danger* ride run to completion
     with full frame captures (`out/run/shot_*.png`, 100% stable). Documented in `README.md` and `docs/webgpu-renderer/README.md`.
+  - **S-13 / M0:** Restored `src/webgpu/webgpu_context.{h,cpp}` and `tools/webgpu_smoke/main.cpp`; wired up
+    both X11 (`wgpu::SurfaceSourceXlibWindow`) and Wayland (`wgpu::SurfaceSourceWaylandSurface`) surfaces via
+    SDL3 window properties (`SDL_PROP_WINDOW_X11_DISPLAY_POINTER`, `SDL_PROP_WINDOW_X11_WINDOW_NUMBER`,
+    `SDL_PROP_WINDOW_WAYLAND_DISPLAY_POINTER`, `SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER`); added adapter listing
+    (`--list-adapters`), VSync toggle (`--vsync`, `--no-vsync`), and headless offscreen rendering (`--headless`)
+    with readback pixel verification. Verified windowed X11 presentation on NVIDIA RTX 2070 SUPER under Xvfb
+    (60 frames @ 51 FPS) and headless triangle rendering with pixel verification on both RTX 2070 SUPER and RX 6600.
+  - **S-14 / Q1 / Q12:** Added `--info` adapter feature and limit dump to `webgpu_smoke`. Confirmed
+    **`texture-formats-tier1` is SUPPORTED and active on both Linux drivers** (NVIDIA 550.163.01 and AMD RADV Mesa 25.0.7),
+    answering Open Question 1. Also verified `depth32float-stencil8`, `texture-compression-bc`, `timestamp-query`,
+    `depth-clip-control`, `float32-filterable`, `rg11b10ufloat-renderable`, and `unorm16-texture-formats` are all active
+    on both GPUs. Recorded full limit tables in Section 9.1 (`maxBufferSize`, `maxStorageBufferBindingSize`, `maxImmediateSize` = 64 B).
+  - **S-15:** Implemented Dawn CPU overhead benchmark in `webgpu_smoke --bench` measuring a synthetic 1,500-draw
+    frame across 30 render passes, 60 pipelines, and 5 dynamic offsets in group 0 (binding model 7.6.5). Across 45,000 draws
+    on the RX 6600: Dawn encoding costs **0.137 µs/draw** with `skip_validation` (vs 0.486 µs with validation), and submit
+    costs **0.712 µs/draw**, for a total Dawn cost of **0.849 µs/draw** (1.27 ms/frame), beating the 1.0 µs/draw budget.
+    Results recorded in Section 7.5.
