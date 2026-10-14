@@ -22,6 +22,10 @@ void ApplyStartupGraphicsSettings();
 // resolution settings. UI thread only, once the window exists.
 void ApplyDisplayMode();
 
+// Refresh rate (Hz) of the display the game presents to with VSync on, or 0
+// with VSync off or before the window exists. Any thread.
+float VsyncRefreshRate();
+
 // Owns itself once shown: Close() deletes it after the current frame, and
 // on_closed runs just before that so the owner can drop its pointer.
 class GraphicsSettingsDialog : public rex::ui::ImGuiDialog {

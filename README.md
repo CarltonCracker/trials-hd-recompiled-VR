@@ -125,7 +125,7 @@ cancels); **Reset Keys** restores the default layout. Changes apply immediately.
 | Resolution | Window size, or the fullscreen display mode; *Desktop* = borderless at desktop resolution |
 | Render Resolution | Internal resolution: 1280x720, 2560x1440 or 3840x2160 (restart to apply) |
 | Unlock FPS | Independent real rendering with the original fixed physics tick (on by default; restart to apply) |
-| FPS Limit | Unlimited, 240, 165, 144, 120, 90, 60, 45 or 30 real rendered frames per second; independent of physics with Unlock FPS enabled |
+| FPS Limit | Unlimited, 240, 165, 144, 120, 90, 60 or 30 real rendered frames per second; independent of physics with Unlock FPS enabled |
 | VSync | Tear-free presentation (restart to apply) |
 
 **Save** writes the settings (keys included) to `trials_hd.toml` next to the executable. They are
@@ -136,7 +136,9 @@ ordinary settings, so they also work on the command line, e.g.
 ### FPS unlock
 
 `--fps_unlock=true --present_fps_limit=0 --host_vsync=false` enables uncapped
-real rendering. VSync can still limit output to the display refresh rate.
+real rendering. With VSync on, rendering is capped at the display's refresh rate
+(or the FPS limit, if lower): the presenter shows only the newest frame at each
+refresh, so rendering faster would show an uneven subset of frames.
 `--fps_unlock=false` restores the original game loop for comparison.
 
 The patch in `src/fps_unlock.cpp` replaces the game's combined frame gate and
@@ -144,15 +146,30 @@ separates its update-worker and render-worker synchronization. Game updates keep
 the original **16,666 µs fixed step**, including the original five-step hitch
 limit; the physics timestep is not divided by the render rate. No optical-flow
 frames, framebuffer interpolation, or duplicated presentations are used.
-Physics-driven transforms still change on fixed ticks; this patch does not add
-sub-tick transform interpolation. Long stalls beyond the five-step catch-up
-budget can still lose simulation time, as in the original game.
+Above 60 FPS (or uncapped), the shared normal/batched world draw paths interpolate
+rigid models, animated matrix palettes, and the camera between fixed ticks.
+Only temporary shader-upload inputs change; authoritative model matrices are not
+modified and camera/renderer inputs are restored after each draw. This adds up to
+one simulation tick of visual latency. Caps of 60 FPS or below keep original poses.
+The game draws the track through the same camera with more than one view per
+frame, so each view keeps its own history. Shadow-map cameras stay at their tick
+pose (the game samples shadows through light matrices computed per tick), while
+the models drawn into them are interpolated. Scene changes, missed ticks, and
+translation jumps over two units snap rather than blend. Long stalls beyond the
+five-step catch-up budget can still lose simulation time, as in the original game.
+Particles, effects and 2D UI still move at the 60 Hz tick rate.
+
+The render resolution is an integer multiple of the game's 1280x720 frame. A
+true internal 1920x1080 option is not implemented: the game can render a smaller
+base frame (960x540 at 2x), but its menus and HUD are laid out in 1280x720 pixels
+and come out cropped and oversized. For a 1080p screen, pick the 1080p display
+resolution with 2560x1440 rendering (supersampled) or 1280x720 (upscaled).
 
 ### Main menu
 
-The main menu is the game's own, with all of its buttons. Leaderboards,
-Achievements and Download Content front Xbox LIVE services, which are not
-available: the game shows its own offline / not-signed-in behavior for them.
+The main menu is the game's own, with all of its buttons. Achievements opens the
+host achievements overlay. Leaderboards and Download Content require unavailable
+Xbox LIVE services and retain the game's offline / not-signed-in behavior.
 
 With no audio device the game continues with silent audio. With several GPUs, pick
 one with `--vulkan_device=N` (the device list is printed at startup).
@@ -167,20 +184,21 @@ them back into guest memory forced a full CPU/GPU sync per draw and held gamepla
 
 ## Performance
 
-Verified on Linux with an RX 6600, headless Vulkan with 1280×720 captured output,
-host VSync off, and an 85-second scripted ride on *Middle Name: Danger*
-(`--log_guest_fps=true --log_simulation_rate=true` log both rates once per second):
+Verified on Linux with an RX 6600, headless Vulkan, host VSync off, and a
+75-second scripted keyboard ride (menus, riding, pause/resume, checkpoint and
+restart on *Middle Name: Danger*; `--log_guest_fps=true --log_simulation_rate=true`
+log both rates once per second):
 
-| Render limit | Median real GPU swaps/sec | Mean fixed updates/sec |
-| --- | ---: | ---: |
-| 30 | 30.0 | 60.00 |
-| 60 | 60.0 | 60.07 |
-| 120 | 120.0 | 60.05 |
-| Unlimited | 203.9 | 59.95 |
+| Render resolution | Render limit | Real rendered FPS | Fixed updates/sec |
+| --- | --- | ---: | ---: |
+| 1280x720 | 60 | 60.0 | 59.95 |
+| 1280x720 | 120 | 120.0 | 60.01 |
+| 1280x720 | Unlimited | 146.4 | 60.00 |
+| 2560x1440 | 120 | 76.5 (GPU-bound) | 60.00 |
+| 2560x1440 | Original loop (`--fps_unlock=false`) | 59.8 | 60 |
 
-At the 2560×1440 render resolution (2×) the same RX 6600 run renders about 87 FPS
-uncapped (GPU-bound, 78 FPS median including menus and loading), with fixed updates
-still at 60 Hz; the 120 FPS limit needs the 1× render resolution on this GPU.
+Above 60 FPS every run has distinct model and camera poses within a fixed tick.
+The 120 FPS limit needs the 1x render resolution on this GPU.
 
 These are the last 15 logged samples, with positive game draws and resolves in
 every sample. Gameplay captures show normal race-timer progression, riding,

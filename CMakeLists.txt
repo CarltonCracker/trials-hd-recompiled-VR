@@ -89,9 +89,29 @@ if(NOT REXGLUE_ENTRYPOINT_GENERATED_SOURCES)
 endif()
 
 # The SDK's rexglue_configure_target() (called from rexglue_setup_target above)
-# stages shared runtime libraries (rexruntime, TracyClient, GPU plugins) and the
-# macOS MoltenVK Vulkan stack next to the executable on all platforms.
-# No additional staging is needed here.
+# stages the shared runtime libraries next to the executable only on Windows and
+# macOS (plus the MoltenVK Vulkan stack on macOS), and stages the GPU plugin
+# only when trials_hd relinks, so an SDK-only change would leave stale copies.
+# The binary's RPATH is $ORIGIN / @executable_path, so copy them alongside it on
+# every build; copy_if_different keeps this cheap.
+if(NOT WIN32)
+    set(TRIALSHD_RUNTIME_LIBS $<TARGET_FILE:rexruntime> $<TARGET_FILE:rexgpu-xenos>)
+    set(TRIALSHD_RUNTIME_LIB_TARGETS rexruntime rexgpu-xenos)
+    if(TARGET TracyClient)
+        get_target_property(_tracy_type TracyClient TYPE)
+        if(_tracy_type STREQUAL "SHARED_LIBRARY")
+            list(APPEND TRIALSHD_RUNTIME_LIBS $<TARGET_FILE:TracyClient>)
+            list(APPEND TRIALSHD_RUNTIME_LIB_TARGETS TracyClient)
+        endif()
+    endif()
+    add_custom_target(trials_hd_stage_libs
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${TRIALSHD_RUNTIME_LIBS}
+                $<TARGET_FILE_DIR:trials_hd>
+        DEPENDS ${TRIALSHD_RUNTIME_LIB_TARGETS}
+        COMMENT "Staging runtime libraries next to trials_hd"
+        VERBATIM)
+    add_dependencies(trials_hd trials_hd_stage_libs)
+endif()
 
 # rex_app.cpp (compiled into this target by the SDK) includes imgui.h, but
 # rexruntime links imgui privately, so the header path does not propagate when
@@ -107,10 +127,15 @@ if(TRIALSHD_BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests")
     add_executable(frame_clock_test tests/frame_clock_test.cpp)
     target_include_directories(frame_clock_test PRIVATE src)
     add_test(NAME frame_clock COMMAND frame_clock_test)
+    add_executable(render_pose_test tests/render_pose_test.cpp)
+    target_include_directories(render_pose_test PRIVATE src)
+    add_test(NAME render_pose COMMAND render_pose_test)
     find_package(Python3 QUIET COMPONENTS Interpreter)
     if(Python3_Interpreter_FOUND)
         add_test(NAME fps_log COMMAND ${Python3_EXECUTABLE}
                  ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_fps_log_test.py)
+        add_test(NAME render_pose_log COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_render_pose_log_test.py)
     endif()
 endif()
 
