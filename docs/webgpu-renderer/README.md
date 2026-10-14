@@ -1873,7 +1873,7 @@ debugging. Several can run in parallel once L-01 to L-03 exist.
 | L-22 | todo | **Review duty.** A large model reviews each small-model task's diff and evidence before merge (correctness against the Xenos semantics, no game content, tests real). | ongoing | this section | review notes on each task |
 | L-23 | done 2026-10-14 (not yet committed) | **CPU pass before the renderer** (this session): command-processor register path, no-effect draw skip, native guest `memcpy`/`memset`, event-driven `WaitMultiple`, idle-dialog repaint fix, command-processor idle and `WAIT_REG_MEM` backoff. | — | notes log | 720p uncapped ~145 → ~183 FPS (now GPU-bound); 60 FPS-cap process CPU 150% → 121% |
 | L-24 | done pi-gpt 2026-10-14 bb9fbb5 | **Event-driven alertable waits.** Alertable waits (`Wait`, `SignalAndWait`, `WaitMultiple` with `is_alertable`) still wake every 1 ms (`kAlertablePollSlice`) to look for queued user callbacks (APCs); `QueueUserCallback` only sends a signal, which doesn't end a condition-variable wait. Wake the waiting thread when a callback is queued (per-thread wake target or waiter lists on conditions), without the thundering herd of a single global wakeup. | L-23 | `src/core/threading_posix.cpp` (`QueueUserCallback`, `kAlertablePollSlice`) | game threads' idle CPU drops; no APC latency regression (audio, file IO) |
-| L-25 | claimed pi-gpt 2026-10-14 | **Exit-time teardown under live threads.** TSan shows static destructors (loggers, input key tables, cvar registry) running while guest threads still run when the process quits, i.e. use-after-free at exit. Follow the Skate 3 SDK fork's approach (flush logs, then `_Exit` on quit instead of tearing down under live guest threads), or stop the guest threads first. | — | TSan reports in the notes log; Skate 3 SDK commit `705b78f` | no TSan exit-time reports; clean exit code |
+| L-25 | done pi-gpt 2026-10-14 (existing SDK implementation; verification commit follows) | **Exit-time teardown under live threads.** TSan shows static destructors (loggers, input key tables, cvar registry) running while guest threads still run when the process quits, i.e. use-after-free at exit. Follow the Skate 3 SDK fork's approach (flush logs, then `_Exit` on quit instead of tearing down under live guest threads), or stop the guest threads first. | — | TSan reports in the notes log; Skate 3 SDK commit `705b78f` | no TSan exit-time reports; clean exit code |
 
 ### 16.5 Order and parallelism
 
@@ -2183,6 +2183,18 @@ finding: `YYYY-MM-DD <agent> <task ID>: what changed; evidence; what is left`.
   This is **not** exit-time evidence. Private gdb diagnosis and a separate normal
   native-close check are running. L-25 remains claimed; no SDK teardown change
   or sanitizer suppression was added.
+- 2026-10-14 pi-gpt L-25 verified: normal native SDL window close exited **0**;
+  log reaches `Window closing` then `Title terminated; hard-exiting process`.
+  Gdb traced the TSan startup crash to the allocator called by NVIDIA
+  `libnvidia-glcore` threads. Restricting Vulkan ICD discovery to RADV avoided
+  that driver crash without sanitizer-report suppression. AMD TSan then reached
+  the same close path and exited **0**, with zero reports containing
+  `ReXApp::OnClosing`, `__cxa_finalize`, exit teardown or `ShutdownLogging`
+  stacks. The run was **not globally TSan-clean**: 61 runtime race reports,
+  1 mutex report and 1,740 signal-unsafe-call reports in the older instrumented
+  SDK remain separate issues. Logs/binaries stay in `out/exit-test/`.
+  No teardown code added: SDK HEAD already implements flush followed by `_Exit`.
+  This closes the narrow L-25 acceptance, not the other sanitizer issues.
 - 2026-10-14 antigravity (Tier S tasks completion):
   - **S-01:** Executed 7 headless test scripts (`main_menu_nav.txt`, `settings_menu.txt`,
     `credits.txt`, `ride_tutorial.txt`, `ride_middle_name_danger.txt`, `ride_hello_world.txt`,
