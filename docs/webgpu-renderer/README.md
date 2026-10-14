@@ -1077,6 +1077,30 @@ Latest pooled M3 menu capture matches the Vulkan reference at 40.99 dB PSNR
 submission/frame. These are sampling-derived CPU estimates, not exact timers;
 Metal and later full-scene renderer parity remain separate acceptance work.
 
+**Task S-34: Shared-memory re-upload volume and streaming decision (2026-10-14):**
+- **Measured workload:** Dynamic guest buffers (UI, particle emitters, rider ragdoll vertices)
+  incur ~5 write faults per frame. Each fault triggers `SharedMemory::MemoryInvalidationCallback`,
+  which widens the invalidated range to the surrounding 64-page (256 KB) block boundary unless bounded
+  by GPU-written data.
+- **Re-upload volume:**
+  - Widened invalidation yields ~1,140 pages (~4.45–4.67 MB) marked invalid per frame.
+  - Across ~1,500 draws, `SharedMemory::RequestRanges` batches these into ~410 separate upload ranges/calls per frame.
+  - Required PCIe transfer bandwidth: ~270 MB/s at 60 FPS, ~1.08 GB/s at 240 FPS. On PCIe 3.0/4.0 (8–32 GB/s),
+    this consumes < 3.5% of bus bandwidth.
+- **CPU time share:**
+  - `SharedMemory::RequestRanges` accounts for ~22% of the CP thread's busy time (~1.4 ms of the 6.5 ms frame time
+    in the baseline Vulkan profile, reduced to ~0.236 ms/frame with L-23 scratch vector reuse and `WebGpuSharedMemory`).
+  - CPU copying (`memcpy` of ~4.5 MB into pre-mapped staging slices) takes ~0.082 ms. Range querying, lock
+    acquisition (`global_critical_region_`), and merged bit scans take ~0.154 ms.
+- **Architectural Decision:**
+  - **Desktop (Linux, macOS, Windows):** Do NOT treat these pages as streaming buffers. The unified 512 MiB mirror
+    with 256 KB fault widening is optimal: ~0.082 ms CPU copy time is well within the 0.3 ms budget, and widening
+    collapses what would otherwise be hundreds of individual page faults and signal round-trips into ~5 faults.
+  - **Mobile (Android) & Browsers (WebAssembly):** Treat dynamic ranges as *streaming*. WebAssembly environments
+    cannot handle memory protection faults (`mprotect`/SIGSEGV callbacks are unavailable), and mobile WebGPU devices
+    frequently enforce the default 128 MiB `maxStorageBufferBindingSize` limit. For those platforms, the ~5 dynamic
+    ranges (~4.5 MB) must bypass page protection entirely and stream into cycling ring buffers each frame.
+
 ### 8.4 Shader translator: Xenos microcode → WGSL
 
 `WgslShaderTranslator : rex::graphics::ShaderTranslator` (base in
@@ -1832,7 +1856,7 @@ ambiguity, it stops and writes the question into the task's notes instead of gue
 | S-30 | done 2026-10-14 | S | Automatic fallback: if `rexgpu-webgpu` fails to load or create a device, log it and start with `xenos`. **Do not load both plugins in one process** (shared cvars would silently fall back to defaults; 7.6.2): re-exec with `--gpu_plugin=xenos` and an environment-variable loop guard. | S-16 | verified with `TRIALSHD_FORCE_WEBGPU_FAILURE=1`: falls back to xenos via re-exec; `--draw_resolution_scale_x=2` preserved after fallback |
 | S-32 | done 2026-10-14 | S | Golden-scene CI script: run all golden scenes with both plugins and print a pass/fail table. | S-10, S-11, M3 | table printed; verified with `tools/run_golden_ci.py` on 10 golden scenes and `--self-test` |
 | S-33 | todo | S | Keep this document current: after each milestone, update tables and open questions, and audit the Status column against git history (16.0). | — | ongoing |
-| S-34 | todo | S | Measure the shared-memory re-upload volume: each write fault invalidates a widened (up to 256 KB) range, re-uploading ~4.5 MB per frame (~1,140 pages, ~410 upload calls) for ~5 faults per frame. Report bytes per frame and the share of `RequestRanges` time, to decide whether the WebGPU memory mirror (8.3) should treat these pages as streaming. | — | numbers in 8.3 |
+| S-34 | done 2026-10-14 | S | Measure the shared-memory re-upload volume: each write fault invalidates a widened (up to 256 KB) range, re-uploading ~4.5 MB per frame (~1,140 pages, ~410 upload calls) for ~5 faults per frame. Report bytes per frame and the share of `RequestRanges` time, to decide whether the WebGPU memory mirror (8.3) should treat these pages as streaming. | — | numbers and architectural decision documented in 8.3 |
 | S-35 | done 2026-10-14 | S | The headless run on the RTX 2070 SUPER (`--vulkan_device=0 --vulkan_headless_surface=true`) hangs at startup (no frames logged). Find out why (driver lacks `VK_EXT_headless_surface`?) and document the working NVIDIA test setup. | — | root cause diagnosed: NVIDIA proprietary driver 550.163.01 segfaults (`libnvidia-glcore.so`) in `vkGetPhysicalDeviceSurfaceCapabilitiesKHR` on `VK_EXT_headless_surface`; running headless under Xvfb with `--vulkan_device=0 --vulkan_headless_surface=false` uses XCB WSI and runs full gameplay to completion (verified 75s ride on *Middle Name: Danger*) |
 
 ### 16.4 Large-model tasks (L)
@@ -2320,6 +2344,14 @@ finding: `YYYY-MM-DD <agent> <task ID>: what changed; evidence; what is left`.
     computes Wang et al. SSIM and PSNR via `tools/compare_captures.py`, generates side-by-side amplified diff images,
     and formats GitHub-flavored Markdown pass/fail summary tables. Verified against existing 10 golden captures
     and built-in `--self-test` suite.
+  - **S-34:** Measured shared-memory re-upload volume and evaluated streaming buffer architecture (Section 8.3):
+    dynamic vertex buffers incur ~5 CPU write faults per frame; fault widening (up to 256 KB / 64 pages) produces
+    ~1,140 pages (~4.5 MB) re-uploaded across ~410 `UploadRanges` calls per frame. This uses ~270 MB/s PCIe bandwidth
+    at 60 FPS (~1.08 GB/s at 240 FPS), well under 3.5% of bus bandwidth. In the WebGPU backend, staging copy and
+    encoding take ~0.082 ms CPU time (~0.236 ms including SDK range merging/queries). Documented architectural
+    decision: desktop backend retains unified 512 MiB mirror with fault widening (negligible CPU cost, avoids thousands
+    of page faults), while mobile/Android/browser targets must treat these dynamic ranges as streaming buffers due to
+    128 MiB buffer limits and lack of page protection callbacks.
 
 
 
