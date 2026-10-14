@@ -50,11 +50,11 @@ bool WebGpuSharedMemory::Initialize() {
         [failed](wgpu::PopErrorScopeStatus status, wgpu::ErrorType type, wgpu::StringView message) {
           if (status != wgpu::PopErrorScopeStatus::Success || type != wgpu::ErrorType::NoError) {
             *failed = true;
-            REXGPU_ERROR("WebGPU shared-memory allocation failed: {}",
-                         message.data ? std::string(message.data, message.length == WGPU_STRLEN
-                                                                    ? std::char_traits<char>::length(message.data)
-                                                                    : message.length)
-                                      : std::string{});
+            const std::string text =
+                !message.data ? std::string{} :
+                message.length == WGPU_STRLEN ? std::string(message.data) :
+                                               std::string(message.data, message.length);
+            REXGPU_ERROR("WebGPU shared-memory allocation failed: {}", text);
           }
         });
     if (instance_.WaitAny(future, UINT64_MAX) != wgpu::WaitStatus::Success) {

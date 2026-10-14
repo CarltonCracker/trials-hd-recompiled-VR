@@ -59,7 +59,7 @@ std::string WgslShaderTranslator::ProcessVectorAluOperation(const ParsedAluInstr
       return;
     }
     std::string variable = fmt::format("xe_v{}{}", name, id);
-    Line(fmt::format("let {} = {};", variable, operand));
+    Line(fmt::format("let {} = xe_flush_denormal4({});", variable, operand));
     operand = variable;
   };
   bind(a, 'a');
@@ -167,11 +167,11 @@ std::string WgslShaderTranslator::ProcessScalarAluOperation(const ParsedAluInstr
   }
   uint32_t id = unique_id_++;
   if (!a.empty()) {
-    Line(fmt::format("let xe_sa{} = {};", id, a));
+    Line(fmt::format("let xe_sa{} = xe_flush_denormal({});", id, a));
     a = fmt::format("xe_sa{}", id);
   }
   if (!b.empty()) {
-    Line(fmt::format("let xe_sb{} = {};", id, b));
+    Line(fmt::format("let xe_sb{} = xe_flush_denormal({});", id, b));
     b = fmt::format("xe_sb{}", id);
   }
 
@@ -190,8 +190,8 @@ std::string WgslShaderTranslator::ProcessScalarAluOperation(const ParsedAluInstr
       return "xe_mul(" + a + ", xe_ps)";
     case Op::kMulsPrev2:
       return fmt::format(
-          "select(xe_mul({0}, xe_ps), -xe_flt_max, xe_ps == -xe_flt_max || xe_is_inf(xe_ps) || "
-          "xe_ps != xe_ps || xe_is_inf({1}) || {1} != {1} || {1} <= 0.0)",
+          "select(xe_mul({0}, xe_ps), -xe_flt_max, xe_ps == -xe_flt_max || "
+          "!xe_is_finite(xe_ps) || !xe_is_finite({1}) || {1} <= 0.0)",
           a, b);
     case Op::kMaxs:
       return "xe_max(" + a + ", " + b + ")";
@@ -214,21 +214,21 @@ std::string WgslShaderTranslator::ProcessScalarAluOperation(const ParsedAluInstr
     case Op::kExp:
       return "exp2(" + a + ")";
     case Op::kLogc:
-      return "xe_clamp_inf_to_max(log2(" + a + "))";
+      return "xe_clamp_inf_to_max(xe_log2(" + a + "))";
     case Op::kLog:
-      return "log2(" + a + ")";
+      return "xe_log2(" + a + ")";
     case Op::kRcpc:
-      return "xe_clamp_inf_to_max(1.0 / " + a + ")";
+      return "xe_clamp_inf_to_max(xe_rcp(" + a + "))";
     case Op::kRcpf:
-      return "xe_clamp_inf_to_zero(1.0 / " + a + ")";
+      return "xe_clamp_inf_to_zero(xe_rcp(" + a + "))";
     case Op::kRcp:
-      return "1.0 / " + a;
+      return "xe_rcp(" + a + ")";
     case Op::kRsqc:
-      return "xe_clamp_inf_to_max(1.0 / sqrt(" + a + "))";
+      return "xe_clamp_inf_to_max(xe_rsq(" + a + "))";
     case Op::kRsqf:
-      return "xe_clamp_inf_to_zero(1.0 / sqrt(" + a + "))";
+      return "xe_clamp_inf_to_zero(xe_rsq(" + a + "))";
     case Op::kRsq:
-      return "1.0 / sqrt(" + a + ")";
+      return "xe_rsq(" + a + ")";
     case Op::kMaxAs:
       Line(fmt::format("xe_a0 = xe_address({}, true);", a));
       return "xe_max(" + a + ", " + b + ")";

@@ -1789,7 +1789,7 @@ debugging. Several can run in parallel once L-01 to L-03 exist.
 | L-02 | done 2026-10-14 c2c132d | **M1 skeleton.** `WebGpuGraphicsSystem`, `WebGpuProvider`, `WebGpuPresenter` (clear color, letterbox, headless offscreen mode, `CaptureGuestOutput`), `WebGpuImmediateDrawer`, a `WebGpuCommandProcessor` that accepts all packets and draws nothing. The game boots and the settings menu works. | L-01, S-16, S-21 | `src/ui/vulkan/vulkan_presenter.cpp`, `include/rex/ui/presenter.h`, `src/graphics/graphics_system.cpp` | headless menu navigation completes with `--gpu_plugin=webgpu` |
 | L-03 | done 2026-10-14 df64e32 | **Front-end split.** `DrawSnapshot` / `ResolveSnapshot` / `SwapSnapshot` built from the register file in `IssueDraw`/`IssueCopy`/`IssueSwap`, independent of WebGPU, so the D3D front-end (L-17) can fill the same structs. | L-01 | 7.4, `command_processor.h` | snapshots logged for a frame; S-26 possible |
 | L-04a | done 2026-10-14 d24de8c | **WGSL translator: control flow.** `WgslShaderTranslator : ShaderTranslator`; `loop { switch (pc) }` state machine; `exec`/`jmp`/`call`/`loop` with constant-driven loop counters; predicates; bool constants; `a0` dynamic register indexing. | L-01 | 8.4, `translator.h/.cpp`, `spirv_translator.cpp` | all 74 shaders emit structurally valid WGSL (Tint) with ALU stubbed |
-| L-04b | claimed pi-gpt 2026-10-14 | **ALU.** Vector and scalar pipes, all opcodes used by Trials (section 5.6) and the rest of Xenos, saturation, Xenos float rules (`mul` with zero, `rsq(0)`, `max`/`min` NaN behavior), `kill*`, `setp_*`, `cube`. | L-04a | `spirv_translator_alu.cpp`, `dxbc_translator_alu.cpp`, `interpreter.cpp` | differential tests vs the SDK interpreter pass for every ALU opcode |
+| L-04b | done pi-gpt 2026-10-14 (commit follows) | **ALU.** Vector and scalar pipes, all opcodes used by Trials (section 5.6) and the rest of Xenos, saturation, Xenos float rules (`mul` with zero, `rsq(0)`, `max`/`min` NaN behavior), `kill*`, `setp_*`, `cube`. | L-04a | `spirv_translator_alu.cpp`, `dxbc_translator_alu.cpp`, `interpreter.cpp` | differential tests vs the SDK interpreter pass for every ALU opcode |
 | L-04c | todo | **Vertex fetch via vertex pulling.** Fetch constants, strides, offsets, all formats of section 5.6 plus the remaining Xenos vertex formats, endianness, index source (direct vs converted primitive). | L-04a, S-18 | `spirv_translator_fetch.cpp` | VS outputs match the interpreter on recorded vertex data |
 | L-04d | done 2026-10-14 1d3409f | **Texture fetch.** `tfetch2D`/`Cube`, LOD modes (`setTexLOD`, register LOD, computed), exp adjust (word 3), signedness, integer number format, swizzle, gradients, vertex-stage fetch; resolve-alias textures with different host formats. | L-04a, S-23 | `spirv_translator_fetch.cpp`, SDK patch fixes (5.7) | textured menus match the Vulkan captures |
 | L-04e | todo | **Outputs.** Position transform (viewport, half-pixel offset, `PA_CL_VTE_CNTL`), interpolators, point coordinate, facing, up to 4 color outputs with format conversions and exponent bias, alpha test, depth conventions (reverse-Z, float24). | L-04a | `spirv_translator_rb.cpp` (host-RT parts), `draw_util` | geometry silhouettes match (M3) |
@@ -2007,3 +2007,20 @@ finding: `YYYY-MM-DD <agent> <task ID>: what changed; evidence; what is left`.
   One shared translator change is required: `StoreResult` calls `xe_saturate`
   instead of WGSL `saturate`, to guarantee NaN → +0 like the SDK interpreter.
   Entry points and other output logic are untouched.
+- 2026-10-14 pi-gpt L-04b complete: standalone synthetic tests pass on RTX 2070
+  SUPER and RX 6600: all **80 defined ALU opcodes**, clamped/unclamped with 128
+  inputs per variant, operand modifiers/swizzles, seeded previous scalar,
+  predicate and address-register probes, 84 IEEE/state edge cases and 27 actual
+  pixel-stage kill/discard tests. Zero Dawn errors. The current 74 cached shaders
+  also translate and pass Tint → SPIR-V validation (local output only). Fixed
+  denormal input flushing, interpreter-order dot accumulation, zero/domain
+  reciprocal/rsqrt/log results, signed-zero infinity clamps, saturation NaNs,
+  ordered min/max NaNs and nonfinite previous-scalar/address handling. NVIDIA
+  folds float-select min/max into native min/max with different NaN behavior;
+  integer-bit selection plus explicit ordered checks prevents that.
+  Commands: standalone `tests/gpu_webgpu` build, `alu_test 0` / `alu_test 1`,
+  `shared_memory_test 0` / `shared_memory_test 1`, then `xenos2wgsl` and
+  `tools/xenos2wgsl/validate.sh` on the local cache. Tests contain authored
+  microcode only; no captures, game shaders or cache records are committed.
+  L-06's cache-clear recheck passes on both GPUs; real-frame CPU profiling is
+  next, so its <0.3 ms/frame acceptance remains open. Metal remains unverified.
