@@ -40,6 +40,7 @@ set(REXGPU_WEBGPU_SDK_SOURCES
 set(REXGPU_WEBGPU_WGSL
     shaders/guest_output.wgsl
     shaders/immediate.wgsl
+    wgsl/wgsl_prelude.wgsl
 )
 set(_wgsl_headers)
 foreach(_wgsl IN LISTS REXGPU_WEBGPU_WGSL)
@@ -55,8 +56,16 @@ foreach(_wgsl IN LISTS REXGPU_WEBGPU_WGSL)
     list(APPEND _wgsl_headers ${_header})
 endforeach()
 
+# Xenos microcode -> WGSL (also built into tools/xenos2wgsl).
+set(REXGPU_WEBGPU_TRANSLATOR_SOURCES
+    wgsl/wgsl_alu.cpp
+    wgsl/wgsl_fetch.cpp
+    wgsl/wgsl_shader_translator.cpp
+)
+
 add_library(rexgpu-webgpu SHARED
     ${REXGPU_WEBGPU_SDK_SOURCES}
+    ${REXGPU_WEBGPU_TRANSLATOR_SOURCES}
     ${_wgsl_headers}
     plugin_main.cpp
     webgpu_backend.cpp
@@ -127,3 +136,23 @@ target_link_libraries(rexgpu-webgpu PRIVATE
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_options(rexgpu-webgpu PRIVATE -Wl,--exclude-libs,ALL)
 endif()
+
+# Offline translator check: tools/xenos2wgsl (see its main.cpp).
+add_executable(xenos2wgsl
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/xenos2wgsl/main.cpp
+    ${REXGPU_WEBGPU_TRANSLATOR_SOURCES}
+    ${_wgsl_headers}
+    ${_sdk_graphics}/pipeline/shader/shader.cpp
+    ${_sdk_graphics}/format/ucode.cpp
+    ${_sdk_graphics}/pipeline/shader/translator.cpp
+    ${_sdk_graphics}/pipeline/shader/translator_disasm.cpp
+    ${_sdk_graphics}/registers.cpp
+    ${_sdk_graphics}/flags.cpp
+)
+target_include_directories(xenos2wgsl PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_BINARY_DIR}
+    ${REXGLUE_ROOT}/thirdparty/renderdoc
+)
+target_compile_options(xenos2wgsl PRIVATE -fno-strict-aliasing -ffp-model=strict -fno-char8_t)
+target_link_libraries(xenos2wgsl PRIVATE rexruntime xxHash::xxhash)
