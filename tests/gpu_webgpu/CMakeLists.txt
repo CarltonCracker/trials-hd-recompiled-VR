@@ -148,6 +148,25 @@ target_compile_options(index_swap_test PRIVATE -fno-strict-aliasing -ffp-model=s
 target_link_libraries(index_swap_test PRIVATE
     ${_runtime} ${_spdlog} ${_fmt} dawn::webgpu_dawn Threads::Threads)
 
+add_executable(texture_load_test
+    texture_load_test.cpp
+    ${REXSDK_DIR}/src/graphics/pipeline/texture/util.cpp
+    ${REXSDK_DIR}/src/graphics/xenos.cpp
+    ${REXSDK_DIR}/src/graphics/registers.cpp
+    ${REXSDK_DIR}/src/graphics/flags.cpp)
+target_include_directories(texture_load_test PRIVATE
+    ${_repo}/src/gpu_webgpu
+    ${REXSDK_DIR}/include ${REXSDK_BUILD_DIR}/include
+    ${REXSDK_DIR}/thirdparty/renderdoc
+    ${REXSDK_DIR}/thirdparty/simde
+    ${REXSDK_DIR}/thirdparty/fmt/include ${REXSDK_DIR}/thirdparty/spdlog/include)
+target_compile_definitions(texture_load_test PRIVATE
+    SPDLOG_COMPILED_LIB SPDLOG_FMT_EXTERNAL
+    SHADER_DIR="${_repo}/src/gpu_webgpu/shaders")
+target_compile_options(texture_load_test PRIVATE -fno-strict-aliasing -ffp-model=strict -fno-char8_t)
+target_link_libraries(texture_load_test PRIVATE
+    ${_runtime} ${_spdlog} ${_fmt} dawn::webgpu_dawn Threads::Threads)
+
 if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/vertex_fetch_test.cpp")
   # Reuse the interpreter/translator compilation and flags, without the ALU test main.
   get_target_property(_fetch_sources alu_test SOURCES)
@@ -172,5 +191,6 @@ add_test(NAME pipeline_state COMMAND pipeline_state_test)
 add_test(NAME wgsl_prelude COMMAND wgsl_prelude_test)
 add_test(NAME gamma COMMAND gamma_test)
 add_test(NAME index_swap COMMAND index_swap_test)
+add_test(NAME texture_load COMMAND texture_load_test)
 
 
