@@ -565,9 +565,10 @@ attaches; `/proc` per-thread CPU):
 2. **Dawn's own CPU cost is the biggest unknown.** Dawn validates each command, then
    translates the whole command buffer to Vulkan inside `Queue::Submit`. Budget about
    1 µs per draw and measure it in M0 with a synthetic 1,500-draw frame. Levers: Dawn's
-   `skip_validation` toggle in release builds (**unverified name at the pin**), fewer
-   `SetBindGroup` calls (dynamic offsets), and submitting from a second thread so
-   encoding (CP thread) and Vulkan translation (submit thread) overlap.
+   `skip_validation` toggle in release builds (name confirmed at the pin, 7.6.1) and
+   fewer `SetBindGroup` calls (dynamic offsets). A second thread that only calls
+   `Submit` does **not** overlap with encoding in Dawn native (7.6.4). The pipelining
+   option that remains is a front-end/back-end thread split (7.6.4, item 4).
 3. Skip the ~190 dummy point draws per frame (13% of all draws).
 4. **The D3D front-end (7.2) is probably needed for 240.** It removes the 1.4 ms of PM4
    register decoding and lets the game skip building packets, which is part of the
@@ -598,6 +599,325 @@ VRR display. The existing `present_fps_limit` / FPS unlock path paces frames.
 **Measurement plan:** M0 synthetic draw benchmark (Dawn overhead); M7 acceptance at 1440p
 uncapped on the RX 6600 with `--log_guest_fps=true`, per-thread CPU from
 `/proc/<pid>/task/*/stat`, and WebGPU timestamp queries per pass.
+
+### 7.6 Integration design (task L-01, 2026-10-14)
+
+Decisions that S-12, S-16, L-02, L-03, L-04a, L-06, L-07 and L-11 build on. Each item
+says how it was checked. Where this section and older text disagree, this section wins
+(the older text has been updated to match).
+
+#### 7.6.1 Dawn pin
+
+- **Pin: `088a8d00efd1c70b58c549d355401d115904b648`** (head of `chromium/8104`,
+  committed 2026-10-09). Dawn cuts a `chromium/NNNN` branch from `main` almost daily
+  (8096–8104 all point at this commit), so pin the **hash**, not the branch name. The
+  earlier attempt's `901f57556` is no longer on any branch head.
+- Checked at the pin (`git show 088a8d0:<file>`, blob-less fetch in a scratch folder):
+  - CMake options exist with the names used in 10.2: `DAWN_FETCH_DEPENDENCIES`,
+    `DAWN_ENABLE_INSTALL`, `DAWN_BUILD_SAMPLES`, `DAWN_BUILD_TESTS`,
+    `DAWN_ENABLE_{D3D11,D3D12,METAL,NULL,DESKTOP_GL,OPENGLES,VULKAN}`,
+    `DAWN_USE_{X11,WAYLAND}`, `TINT_BUILD_{SPV_READER,CMD_TOOLS,TESTS}`.
+    `DAWN_BUILD_MONOLITHIC_LIBRARY` defaults to `STATIC` (the `webgpu_dawn` target).
+    Dawn needs CMake ≥ 3.22.
+  - Features (`src/dawn/dawn.json`): `implicit device synchronization`,
+    `texture formats tier1`/`tier2`, `depth32 float stencil8`, `texture compression BC`,
+    `timestamp query`, `depth clip control`, `float32 filterable`,
+    `RG11B10 ufloat renderable`, `unorm16 texture formats`, `texture component swizzle`,
+    `clip distances`, `dual source blending`, `shader f16`.
+  - Instance features: `timed wait any`, `shader source SPIRV`. Structs:
+    `DawnTogglesDescriptor`, `DawnCacheDeviceDescriptor` (isolation key plus load/store
+    callbacks), `SurfaceSourceXlibWindow`, `SurfaceSourceWaylandSurface`,
+    `SurfaceSourceMetalLayer`.
+  - Toggles (`src/dawn/native/Toggles.cpp`): `skip_validation`, `disable_robustness`,
+    `lazy_clear_resource_on_first_use`, `use_user_defined_labels_in_backend`,
+    `dump_shaders`, `allow_unsafe_apis`, `vulkan_use_d32s8`.
+  - **Immediates are core at this pin** (limit `maxImmediateSize`,
+    `RenderPassEncoder::SetImmediates`), not an experimental feature. Still optional for
+    us (8.12).
+- **New build requirement:** the plugin is a shared library that links Dawn statically,
+  so Dawn must be built with `-DCMAKE_POSITION_INDEPENDENT_CODE=ON`. The earlier
+  attempt linked Dawn into the executable and never needed it.
+
+#### 7.6.2 Which SDK sources the plugin compiles
+
+**Exactly `REXGPU_XENOS_SOURCES` minus `plugin_main.cpp`, the SPIR-V translator and the
+Vulkan backend.** That is the 18 files in 10.3. The stateless Xenos format layer
+(`xenos.cpp`, `pipeline/texture/{info,info_formats,extent,util,conversion}.cpp`) is
+already in `rexcore`, so it comes in through `rexruntime`. Do not compile it again.
+
+Checked with a link experiment, `probe/link_stub.sh` (stub source in
+`probe/link_stub_plugin.cpp`; rerun it after SDK updates). A stub `GraphicsSystem` plus `CommandProcessor`
+(`IssueDraw`/`IssueCopy`/`IssueSwap` returning at once) was linked against the 18
+object files from the existing `rexgpu-xenos` build, plus `librexruntimerd.so`,
+xxHash, spdlog, fmt and SDL3, with `-Wl,--no-undefined`. It links with no undefined
+symbols. Leaving out `shared_memory.cpp`, `pipeline/render_target/cache.cpp` and
+`pipeline/texture/cache.cpp` fails on one symbol,
+`SharedMemory::RequestRange`, called by `PrimitiveProcessor` (see 7.6.3). Keep all 18
+anyway, for three reasons:
+
+- The app reads cvars defined in them by name: `draw_resolution_scale_x/y` (from
+  `pipeline/texture/cache.cpp`) and `vsync`/`readback_*` (from `command_processor.cpp`).
+- `PrimitiveProcessor` needs `SharedMemory`.
+- It mirrors what `rexgpu-xenos` compiles, so both plugins see the same SDK.
+
+The app also sets `present_fps_limit`, `present_fps_limit_guest_paced` and
+`vulkan_allow_present_mode_{immediate,mailbox}`. Those are defined in the Vulkan
+backend files, which this plugin does not compile. **`rexgpu-webgpu` must define
+`present_fps_limit` and `present_fps_limit_guest_paced` under the same names**, because
+the FPS unlock depends on them (`src/trials_hd_app.h`). The present-mode cvars get
+WebGPU names, and `src/graphics_settings.cpp` sets whichever exist (S-29).
+
+**Duplicate state: one GPU plugin per process.** The plugin has hidden visibility, so
+its copies of the SDK classes are private, the same as `rexgpu-xenos`. Cvars are the
+exception, read from code in `include/rex/cvar.h` and `src/core/cvar.cpp`:
+
+- `REXCVAR_GET` reads storage local to the plugin.
+- A second registration of the same name is rejected ("duplicate registration … second
+  registration ignored").
+- Pending command-line and config values are replayed only to the first registrant.
+
+If both plugins were ever loaded into one process, the second one would run all
+shared cvars (`draw_resolution_scale_*`, `vsync`, `readback_resolve`, …) at their
+defaults. Plugins are never unloaded (`gpu_plugin_loader.cpp`). Consequences:
+
+- **The automatic fallback (S-30) must not load `rexgpu-xenos` after `rexgpu-webgpu`
+  in the same process.** Instead, re-exec the executable with `--gpu_plugin=xenos`
+  (guard against loops with an environment variable), or save `renderer = vulkan` and
+  ask for a restart.
+- The plugin links `rexruntime`, `xxHash::xxhash` and `dawn::webgpu_dawn` only, never
+  the `rexcore`/`rexui` OBJECT libraries. That is the same rule as the SDK.
+
+#### 7.6.3 Guest memory: reuse `SharedMemory` on desktop (changes 8.3)
+
+The `PrimitiveProcessor` base takes a `SharedMemory&` and calls `RequestRange` for
+guest index buffers (`primitive_processor.h:199`, `primitive_processor.cpp:914`).
+`TextureCache`'s base is built on it too. The `SharedMemory` base already provides
+page-fault invalidation, watches, valid-page bitmaps and the L-23 allocation-free
+`RequestRanges`. Only `UploadRanges` is pure virtual.
+
+Decision for L-06 and L-11: **`WebGpuSharedMemory : SharedMemory` mirrors the 512 MiB
+in one `wgpu::Buffer`** (`Storage | Index | CopyDst | CopySrc`). `UploadRanges` copies
+pages with `Queue::WriteBuffer`, batched per request. This needs the adapter to allow
+`maxBufferSize` and `maxStorageBufferBindingSize` ≥ 512 MiB. S-14 records the RX 6600
+and RTX 2070 values. If a desktop adapter reports less, bind a 128 MiB window with a
+dynamic offset (7.6.5).
+
+The per-range design of 8.3 stays the plan for Android and browsers (section 13), where
+these limits are small. L-06's CPU budget (< 0.3 ms per frame) still applies.
+
+#### 7.6.4 Device threading
+
+Read from Dawn at the pin:
+
+- With `ImplicitDeviceSynchronization`, the generated entry points take the device
+  mutex on **every** call, including `RenderPassEncoder::Draw`, `SetBindGroup`, and
+  `Queue::Submit` for the whole translation (`generator/templates/dawn/native/ProcTable.cpp`
+  and the `no autolock` flags in `dawn.json`).
+- Without the feature, `DeviceBase::mMutex` is null and the guards cost nothing
+  (`src/dawn/native/Device.cpp:444`).
+- Dawn's own documentation for the feature calls it "quite heavy-handed" and warns of
+  possible re-entrancy deadlocks.
+
+Decision:
+
+1. **Create the device without implicit synchronization.** Dawn is used single-threaded.
+   All calls are serialized by our own `WebGpuProvider::device_mutex()`, taken once per
+   unit of work, not per call:
+   - The command-processor thread takes it per backend entry (`Draw`, `Resolve`, `Swap`,
+     memexport, `ProcessEvents`). That is about 1,500 uncontended lock/unlock pairs per
+     frame, roughly 30 µs.
+   - The UI thread takes it for one whole `PaintFromUIThread`.
+   - `CaptureGuestOutput` takes it while copying the guest output to a readback buffer.
+2. **Callbacks:** `CallbackMode::AllowProcessEvents` or `WaitAnyOnly`, never
+   `AllowSpontaneous`. Exceptions: the device-lost, uncaptured-error and logging
+   callbacks, which only log or set flags. The CP thread calls
+   `Instance::ProcessEvents` under the lock once per swap. No WebGPU call is made from
+   inside a callback.
+3. **Guest threads never call WebGPU.** That is unchanged from 8.2.
+4. **"Threaded submission" in 7.5 is dropped as stated.** A second thread calling
+   `Submit` cannot overlap the CP thread's encoding in Dawn native: both need the device,
+   with or without the feature. The pipelining lever that remains is a **front-end /
+   back-end split**:
+   - The CP thread decodes PM4 and builds self-contained snapshots, copying guest
+     vertex, index and constant bytes into pre-mapped staging memory.
+   - A render thread does all WebGPU encoding and `Submit`.
+
+   This is an M7 option, needed only if the per-thread budget of 7.5 is missed. The
+   snapshot rules in 7.6.6 keep it possible.
+5. S-15 measures Dawn's cost per draw with this setup (validation on and off with
+   `skip_validation`). It also measures how much the mutex would cost for comparison,
+   so the decision can be revisited with numbers.
+
+#### 7.6.5 Binding model (bind-group layouts)
+
+Four groups, the WebGPU default `maxBindGroups`. Every pipeline uses an explicit
+`PipelineLayout` built from these layouts, never `layout: auto`. Groups 0 and 1 are
+the same objects for every render pipeline. Only group 2 varies.
+
+| Group | Binding | Visibility | Type | Contents | Bound size |
+| --- | --- | --- | --- | --- | ---: |
+| 0 | 0 | VS, FS | uniform, dynamic offset | `XeSystemConstants`: flags, NDC scale/offset (guest viewport transform plus half-pixel offset), alpha-test function and reference, color exponent biases ×4, RT format conversion flags, point size, vertex-index endian and base | 256 B |
+| 0 | 1 | VS | uniform, dynamic offset | VS float constants, **packed** per `Shader::ConstantRegisterMap` (`GetPackedFloatConstantIndex`); all 256 when `float_dynamic_addressing` | 4 KiB window |
+| 0 | 2 | FS | uniform, dynamic offset | PS float constants, packed the same way | 4 KiB window |
+| 0 | 3 | VS, FS | uniform, dynamic offset | bool constants (`0x4900–0x4907`) and loop constants (`0x4908–0x4927`), 40 u32 | 256 B |
+| 0 | 4 | VS, FS | uniform, dynamic offset | fetch constants `0x4800–0x48BF` (32 × 6 u32; texture and vertex fetch share them) | 768 B |
+| 1 | 0 | VS | storage, read-only | `WebGpuSharedMemory` buffer as `array<u32>`: vertex pulling, plus guest indices if a converted draw ever reads them in the VS | 512 MiB (or 128 MiB window with dynamic offset) |
+| 2 | 0..T−1 | VS, FS | texture | the shader pair's texture bindings in `Shader::texture_bindings()` order, `2d` or `cube`, sample type per host format | — |
+| 2 | 16..16+S−1 | VS, FS | sampler | the pair's sampler bindings as the WGSL translator records them (like `SpirvShader::GetSamplerBindingsAfterTranslation()`) | — |
+| 3 | — | — | — | unused for render pipelines | — |
+
+- **Group 0** is one bind group per frame over a single uniform ring buffer. Each draw
+  calls `SetBindGroup(0, bg, 5 offsets)`. Offsets are 256-byte aligned
+  (`minUniformBufferOffsetAlignment`). A block is rewritten only when it is dirty:
+  - the producer's dirty bits (7.6.6), and
+  - for the float constants, whether the bound shader reads the dirty registers (as in
+    `VulkanCommandProcessor::WriteRegister` with `current_float_constant_map_*`).
+  
+  The WGSL declares exactly the packed size (`array<vec4f, N>`). The binding window is
+  4 KiB, so the ring keeps 4 KiB of slack at its end. Uploads go through one
+  `Queue::WriteBuffer` per frame segment from a CPU-side staging array, not one call
+  per draw. Limits used: 5 dynamic uniform buffers (default limit 8), 5 uniform buffers
+  per stage (default 12).
+- **Group 1** is bound once per render pass. Compute pipelines (memexport, L-04g) use
+  their own layout, where binding 0 is `read_write` storage. Usage-scope rules allow
+  that because memexport runs in compute passes, not inside a render pass.
+- **Group 2** layouts are cached by signature: the list of (view dimension, sample type)
+  plus the list of sampler types (filtering or non-filtering). Bind groups are cached by
+  (layout, texture views, samplers) and dropped when a texture-cache entry or sampler
+  they reference is destroyed.
+
+  Sample type is part of the layout, and so is part of the **shader modification key**
+  (L-04d/L-07): `float` for unorm, BC and float formats; `unfilterable-float` for
+  `r32float` depth when `float32-filterable` is missing; `sint` if `k_16_16` integer
+  textures stay `rg16sint` (L-09 decides).
+
+  Trials needs at most 8 textures (`tf16` is the highest slot), within the default
+  limit of 16 per stage.
+- **Index buffers** are not in a bind group. `SetIndexBuffer` takes `PrimitiveProcessor`'s
+  result: the converted ring for byte-swapped, fan or quad indices, or the shared-memory
+  buffer at the guest offset when the endianness is already host order.
+- **Steady-state calls per draw:**
+  - always: `SetBindGroup(0)` and `Draw`/`DrawIndexed`
+  - on change: `SetPipeline`, `SetBindGroup(2)`, `SetIndexBuffer`, viewport, scissor,
+    stencil reference, blend constant
+
+  About 3–5 calls per draw.
+- **Immediates:** not used. If S-15 shows `SetBindGroup(0)` with 5 offsets to be
+  costly, `SetImmediates` carrying ring offsets is the measured alternative.
+
+#### 7.6.6 Front-end/back-end interface: `DrawSnapshot`, `ResolveSnapshot`, `SwapSnapshot`
+
+The backend sees guest GPU state **only** through these structs (in
+`src/gpu_webgpu/draw_snapshot.h`). It never reaches into `CommandProcessor` members.
+That way the D3D front-end (L-17) is a different producer of the same structs.
+
+The snapshots carry a `RegisterFile` rather than a decoded state struct because the
+SDK helpers the backend reuses take one: `draw_util::GetHostViewportInfo`, `GetScissor`,
+`GetNormalizedDepthControl`, `GetResolveInfo`, `PrimitiveProcessor::Process` and
+`DrawExtentEstimator`. The D3D device keeps a register shadow (section 6), so the D3D
+front-end fills a `RegisterFile` of its own (0x5003 dwords, about 80 KiB, one instance)
+from that shadow.
+
+```cpp
+namespace rex::gpu_webgpu {
+
+// A set bit may be a false positive. A clear bit must be exact. Set all bits when unsure.
+enum DrawDirty : uint32_t {
+  kDirtyVsFloatConstants = 1u << 0,  // 0x4000–0x43FF
+  kDirtyPsFloatConstants = 1u << 1,  // 0x4400–0x47FF
+  kDirtyFetchConstants   = 1u << 2,  // 0x4800–0x48BF
+  kDirtyBoolLoopConstants = 1u << 3, // 0x4900–0x4927
+  kDirtyRenderTargets    = 1u << 4,  // RB_SURFACE_INFO, RB_COLOR*_INFO, RB_DEPTH_INFO, RB_MODECONTROL
+  kDirtyPipelineState    = 1u << 5,  // blend, depth/stencil, PA_SU_SC_MODE_CNTL, color mask
+  kDirtyViewportScissor  = 1u << 6,  // PA_CL_VPORT_*, PA_CL_VTE_CNTL, PA_SC_*_SCISSOR_*, window offset
+  kDirtyShaders          = 1u << 7,
+  kDirtyAll              = ~0u,
+};
+
+struct GuestIndexBuffer {          // POD copy of CommandProcessor::IndexBufferInfo (protected there)
+  xenos::IndexFormat format;
+  xenos::Endian endianness;
+  uint32_t count;
+  uint32_t guest_base;             // physical address
+  uint32_t length_bytes;
+};
+
+struct DrawSnapshot {
+  const graphics::RegisterFile* regs;  // full register state at the draw; read-only
+  xenos::PrimitiveType primitive_type;
+  uint32_t index_count;                // VGT_DRAW_INITIATOR num_indices
+  bool indexed;                        // false: auto-indexed (index_buffer unused)
+  bool major_mode_explicit;
+  GuestIndexBuffer index_buffer;
+  graphics::Shader* vertex_shader;     // never null; from the backend's shader cache
+  graphics::Shader* pixel_shader;      // null: no pixel shader
+  uint32_t dirty;                      // DrawDirty bits since the previous DrawSnapshot
+  uint32_t frame_index;                // swaps since start (debug labels, S-26 dumps)
+  uint32_t draw_index;                 // within the frame
+};
+
+struct ResolveSnapshot {
+  const graphics::RegisterFile* regs;  // RB_COPY_*, RB_SURFACE_INFO, RB_*_INFO, RB_*_CLEAR*
+  graphics::draw_util::ResolveInfo info;  // filled by the producer with draw_util::GetResolveInfo
+  uint32_t frame_index;
+  uint32_t resolve_index;              // within the frame
+};
+
+struct SwapSnapshot {
+  uint32_t frontbuffer_ptr;            // as in CommandProcessor::IssueSwap
+  uint32_t frontbuffer_width;
+  uint32_t frontbuffer_height;
+  uint32_t frame_index;
+  // The gamma ramp is read through the CP's existing OnGammaRamp*Written hooks, not here.
+};
+
+class WebGpuBackend {                  // consumer; one instance, owned by the CP
+ public:
+  bool Draw(const DrawSnapshot& draw);           // false: the draw was dropped (logged)
+  bool Resolve(const ResolveSnapshot& resolve);
+  void Swap(const SwapSnapshot& swap);
+};
+
+}  // namespace rex::gpu_webgpu
+```
+
+Rules:
+
+1. **Lifetime.** A snapshot and everything it points to are valid only during the call.
+   The backend copies whatever it keeps. Phase 1 (M1–M7) calls the backend inline on the
+   CP thread from `IssueDraw`/`IssueCopy`/`IssueSwap`.
+2. **Shaders.** The producer gets `Shader*` from the backend's shader cache (the CP's
+   `LoadShader` override for PM4; the same cache, keyed by ucode address and hash, for
+   the D3D front-end). Translation and modification keys stay in the backend.
+3. **Dirty bits on the PM4 path.** `WebGpuCommandProcessor` overrides
+   `WriteRegister`, `WriteRegistersFromMem` and `WriteRegisterRangeFromRing` (all
+   virtual; L-23 kept the range path) to OR register-range bits into a pending mask. The
+   mask is handed over and cleared at each draw. No SDK change is needed.
+4. **Phase 2 (only if M7 needs the render thread of 7.6.4).** `regs` becomes a compact
+   copy of the context registers the backend reads. The backend records which ones
+   through its own accessor, so the list is generated, not guessed. Packed constants and
+   guest vertex and index bytes are copied at snapshot time. Fences and `EVENT_WRITE`s
+   that the guest waits on must then be released only after the render thread has
+   consumed the snapshots before them.
+5. **What the snapshot does not carry:** memexport ranges and occlusion-query state.
+   The backend derives them from `regs` and the shaders (`draw_util::AddMemExportRanges`).
+   The base CP keeps handling queries, fences and interrupts, as in 8.10.
+
+#### 7.6.7 What this unblocks
+
+- **S-12:** build `088a8d00efd1c70b58c549d355401d115904b648` with the options of 10.2
+  plus `-DCMAKE_POSITION_INDEPENDENT_CODE=ON`.
+- **S-16:** the target and sources in 10.3, which are confirmed by the link experiment.
+  - Set `DEBUG_POSTFIX d` and `RELWITHDEBINFO_POSTFIX rd` on the target. The SDK sets
+    `CMAKE_*_POSTFIX` only inside its own directory scope, and the loader expects
+    `librexgpu-webgpu{,d,rd}.so`.
+  - Define the target **before** `rexglue_setup_target(trials_hd GPU_PLUGINS xenos
+    webgpu)`. The helper then adds the build dependency and the post-build copy itself
+    (`cmake/rexglue_helpers.cmake:147`). Add it to `trials_hd_stage_libs` too.
+  - Start from `probe/link_stub_plugin.cpp`: a `GraphicsSystem` whose
+    `CreateProvider` returns a WebGPU provider, and a `CommandProcessor` that accepts
+    everything.
+- **L-02, L-03, L-04a, L-06, L-07, L-11:** use 7.6.3–7.6.6 as their interface contract.
 
 ---
 
@@ -661,17 +981,22 @@ backend switch, or keep it as its own plugin. Until then, do **not** grow
   (section 9). It sets the uncaptured-error and device-lost callbacks (log; on loss,
   `OnHostGpuLossFromAnyThread`). `CreatePresenter` and `CreateImmediateDrawer` return
   the WebGPU versions.
-- **Threads.** The command processor worker records all GPU work (one thread). The
-  presenter paints on the UI thread. Dawn native objects can be used from several
-  threads if the device is created with Dawn's implicit device synchronization feature
-  (**unverified**: check the exact `wgpu::FeatureName` at the pinned Dawn). Without it,
-  hand the presenter's work to the command-processor thread through a queue. Keep
-  every WebGPU call either on the CP thread or under one device lock; guest threads
+- **Threads (decided in 7.6.4).** The command processor worker records all GPU work.
+  The presenter paints on the UI thread. The device is created **without** Dawn's
+  implicit device synchronization, which locks on every call including draws. Instead,
+  every WebGPU call is made under `WebGpuProvider::device_mutex()`, taken once per
+  backend entry on the CP thread and once per paint on the UI thread. Guest threads
   never call WebGPU.
 - Async: use `wgpu::Instance::WaitAny` / `ProcessEvents` for `MapAsync`,
   `OnSubmittedWorkDone` and async pipeline creation (Dawn native supports timed waits).
 
 ### 8.3 Guest memory mirror (replaces `SharedMemory`)
+
+> **Superseded for Linux and macOS by 7.6.3:** the desktop backend subclasses the SDK's
+> `SharedMemory`. `PrimitiveProcessor` and `TextureCache` depend on it, and it already
+> does fault-based invalidation. It keeps one 512 MiB buffer. The per-range design below
+> remains the plan for Android and browsers, and the streaming-range idea (S-34) applies
+> to both.
 
 The Vulkan backend mirrors all 512 MB of physical memory in one GPU buffer and binds it
 as a storage buffer in every shader. WebGPU's default `maxStorageBufferBindingSize` is
@@ -706,13 +1031,13 @@ translator is closer: it already runs without geometry shaders, using VS expansi
 Output shape (one WGSL module per shader *and* modification key):
 
 ```wgsl
-// group(0): per-frame system uniforms (viewport transform, half-pixel offset, flags,
-//           alpha-test ref, RT exponent biases, point size, 7e3/float24 modes)
-// group(1): per-draw constant blocks via dynamic offsets
-//           VS float constants (256 vec4), PS float constants (256 vec4),
-//           bool/loop constants, fetch constants (32 × 6 u32)
-// group(2): textures + samplers for the slots this shader uses (≤ 8 in Trials)
-// group(3): read-only storage: vertex streams (u32 arrays, big-endian), for vertex pulling
+// Binding model: section 7.6.5 (authoritative).
+// group(0): 5 dynamic-offset uniforms in one ring: system constants, packed VS float
+//           constants, packed PS float constants, bool/loop constants, fetch constants
+// group(1): read-only storage: the shared-memory buffer as array<u32> (vertex pulling,
+//           big-endian words swapped in the shader)
+// group(2): textures (bindings 0..) and samplers (bindings 16..) this shader pair uses
+// group(3): unused by render pipelines
 struct XeRegs { r: array<vec4f, 32> }   // r0–r31 as needed; dynamic indexing for a0
 @vertex fn main(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -> VsOut {
   var pc: u32 = 0u;                      // Xenos control flow as a state machine
@@ -754,15 +1079,17 @@ only WGSL.
 - **Pipeline key:** VS module, PS module, color formats and write masks, blend state per
   RT, depth/stencil format and state, sample count, cull mode, depth bias, topology,
   strip index format. Keep it a POD struct with a hash.
-- **Bind group layouts** fixed per group (section 8.4) so pipelines can share them; use
-  explicit `PipelineLayout`s, not `layout: auto`.
+- **Bind group layouts** as in 7.6.5: groups 0 and 1 are shared by every render
+  pipeline, and group 2 is cached by texture/sampler signature. Use explicit
+  `PipelineLayout`s, not `layout: auto`.
 - **Async creation:** `CreateRenderPipelineAsync`; until ready, either wait (first frames,
   loading screens) or skip the draw (`async_shader_compilation` cvar, as today).
 - **Persistent caches:**
   - WGSL text cache keyed by shader key (debugging, offline validation).
-  - Dawn's blob cache: provide load/store callbacks at device creation (Dawn's
-    `DawnCacheDeviceDescriptor`, **unverified name at the pinned version**) backed by
-    files under `cache/webgpu/`; this caches driver-compiled pipelines.
+  - Dawn's blob cache: provide load/store callbacks at device creation
+    (`DawnCacheDeviceDescriptor`: isolation key plus load/store callback infos,
+    confirmed at the pin in 7.6.1) backed by files under `cache/webgpu/`. This caches
+    driver-compiled pipelines.
   - A pipeline list (`5841095A.webgpu.pso`) recorded at runtime and pre-created at
     startup, like the Vulkan `.xpso` file.
 - WGSL never includes game data at build time; everything is generated on the player's
@@ -906,8 +1233,9 @@ sources must stay at Xenia `0b2ffa31` (see `resolve_shader` notes in
   close on RT change, resolve, compute (memexport, texture loads) or copies.
 - Upload rings for constants: per draw, write VS/PS constants (only dirty 16-register
   blocks) into a big uniform ring and bind with dynamic offsets (256-byte aligned).
-  WebGPU "immediates" (Chrome 149–150; `var<immediate>` in WGSL) can carry small per-draw
-  data where Dawn exposes them; do not depend on them.
+  WebGPU "immediates" (Chrome 149–150; `var<immediate>` in WGSL; a core limit
+  `maxImmediateSize` at the Dawn pin) can carry small per-draw data. Do not depend on
+  them (7.6.5).
 - Deferred destruction keyed by submission serial (`OnSubmittedWorkDone`).
 - GPU profiling: `timestamp-query` per pass type (shadow, scene, post, resolve, UI),
   shown in the existing debug overlay.
@@ -990,8 +1318,9 @@ libstdc++) to avoid ABI mismatches.
 
 ### 10.2 Getting Dawn
 
-Pin one Dawn commit (a `chromium/NNNN` branch head is a good choice) and record it here
-when chosen. The earlier attempt used `901f57556`.
+**Pinned (L-01, 2026-10-14): `088a8d00efd1c70b58c549d355401d115904b648`** (head of
+`chromium/8104`, 2026-10-09; see 7.6.1). Pin the hash: Dawn cuts `chromium/NNNN`
+branches from `main` almost daily. The earlier attempt used `901f57556`.
 
 Option A: **separate prefix build** (what the earlier attempt did; keeps game builds fast):
 
@@ -1004,15 +1333,16 @@ cmake -S thirdparty/dawn -B out/dawn-build -G Ninja \
   -DDAWN_ENABLE_D3D11=OFF -DDAWN_ENABLE_D3D12=OFF -DDAWN_ENABLE_NULL=OFF \
   -DDAWN_ENABLE_DESKTOP_GL=OFF -DDAWN_ENABLE_OPENGLES=OFF \
   -DDAWN_USE_X11=ON -DDAWN_USE_WAYLAND=ON \
-  -DTINT_BUILD_SPV_READER=ON -DTINT_BUILD_CMD_TOOLS=ON
+  -DTINT_BUILD_SPV_READER=ON -DTINT_BUILD_CMD_TOOLS=ON \
+  -DCMAKE_POSITION_INDEPENDENT_CODE=ON   # Dawn is linked into a shared plugin
 cmake --build out/dawn-build
 cmake --install out/dawn-build --prefix out/dawn-install
 ```
 
 `DAWN_FETCH_DEPENDENCIES`, `DAWN_ENABLE_INSTALL`, `find_package(Dawn)` and
 `dawn::webgpu_dawn` are from Dawn's CMake quickstart
-(`docs/quickstart-cmake.md`). The other option names are **unverified for the pinned
-commit**: check `thirdparty/dawn/CMakeLists.txt` and `src/tint/CMakeLists.txt`. On
+(`docs/quickstart-cmake.md`). All option names above exist in the pinned commit's
+`CMakeLists.txt` (checked 2026-10-14, 7.6.1). Dawn needs CMake ≥ 3.22. On
 macOS use `-DDAWN_ENABLE_METAL=ON` and drop the X11/Wayland options. `TINT_BUILD_CMD_TOOLS`
 gives the `tint` CLI used by `tools/xenos2wgsl` for validation.
 
@@ -1047,13 +1377,17 @@ if(TRIALSHD_WEBGPU)
 endif()
 ```
 
-- Whether `register_file.cpp`, `xenos.cpp` and the format layer are already in
-  `rexruntime` ("The Xenos format layer is compiled into rexcore") decides which of these
-  sources to compile: check for duplicate-symbol and missing-symbol errors and mirror
-  exactly what `rexgpu-xenos` compiles.
-- Staging: extend `trials_hd_stage_libs` in `CMakeLists.txt` to copy
-  `librexgpu-webgpu*.so` (Linux staging is manual today; see the memory note about stale
-  libraries).
+- **Source list confirmed (7.6.2):** the 18 files above link with `--no-undefined`
+  against `librexruntime`. `xenos.cpp` and the texture format layer are already in
+  `rexcore` (inside `rexruntime`) and must not be added.
+- Set `DEBUG_POSTFIX d` and `RELWITHDEBINFO_POSTFIX rd` on the target (the SDK's
+  `CMAKE_*_POSTFIX` does not reach this directory scope).
+- Staging: define the target before `rexglue_setup_target(trials_hd GPU_PLUGINS xenos
+  webgpu)`. The SDK helper then adds the dependency and the post-build copy. Also add
+  it to `trials_hd_stage_libs` in `CMakeLists.txt` (Linux staging is manual today; see
+  the memory note about stale libraries).
+- The plugin must define `present_fps_limit` and `present_fps_limit_guest_paced`
+  (the app sets them by name; 7.6.2).
 - Selection: `--gpu_plugin=webgpu`; later a `renderer` setting in the graphics menu.
 - Packaging (`tools/package.sh`): Dawn links statically into the plugin, so the
   release adds one `.so` and no Vulkan loader changes.
@@ -1168,8 +1502,9 @@ shaders, no giant storage bindings, WGSL only). The rest of the port is the hard
   hashing. The SDK's `SIGSEGV` handlers must be compiled out.
 - Threads need `SharedArrayBuffer` (cross-origin isolation headers). WebGPU objects
   belong to the thread that created them: run the whole renderer in one worker with an
-  `OffscreenCanvas`, and have guest threads only enqueue work (the design in 8.2 already
-  keeps WebGPU on one thread).
+  `OffscreenCanvas`, and have guest threads only enqueue work. On desktop the CP and
+  UI threads share the device under one mutex (7.6.4). A browser build has to move the
+  presenter's paint onto the renderer thread.
 - No synchronous readback: luminance readback must be asynchronous (8.10 already is).
 - `ucontext` fibers (`src/core/fiber_posix.cpp`) and `setjmp`/`longjmp` (CRT, see
   `config/codegen.toml`) need Emscripten equivalents (`-sSUPPORT_LONGJMP=wasm`,
@@ -1191,7 +1526,8 @@ shaders, no giant storage bindings, WGSL only). The rest of the port is the hard
 | 5 | Does any shader rely on Xenos-specific float behavior (`mul` 0 × inf, `rsq(0)`)? | translator tests vs the interpreter; visual diffs |
 | 6 | Height of each render target (EDRAM has no height) | `DrawExtentEstimator` logs per RT key |
 | 7 | 7e3 vs fp16 differences in bloom / exposure | compare luminance readback values between plugins |
-| 8 | Dawn multi-thread story (implicit device synchronization) at the pinned commit | read Dawn docs at the pin; fall back to single-thread marshalling |
+| 8 | ~~Dawn multi-thread story (implicit device synchronization) at the pinned commit~~ **Answered 2026-10-14 (7.6.4):** the feature exists, but it locks on every call, including encoder calls, and Dawn calls it heavy-handed. We use one device mutex of our own, per unit of work, and no implicit sync. A submit thread cannot overlap encoding. | — |
+| 12 | Do the RX 6600 and RTX 2070 allow `maxBufferSize` and `maxStorageBufferBindingSize` ≥ 512 MiB (one shared-memory buffer, 7.6.3)? | S-14 adapter dump |
 | 9 | Shaders not yet seen (rare menus, other tracks, credits) | run more scripted scenes with `--dump_shaders` and grow the `.xsh` cache before M2 sign-off |
 | 10 | Strip indices equal to `0xFFFF` used as real vertices | scan index buffers in the probe |
 | 11 | Texture fetch constants' location in the D3D device shadow (for the D3D front-end) | extend section 6 with the call-trace build |
@@ -1206,6 +1542,7 @@ shaders, no giant storage bindings, WGSL only). The rest of the port is the hard
 | --- | --- |
 | `docs/webgpu-renderer/probe/run_draw_probe.sh` | per-draw GPU state capture from the Vulkan backend (gdb, no code changes) |
 | `docs/webgpu-renderer/probe/analyze_draws.py` | summary tables of section 5 (`python3 analyze_draws.py draws.bin out/shader_dump`) |
+| `docs/webgpu-renderer/probe/link_stub.sh` | links a stub plugin from the SDK's backend-agnostic graphics objects with `--no-undefined` (the plugin's source list, 7.6.2) |
 | `docs/webgpu-renderer/probe/point_draws.py` | breakdown of point/rect/quad/fan draws by shader; lists shaders missing from the dump |
 | `--dump_shaders=<dir>` (SDK cvar) | disassembly + binaries of every shader the game loads |
 | `tools/disasm.py`, `tools/xex_dump/` | disassemble guest addresses; dump the loaded XEX image (`out/xex_dump/image.bin`) |
@@ -1379,10 +1716,10 @@ ambiguity, it stops and writes the question into the task's notes instead of gue
 
 | ID | Status | Tier | Task | Depends | Done when |
 | --- | --- | --- | --- | --- | --- |
-| S-12 | todo | S | `tools/build_dawn.sh`: clone or update Dawn at a pinned commit (an argument, default chosen by L-01) into `thirdparty/dawn`, configure with the options of section 10.2, install to `out/dawn-install`. Verify each CMake option name against the pinned Dawn. | L-01 (pin) | script builds from scratch; option names confirmed |
+| S-12 | todo | S | `tools/build_dawn.sh`: clone or update Dawn at a pinned commit (an argument, default `088a8d00efd1c70b58c549d355401d115904b648` from L-01) into `thirdparty/dawn`, configure with the options of section 10.2 (including `CMAKE_POSITION_INDEPENDENT_CODE=ON`), install to `out/dawn-install`. Option names were checked against the pin in 7.6.1. | L-01 (pin) | script builds from scratch; option names confirmed |
 | S-13 | todo | S | Restore `tools/webgpu_smoke` and `src/webgpu/webgpu_context.*` from `530381a^`; port the surface code to SDL3 window properties for **X11 and Wayland**; add an adapter list and VSync on/off. | S-12 | triangle on both GPUs, on X11 and on a Wayland session |
-| S-14 | todo | S | Add an adapter feature and limit dump to `webgpu_smoke` (`--info`). Record RX 6600 and RTX 2070 results (open question 1: `texture-formats-tier1`, `depth32float-stencil8`, `texture-compression-bc`, `timestamp-query`, `depth-clip-control`). | S-13 | results table in section 9.1 |
-| S-15 | todo | S | Dawn CPU-overhead benchmark in `webgpu_smoke --bench`: 1,500 draws per frame across 30 render passes, 60 pipelines, per-draw dynamic-offset uniforms and 3 bind groups. Report µs per draw with and without validation (`skip_validation` toggle) and with a second submit thread. | S-13 | numbers in 7.5 |
+| S-14 | todo | S | Add an adapter feature and limit dump to `webgpu_smoke` (`--info`). Record RX 6600 and RTX 2070 results (open question 1: `texture-formats-tier1`, `depth32float-stencil8`, `texture-compression-bc`, `timestamp-query`, `depth-clip-control`; open question 12: `maxBufferSize`, `maxStorageBufferBindingSize`, `maxImmediateSize`). | S-13 | results table in section 9.1 |
+| S-15 | todo | S | Dawn CPU-overhead benchmark in `webgpu_smoke --bench`: 1,500 draws per frame across 30 render passes, 60 pipelines, per-draw dynamic-offset uniforms and 3 bind groups. Report µs per draw with and without validation (`skip_validation` toggle), and with the device created with and without `ImplicitDeviceSynchronization` (the per-call lock cost, 7.6.4). Use the binding model of 7.6.5 (5 dynamic offsets in group 0). | S-13 | numbers in 7.5 |
 | S-16 | todo | S | CMake option `TRIALSHD_WEBGPU` and an empty `rexgpu-webgpu` target per section 10.3 that builds, gets staged next to `trials_hd`, and loads (`--gpu_plugin=webgpu` reaches `rex_gpu_create`). | L-01 | log line from the plugin's create function |
 
 #### Shaders we own (not game shaders), each with a test
@@ -1407,7 +1744,7 @@ ambiguity, it stops and writes the question into the task's notes instead of gue
 | S-27 | todo | S | WebGPU debug labels: every pass, pipeline and draw labeled with guest draw index, shader hashes and RT key; push and pop debug groups per guest pass. | L-12 | labels visible in a RenderDoc capture |
 | S-28 | todo | S | GPU timestamp profiling per pass category (shadow, scene, post, resolve, UI), printed once per second like the old `gpu_profile`. | L-12 | per-category ms in the log |
 | S-29 | todo | S | Settings menu: "Renderer: Vulkan / WebGPU" (restart to apply) and "WebGPU adapter" in `src/graphics_settings.cpp`; saved to `trials_hd.toml`. | S-16 | switching works across restarts |
-| S-30 | todo | S | Automatic fallback: if `rexgpu-webgpu` fails to load or create a device, log it and start with `xenos`. | S-16 | forced failure falls back |
+| S-30 | todo | S | Automatic fallback: if `rexgpu-webgpu` fails to load or create a device, log it and start with `xenos`. **Do not load both plugins in one process** (shared cvars would silently fall back to defaults; 7.6.2): re-exec with `--gpu_plugin=xenos` and an environment-variable loop guard. | S-16 | forced failure falls back; `draw_resolution_scale_x` from the config is honored after the fallback |
 | S-31 | todo | S | Packaging: `tools/package.sh` stages `librexgpu-webgpu.so`; README build section for `TRIALSHD_WEBGPU`. | S-16 | packaged build runs with both renderers |
 | S-32 | todo | S | Golden-scene CI script: run all golden scenes with both plugins and print a pass/fail table. | S-10, S-11, M3 | table printed |
 | S-33 | todo | S | Keep this document current: after each milestone, update tables and open questions, and audit the Status column against git history (16.0). | — | ongoing |
@@ -1421,7 +1758,7 @@ debugging. Several can run in parallel once L-01 to L-03 exist.
 
 | ID | Status | Task | Depends | Read first | Done when |
 | --- | --- | --- | --- | --- | --- |
-| L-01 | todo | **Integration design.** Pin Dawn; confirm which SDK graphics sources the plugin compiles (vs. `rexruntime`) without duplicate state; decide device threading (Dawn implicit synchronization vs. single thread); write the bind-group layout and `DrawSnapshot` spec as a design note in this doc. | — | 7, 8.1–8.2, 10.3, SDK `src/graphics/CMakeLists.txt` | design note merged; S-12/S-16 unblocked |
+| L-01 | done 2026-10-14 (this commit) | **Integration design.** Pin Dawn; confirm which SDK graphics sources the plugin compiles (vs. `rexruntime`) without duplicate state; decide device threading (Dawn implicit synchronization vs. single thread); write the bind-group layout and `DrawSnapshot` spec as a design note in this doc. | — | 7, 8.1–8.2, 10.3, SDK `src/graphics/CMakeLists.txt` | design note merged; S-12/S-16 unblocked |
 | L-02 | todo | **M1 skeleton.** `WebGpuGraphicsSystem`, `WebGpuProvider`, `WebGpuPresenter` (clear color, letterbox, headless offscreen mode, `CaptureGuestOutput`), `WebGpuImmediateDrawer`, a `WebGpuCommandProcessor` that accepts all packets and draws nothing. The game boots and the settings menu works. | L-01, S-16, S-21 | `src/ui/vulkan/vulkan_presenter.cpp`, `include/rex/ui/presenter.h`, `src/graphics/graphics_system.cpp` | headless menu navigation completes with `--gpu_plugin=webgpu` |
 | L-03 | todo | **Front-end split.** `DrawSnapshot` / `ResolveSnapshot` / `SwapSnapshot` built from the register file in `IssueDraw`/`IssueCopy`/`IssueSwap`, independent of WebGPU, so the D3D front-end (L-17) can fill the same structs. | L-01 | 7.4, `command_processor.h` | snapshots logged for a frame; S-26 possible |
 | L-04a | todo | **WGSL translator: control flow.** `WgslShaderTranslator : ShaderTranslator`; `loop { switch (pc) }` state machine; `exec`/`jmp`/`call`/`loop` with constant-driven loop counters; predicates; bool constants; `a0` dynamic register indexing. | L-01 | 8.4, `translator.h/.cpp`, `spirv_translator.cpp` | all 74 shaders emit structurally valid WGSL (Tint) with ALU stubbed |
@@ -1518,3 +1855,18 @@ finding: `YYYY-MM-DD <agent> <task ID>: what changed; evidence; what is left`.
   The earlier `CallInThread` and shader-storage reports are fixed. Next step:
   catch it with core dumps (`ulimit -c unlimited`, `coredump_filter=0x31` to
   skip the shared guest-memory mappings) over many scripted runs.
+- 2026-10-14 claude-opus-5.5 L-01: integration design written as section 7.6.
+  - Dawn pinned at `088a8d0…` (`chromium/8104`). CMake options, feature names,
+    `DawnCacheDeviceDescriptor` and the `skip_validation` toggle confirmed in the
+    pinned sources. Dawn must be built PIC for the plugin.
+  - SDK source list confirmed by linking a stub plugin from the 18
+    `REXGPU_XENOS_SOURCES` objects with `--no-undefined`.
+  - Found that two GPU plugins in one process break shared cvars (S-30 now re-execs).
+  - Found that `PrimitiveProcessor` requires `SharedMemory`, so the desktop backend
+    subclasses it (8.3 superseded on desktop; 7.6.3).
+  - Device threading: no implicit sync; one device mutex per unit of work. A "submit
+    thread" cannot overlap encoding in Dawn (7.5 updated; open question 8 answered).
+  - Bind-group layouts and the `DrawSnapshot`/`ResolveSnapshot`/`SwapSnapshot` spec
+    written (7.6.5, 7.6.6).
+  - Open: S-14 must confirm 512 MiB buffer and binding limits (open question 12). No
+    Dawn build was run at the pin yet (S-12).
