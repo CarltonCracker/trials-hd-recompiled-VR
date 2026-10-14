@@ -3,7 +3,11 @@
 # SDK boilerplate lives in generated/rexglue.cmake.
 
 cmake_minimum_required(VERSION 3.25)
-project(trials_hd LANGUAGES CXX)
+if(APPLE)
+    project(trials_hd LANGUAGES CXX OBJC OBJCXX)
+else()
+    project(trials_hd LANGUAGES CXX)
+endif()
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -40,6 +44,12 @@ endforeach()
 
 include(generated/rexglue.cmake)
 
+# The SDK sets REXGLUE_ROOT inside its own add_subdirectory scope but doesn't
+# propagate it to the parent. The macOS MoltenVK ICD staging helper needs it.
+if(NOT REXGLUE_ROOT AND REXSDK_DIR)
+    set(REXGLUE_ROOT "${REXSDK_DIR}")
+endif()
+
 # Sources
 set(TRIALSHD_SOURCES
     src/main.cpp
@@ -48,6 +58,7 @@ set(TRIALSHD_SOURCES
     src/keyboard_controls.cpp
     src/fps_unlock.cpp
     src/gpu_wait.cpp
+    src/achievements_hook.cpp
     src/package_license.cpp
     src/virtual_pad.cpp
 )
@@ -77,26 +88,10 @@ if(NOT REXGLUE_ENTRYPOINT_GENERATED_SOURCES)
     add_dependencies(trials_hd_first_codegen trials_hd_codegen)
 endif()
 
-# The SDK builds its shared libraries into its own out/ directory and only
-# stages them next to the executable on Windows (and stages the GPU plugin only
-# when trials_hd relinks). The binary's RPATH is $ORIGIN, so copy them alongside
-# it on every build; copy_if_different keeps this cheap.
-set(TRIALSHD_RUNTIME_LIBS $<TARGET_FILE:rexruntime> $<TARGET_FILE:rexgpu-xenos>)
-set(TRIALSHD_RUNTIME_LIB_TARGETS rexruntime rexgpu-xenos)
-if(TARGET TracyClient)
-    get_target_property(_tracy_type TracyClient TYPE)
-    if(_tracy_type STREQUAL "SHARED_LIBRARY")
-        list(APPEND TRIALSHD_RUNTIME_LIBS $<TARGET_FILE:TracyClient>)
-        list(APPEND TRIALSHD_RUNTIME_LIB_TARGETS TracyClient)
-    endif()
-endif()
-add_custom_target(trials_hd_stage_libs
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${TRIALSHD_RUNTIME_LIBS}
-            ${CMAKE_CURRENT_BINARY_DIR}
-    DEPENDS ${TRIALSHD_RUNTIME_LIB_TARGETS}
-    COMMENT "Staging runtime libraries next to trials_hd"
-    VERBATIM)
-add_dependencies(trials_hd trials_hd_stage_libs)
+# The SDK's rexglue_configure_target() (called from rexglue_setup_target above)
+# stages shared runtime libraries (rexruntime, TracyClient, GPU plugins) and the
+# macOS MoltenVK Vulkan stack next to the executable on all platforms.
+# No additional staging is needed here.
 
 # rex_app.cpp (compiled into this target by the SDK) includes imgui.h, but
 # rexruntime links imgui privately, so the header path does not propagate when

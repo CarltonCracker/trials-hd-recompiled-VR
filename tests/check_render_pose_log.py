@@ -29,7 +29,8 @@ def check(text):
 
     rigid = sum(distinct(v) for k, v in models.items() if int(k[2]) == 1)
     animated = sum(distinct(v) for k, v in models.items() if int(k[2]) > 1)
-    camera = sum(distinct(v) for v in cameras.values())
+    camera = sum(distinct(v) and all(abs(r-p) > 1e-6 for _, r, p in v)
+                 for v in cameras.values())
     assert rigid, "no distinct rigid-model poses within a fixed tick"
     assert animated, "no distinct animated-palette poses within a fixed tick"
     assert camera, "no distinct camera poses within a fixed tick"

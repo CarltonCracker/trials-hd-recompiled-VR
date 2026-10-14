@@ -37,6 +37,8 @@ commit by CMake at configure time; regenerate with tools/export_sdk_patch.sh).
   guest threads - heap corruption)
 - graphics: lock the command processor's CallInThread queue (pushed from
   other threads); logging: reserve the category registry (read lock-free)
+- macOS: user data under Application Support and Apple Silicon presentation defaults
+- ui/overlay: achievements close callback and input gating
 
 EOF
   git -C "$sdk" diff

@@ -22,6 +22,8 @@ commit by CMake at configure time; regenerate with tools/export_sdk_patch.sh).
   guest threads - heap corruption)
 - graphics: lock the command processor's CallInThread queue (pushed from
   other threads); logging: reserve the category registry (read lock-free)
+- macOS: user data under Application Support and Apple Silicon presentation defaults
+- ui/overlay: achievements close callback and input gating
 
 diff --git a/include/rex/graphics/command_processor.h b/include/rex/graphics/command_processor.h
 index da8e432..74b87ff 100644
@@ -235,6 +237,36 @@ index c8751b7..9271ff4 100644
  
    // Packet number incremented on state change
    uint32_t packet_number_ = 0;
+diff --git a/include/rex/ui/overlay/achievements_overlay.h b/include/rex/ui/overlay/achievements_overlay.h
+index 294d706..77072bc 100644
+--- a/include/rex/ui/overlay/achievements_overlay.h
++++ b/include/rex/ui/overlay/achievements_overlay.h
+@@ -10,6 +10,8 @@
+  */
+ #pragma once
+ 
++#include <functional>
++
+ #include <rex/system/achievement_manager.h>
+ #include <rex/ui/imgui_dialog.h>
+ #include <rex/ui/overlay/achievement_icon_cache.h>
+@@ -29,6 +31,8 @@ class AchievementsOverlayDialog : public ImGuiDialog {
+                             rex::Runtime* runtime, rex::system::AchievementManager* achievements);
+   ~AchievementsOverlayDialog() override;
+ 
++  void SetOnClose(std::function<void()> on_close) { on_close_ = std::move(on_close); }
++
+  protected:
+   void OnDraw(ImGuiIO& io) override;
+ 
+@@ -38,6 +42,7 @@ class AchievementsOverlayDialog : public ImGuiDialog {
+ 
+   rex::system::AchievementManager* achievements_ = nullptr;
+   AchievementIconCache icon_cache_;
++  std::function<void()> on_close_;
+ };
+ 
+ }  // namespace rex::ui
 diff --git a/include/rex/ui/vulkan/functions/instance_ext_headless_surface.inc b/include/rex/ui/vulkan/functions/instance_ext_headless_surface.inc
 new file mode 100644
 index 0000000..59a6c2b
@@ -264,6 +296,35 @@ index 4edde2b..022c961 100644
      bool ext_KHR_portability_enumeration = false;              // #395
    };
  
+diff --git a/src/core/filesystem_posix.cpp b/src/core/filesystem_posix.cpp
+index ef5bdf4..76b2608 100644
+--- a/src/core/filesystem_posix.cpp
++++ b/src/core/filesystem_posix.cpp
+@@ -109,6 +109,16 @@ std::filesystem::path GetUserFolder() {
+     return std::filesystem::path(*xdg);
+   }
+ 
++#if defined(__APPLE__)
++  if (auto home = rex::platform::env::get("HOME")) {
++    return std::filesystem::path(*home) / "Library" / "Application Support";
++  }
++  struct passwd pw1;
++  struct passwd* pw;
++  char buf[4096];
++  getpwuid_r(getuid(), &pw1, buf, sizeof(buf), &pw);
++  return std::filesystem::path(pw->pw_dir) / "Library" / "Application Support";
++#else
+   // if XDG_DATA_HOME not set, fallback to HOME directory
+   if (auto home = rex::platform::env::get("HOME")) {
+     return std::filesystem::path(*home) / ".local" / "share";
+@@ -121,6 +131,7 @@ std::filesystem::path GetUserFolder() {
+   getpwuid_r(getuid(), &pw1, buf, sizeof(buf), &pw);
+   assert(&pw1 == pw);  // sanity check
+   return std::filesystem::path(pw->pw_dir) / ".local" / "share";
++#endif
+ }
+ 
+ FILE* OpenFile(const std::filesystem::path& path, const std::string_view mode) {
 diff --git a/src/core/logging.cpp b/src/core/logging.cpp
 index 1645848..a0814bc 100644
 --- a/src/core/logging.cpp
@@ -12901,6 +12962,59 @@ index 3f9422d..02bcc4b 100644
    if (keystroke_queue_.empty()) {
      return X_ERROR_EMPTY;
    }
+diff --git a/src/ui/overlay/achievements_overlay.cpp b/src/ui/overlay/achievements_overlay.cpp
+index e886a88..fd74aaf 100644
+--- a/src/ui/overlay/achievements_overlay.cpp
++++ b/src/ui/overlay/achievements_overlay.cpp
+@@ -43,7 +43,8 @@ void AchievementsOverlayDialog::OnDraw(ImGuiIO& io) {
+   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, style.window_padding);
+   ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, style.item_spacing);
+ 
+-  if (ImGui::Begin("Achievements##overlay", nullptr, ImGuiWindowFlags_NoCollapse)) {
++  bool open = true;
++  if (ImGui::Begin("Achievements##overlay", &open, ImGuiWindowFlags_NoCollapse)) {
+     const auto achievements = achievements_->ListAchievements();
+ 
+     int unlocked_count = 0;
+@@ -71,6 +72,10 @@ void AchievementsOverlayDialog::OnDraw(ImGuiIO& io) {
+     ImGui::PopStyleColor();
+ 
+     ImGui::TextDisabled("Unlock progress is saved automatically");
++    ImGui::SameLine(ImGui::GetWindowWidth() - 100.0f);
++    if (ImGui::SmallButton("Close (Esc)")) {
++      open = false;
++    }
+     ImGui::Separator();
+     ImGui::Spacing();
+ 
+@@ -139,8 +144,11 @@ void AchievementsOverlayDialog::OnDraw(ImGuiIO& io) {
+     ImGui::EndChild();
+   }
+   ImGui::End();
+-
+   ImGui::PopStyleVar(2);
++
++  if (!open && on_close_) {
++    on_close_();
++  }
+ }
+ 
+ }  // namespace rex::ui
+diff --git a/src/ui/rex_app.cpp b/src/ui/rex_app.cpp
+index b94fe9e..95d07ec 100644
+--- a/src/ui/rex_app.cpp
++++ b/src/ui/rex_app.cpp
+@@ -421,6 +421,10 @@ void ReXApp::SetupOverlays(rex::ui::Presenter* presenter, rex::ui::ImmediateDraw
+       achievements_overlay_.reset();
+     } else {
+       achievements_overlay_ = CreateAchievementsOverlay();
++      if (auto* overlay =
++              dynamic_cast<ui::AchievementsOverlayDialog*>(achievements_overlay_.get())) {
++        overlay->SetOnClose([this] { achievements_overlay_.reset(); });
++      }
+     }
+   });
+ 
 diff --git a/src/ui/vulkan/vulkan_instance.cpp b/src/ui/vulkan/vulkan_instance.cpp
 index 914b311..69e65ba 100644
 --- a/src/ui/vulkan/vulkan_instance.cpp

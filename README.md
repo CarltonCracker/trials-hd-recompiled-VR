@@ -165,9 +165,9 @@ true internal 1080p is not implemented (1080p display output is separate).
 
 ### Main menu
 
-The main menu is the game's own, with all of its buttons. Leaderboards,
-Achievements and Download Content front Xbox LIVE services, which are not
-available: the game shows its own offline / not-signed-in behavior for them.
+The main menu is the game's own, with all of its buttons. Achievements opens the
+host achievements overlay. Leaderboards and Download Content require unavailable
+Xbox LIVE services and retain the game's offline / not-signed-in behavior.
 
 With no audio device the game continues with silent audio. With several GPUs, pick
 one with `--vulkan_device=N` (the device list is printed at startup).

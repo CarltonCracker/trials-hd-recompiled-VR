@@ -18,11 +18,15 @@
 #include <rex/logging.h>
 #include <rex/rex_app.h>
 #include <rex/runtime.h>
+#include <rex/system/achievement_manager.h>
+#include <rex/system/achievement_store.h>
 #include <rex/ui/imgui_drawer.h>
 #include <rex/ui/keybinds.h>
+#include <rex/ui/overlay/achievements_overlay.h>
 #include <rex/ui/presenter.h>
 #include <rex/system/interfaces/graphics.h>
 
+#include "generated/default/trials_hd_init.h"
 #include "fallback_audio.h"
 #include "graphics_settings.h"
 #include "keyboard_controls.h"
@@ -31,7 +35,19 @@
 
 class TrialsHdApp : public rex::ReXApp {
  public:
-  using rex::ReXApp::ReXApp;
+  TrialsHdApp(rex::ui::WindowedAppContext& ctx, std::string_view name,
+              rex::PPCImageInfo ppc_info)
+      : rex::ReXApp(ctx, name, ppc_info) {
+    s_instance_ = this;
+  }
+
+  ~TrialsHdApp() override {
+    if (s_instance_ == this) {
+      s_instance_ = nullptr;
+    }
+  }
+
+  static TrialsHdApp* Instance() { return s_instance_; }
 
   static std::unique_ptr<rex::ui::WindowedApp> Create(
       rex::ui::WindowedAppContext& ctx) {
@@ -39,10 +55,50 @@ class TrialsHdApp : public rex::ReXApp {
         PPCImageConfig));
   }
 
+  void ShowAchievements() {
+    app_context().CallInUIThreadDeferred([this] {
+      OpenAchievements();
+    });
+  }
+
+  void ToggleAchievements() {
+    if (achievements_dialog_) {
+      CloseAchievements();
+    } else {
+      OpenAchievements();
+    }
+  }
+
+  void OpenAchievements() {
+    if (achievements_dialog_) {
+      return;
+    }
+    achievements_dialog_ = CreateAchievementsOverlay();
+    if (auto* overlay = dynamic_cast<rex::ui::AchievementsOverlayDialog*>(achievements_dialog_.get())) {
+      overlay->SetOnClose([this] { CloseAchievements(); });
+    }
+    achievements_open_ = (achievements_dialog_ != nullptr);
+  }
+
+  void CloseAchievements() {
+    if (achievements_dialog_) {
+      achievements_dialog_.reset();
+      achievements_open_ = false;
+      hold_input_until_released_ = true;
+    }
+  }
+
   // The Xenos GPU plugin (librexgpu-xenos*.so, staged next to the binary) is
   // required to render anything; default to it unless --gpu_plugin overrides.
   // Audio falls back to a silent driver when no output device can be opened.
   void OnPreSetup(rex::RuntimeConfig& config) override {
+#if defined(__APPLE__)
+    // MoltenVK Metal optimizations for Apple Silicon:
+    // Silence verbose warning floods that stall I/O, enable fast math in MSL shaders
+    setenv("MVK_CONFIG_LOG_LEVEL", "1", 0);
+    setenv("MVK_CONFIG_FAST_MATH_ENABLED", "1", 0);
+    setenv("MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS", "1", 0);
+#endif
     if (config.gpu_plugin.empty()) {
       config.gpu_plugin = "xenos";
     }
@@ -74,11 +130,14 @@ class TrialsHdApp : public rex::ReXApp {
   }
 
   // Settings (controls and graphics): F1, the controller's Guide button, or
-  // Back + Start.
+  // Back + Start. Achievements: F7 or the main menu Achievements button.
   void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {
     trials_hd::ApplyDisplayMode();
     rex::ui::RegisterBind("bind_graphics_settings", "F1", "Toggle settings",
                           [this] { ToggleGraphicsSettings(); });
+    rex::ui::UnregisterBind("bind_achievements");
+    rex::ui::RegisterBind("bind_achievements", "F7", "Toggle achievements",
+                          [this] { ToggleAchievements(); });
     combo_watcher_ = std::jthread([this](std::stop_token stop) { WatchSettingsCombo(stop); });
     (void)drawer;
   }
@@ -91,6 +150,13 @@ class TrialsHdApp : public rex::ReXApp {
     if (unlocked) {
       rex::cvar::SetFlagByName("vsync", "false");
     }
+#if defined(__APPLE__)
+    // For Apple Silicon (MacBook Air), default to 60 FPS cap if not explicitly set.
+    // Prevents running at hundreds of FPS which causes severe thermal throttling on fanless hardware.
+    if (rex::cvar::GetFlagSource("present_fps_limit") == rex::cvar::Source::kDefault) {
+      rex::cvar::SetFlagByName("present_fps_limit", "60");
+    }
+#endif
     // Trials HD's memexport draws (GPU point-list passes) are only consumed by
     // later GPU work. Reading them back to guest memory forces a full CPU/GPU
     // sync per draw and caps gameplay at 15-30 FPS; without it the game holds
@@ -117,14 +183,14 @@ class TrialsHdApp : public rex::ReXApp {
                 rex::cvar::GetFlagByName("readback_resolve_max_bytes"));
 
     trials_hd::ApplyKeyboardDefaults();
+    RegisterDefaultAchievements();
 
     // Replaces the SDK's input gate: the game ignores the controller while the
-    // settings menu is open (it navigates the menu instead). Called from game
-    // threads, so it must not touch ImGui (not thread-safe - the SDK's gate
-    // queried ImGui's IO here, racing with the UI thread's frames).
+    // settings or achievements menu is open. Called from game
+    // threads, so it must not touch ImGui (not thread-safe).
     if (auto* input = static_cast<rex::input::InputSystem*>(runtime()->input_system())) {
       input->SetActiveCallback([this] {
-        return !graphics_settings_.load() && !hold_input_until_released_.load();
+        return !graphics_settings_.load() && !achievements_open_.load() && !hold_input_until_released_.load();
       });
     }
     // Test harness only: no-op unless TRIALS_HD_VIRTUAL_PAD is set.
@@ -186,9 +252,11 @@ class TrialsHdApp : public rex::ReXApp {
   // keyboard state is a plain array, so this is safe off the UI thread.
   void WatchSettingsCombo(std::stop_token stop) {
     bool was_down = false;
+    bool ach_close_was_down = false;
     while (!stop.stop_requested()) {
       bool shortcut = false;
       bool any_button = false;
+      bool ach_close = false;
       int count = 0;
       if (SDL_JoystickID* ids = SDL_GetGamepads(&count)) {
         for (int i = 0; i < count; ++i) {
@@ -199,6 +267,9 @@ class TrialsHdApp : public rex::ReXApp {
           shortcut = shortcut || SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_GUIDE) ||
                      (SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_BACK) &&
                       SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_START));
+          ach_close = ach_close || SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_EAST) ||
+                      SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_BACK) ||
+                      SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_GUIDE);
           for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT; ++b) {
             any_button = any_button || SDL_GetGamepadButton(pad, SDL_GamepadButton(b));
           }
@@ -210,11 +281,23 @@ class TrialsHdApp : public rex::ReXApp {
         for (int k = 0; k < key_count && !any_button; ++k) {
           any_button = keys[k];
         }
+        if (key_count > SDL_SCANCODE_ESCAPE && keys[SDL_SCANCODE_ESCAPE]) {
+          ach_close = true;
+        }
+        if (key_count > SDL_SCANCODE_BACKSPACE && keys[SDL_SCANCODE_BACKSPACE]) {
+          ach_close = true;
+        }
       }
       if (shortcut && !was_down) {
         app_context().CallInUIThreadDeferred([this] { ToggleGraphicsSettings(); });
       }
       was_down = shortcut;
+
+      if (achievements_open_.load() && ach_close && !ach_close_was_down) {
+        app_context().CallInUIThreadDeferred([this] { CloseAchievements(); });
+      }
+      ach_close_was_down = ach_close;
+
       if (!any_button) {
         hold_input_until_released_ = false;
       }
@@ -222,7 +305,31 @@ class TrialsHdApp : public rex::ReXApp {
     }
   }
 
+  void RegisterDefaultAchievements() {
+    if (!achievements().ListAchievements().empty()) {
+      return;
+    }
+    static const rex::system::AchievementInfo kDefaults[] = {
+        {4, "The Challenger", "Unlock the first tournament.", "Unlock the first tournament.", "ach_001.png", 4, 10, 0},
+        {5, "Leave Nothing in One Piece", "Completely destroy the bike and break all the bones of your rider in a single crash.", "Completely destroy the bike and break all the bones of your rider in a single crash.", "ach_002.png", 5, 5, 0},
+        {6, "The Creator", "Create a custom track and save it.", "Create a custom track and save it.", "ach_003.png", 6, 5, 0},
+        {7, "Bling", "Get at least 5 Gold Medals.", "Get at least 5 Gold Medals.", "ach_004.png", 7, 15, 0},
+        {8, "Full Throttle", "Complete the track 'Container Rush' without releasing the throttle.", "Complete the track 'Container Rush' without releasing the throttle.", "ach_005.png", 8, 15, 0},
+        {9, "Market Meltdown", "Skyrocket all the crates in 'Stock Market' skill game.", "Skyrocket all the crates in 'Stock Market' skill game.", "ach_006.png", 9, 15, 0},
+        {10, "Strike!", "Get a strike in the 'Midnight Bowling' skill game.", "Get a strike in the 'Midnight Bowling' skill game.", "ach_007.png", 10, 15, 0},
+        {11, "Trials Master", "Unlock all tracks in the game.", "Unlock all tracks in the game.", "ach_008.png", 11, 15, 0},
+        {12, "Unyielding", "Complete the track 'Groundhog Returns' without changing the posture of the rider.", "Complete the track 'Groundhog Returns' without changing the posture of the rider.", "ach_009.png", 12, 15, 0},
+        {13, "Life is Harsh", "Complete all Hard tracks.", "Complete all Hard tracks.", "ach_010.png", 13, 20, 0},
+        {14, "Demon on Wheels", "Complete all Extreme tracks.", "Complete all Extreme tracks.", "ach_011.png", 14, 30, 0},
+        {15, "Marathon", "Complete the 'Ultimate Endurance' tournament without a single fault.", "Complete the 'Ultimate Endurance' tournament without a single fault.", "ach_000.png", 15, 40, 0},
+    };
+    achievements().RegisterAchievements(kDefaults);
+  }
+
+  inline static TrialsHdApp* s_instance_{nullptr};
   std::atomic<trials_hd::GraphicsSettingsDialog*> graphics_settings_{nullptr};
+  std::unique_ptr<rex::ui::ImGuiDialog> achievements_dialog_;
+  std::atomic<bool> achievements_open_{false};
   std::atomic<bool> hold_input_until_released_{false};
   std::jthread combo_watcher_;
 };

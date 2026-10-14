@@ -26,6 +26,15 @@ class PoseLogTest(unittest.TestCase):
         log = ''.join(sample(1,n,p,c) for p,c in [(.25,4.25),(.75,4.75)] for n in [1,11])
         with self.assertRaises(AssertionError): check(log)
 
+    def test_camera_snapping_back_to_raw_does_not_count(self):
+        log = ''.join(sample(f,n,p,c) for f,p,c in [(1,.25,4.25),(2,.75,5)] for n in [1,11])
+        with self.assertRaises(AssertionError): check(log)
+
+    def test_different_camera_views_do_not_count(self):
+        log = ''.join(sample(f,n,p,c).replace('camera_raw_x=', f'camera_view={f:016X} camera_raw_x=')
+                      for f,p,c in [(1,.25,4.25),(2,.75,4.75)] for n in [1,11])
+        with self.assertRaises(AssertionError): check(log)
+
     def test_guest_fault_is_rejected(self):
         with self.assertRaises(AssertionError): check("Unhandled guest access violation")
 
