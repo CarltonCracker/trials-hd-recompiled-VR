@@ -472,26 +472,29 @@ index b52bf39..bfc1537 100644
  #endif
  }
 diff --git a/src/core/threading_posix.cpp b/src/core/threading_posix.cpp
-index 9ac8d15..312c7ba 100644
+index 9ac8d15..3172bfb 100644
 --- a/src/core/threading_posix.cpp
 +++ b/src/core/threading_posix.cpp
-@@ -14,6 +14,7 @@ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only")
+@@ -13,7 +13,9 @@ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only")
+ 
  #include <signal.h>
  
++#include <algorithm>
  #include <atomic>
 +#include <condition_variable>
  #include <array>
  #include <cerrno>
  #include <cstddef>
-@@ -21,6 +22,7 @@ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only")
+@@ -21,6 +23,8 @@ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only")
  #include <deque>
  #include <limits>
  #include <memory>
 +#include <mutex>
++#include <utility>
  
  #include <pthread.h>
  #include <semaphore.h>
-@@ -267,6 +269,41 @@ static sem_t* RexCreateAnonymousSemaphore() {
+@@ -267,6 +271,50 @@ static sem_t* RexCreateAnonymousSemaphore() {
  }
  #endif  // __APPLE__
  
@@ -506,6 +509,15 @@ index 9ac8d15..312c7ba 100644
 +  std::mutex mutex;
 +  std::condition_variable cv;
 +  uint64_t generation = 0;  // Guarded by mutex.
++  const std::atomic<bool>* pending_callbacks = nullptr;
++
++  void Notify() {
++    {
++      std::lock_guard<std::mutex> lock(mutex);
++      ++generation;
++    }
++    cv.notify_one();
++  }
 +};
 +// Never destroyed: guest threads can still be waiting while the process runs
 +// its static destructors on exit.
@@ -533,16 +545,53 @@ index 9ac8d15..312c7ba 100644
  class PosixConditionBase {
   public:
    PosixConditionBase() {
-@@ -335,13 +372,26 @@ class PosixConditionBase {
+@@ -320,12 +368,23 @@ class PosixConditionBase {
+     }
+   }
+ 
++  void AddAlertableWaiter(MultiWaitState* waiter) {
++    std::lock_guard<std::mutex> lock(alertable_waiters_mutex_);
++    alertable_waiters_.push_back(waiter);
++  }
++
++  void RemoveAlertableWaiter(MultiWaitState* waiter) {
++    std::lock_guard<std::mutex> lock(alertable_waiters_mutex_);
++    std::erase(alertable_waiters_, waiter);
++  }
++
+   static std::pair<WaitResult, size_t> WaitMultiple(std::vector<PosixConditionBase*>&& handles,
+                                                     bool wait_all,
+-                                                    std::chrono::milliseconds timeout) {
++                                                    std::chrono::milliseconds timeout,
++                                                    MultiWaitState* alertable = nullptr) {
+     assert_true(!handles.empty());
+ 
+-    if (handles.size() == 1) {
++    if (handles.size() == 1 && !alertable) {
+       auto result = handles[0]->Wait(timeout);
+       return std::make_pair(result, 0);
+     }
+@@ -335,13 +394,41 @@ class PosixConditionBase {
                          ? std::chrono::steady_clock::time_point::max()
                          : start_time + timeout;
  
-+    // Registered before the first check of the conditions, so any later state
-+    // change bumps the generation (see NotifyMultiWaiters).
-+    g_multi_waiters.fetch_add(1, std::memory_order_seq_cst);
++    // Register before checking conditions, so no signal or callback is lost.
 +    struct MultiWaiterRegistration {
-+      ~MultiWaiterRegistration() { g_multi_waiters.fetch_sub(1, std::memory_order_seq_cst); }
-+    } multi_waiter_registration;
++      const std::vector<PosixConditionBase*>& handles;
++      MultiWaitState* alertable;
++      ~MultiWaiterRegistration() {
++        if (alertable) {
++          for (auto* handle : handles) { handle->RemoveAlertableWaiter(alertable); }
++        } else {
++          g_multi_waiters.fetch_sub(1, std::memory_order_seq_cst);
++        }
++      }
++    } multi_waiter_registration{handles, alertable};
++    if (alertable) {
++      for (auto* handle : handles) { handle->AddAlertableWaiter(alertable); }
++    } else {
++      g_multi_waiters.fetch_add(1, std::memory_order_seq_cst);
++    }
 +
 +    std::vector<std::unique_lock<std::mutex>> locks;
 +    locks.reserve(handles.size());
@@ -553,16 +602,30 @@ index 9ac8d15..312c7ba 100644
  
 -      std::vector<std::unique_lock<std::mutex>> locks;
 -      locks.reserve(handles.size());
-+      MultiWaitState& multi_wait = GetMultiWaitState();
++      MultiWaitState& multi_wait = alertable ? *alertable : GetMultiWaitState();
 +      uint64_t generation;
 +      {
 +        std::lock_guard<std::mutex> generation_lock(multi_wait.mutex);
 +        generation = multi_wait.generation;
 +      }
++
++      if (alertable && alertable->pending_callbacks->load(std::memory_order_acquire)) {
++        return std::make_pair(WaitResult::kUserCallback, 0);
++      }
  
        for (size_t i = 0; i < handles.size(); ++i) {
  #if REX_PLATFORM_LINUX
-@@ -411,12 +461,15 @@ class PosixConditionBase {
+@@ -367,6 +454,9 @@ class PosixConditionBase {
+ 
+       if (!all_locked) {
+         locks.clear();
++        if (alertable && std::chrono::steady_clock::now() >= end_time) {
++          return std::make_pair(WaitResult::kTimeout, 0);
++        }
+         std::this_thread::yield();
+         continue;
+       }
+@@ -411,12 +501,15 @@ class PosixConditionBase {
          return std::make_pair<WaitResult, size_t>(WaitResult::kTimeout, 0);
        }
  
@@ -582,7 +645,24 @@ index 9ac8d15..312c7ba 100644
        }
      }
    }
-@@ -450,6 +503,7 @@ class PosixCondition<Event> : public PosixConditionBase {
+@@ -428,8 +521,16 @@ class PosixConditionBase {
+  protected:
+   inline virtual bool signaled() const = 0;
+   inline virtual void post_execution() = 0;
++  void NotifyMultiWaiters() {
++    rex::thread::NotifyMultiWaiters();
++    std::lock_guard<std::mutex> lock(alertable_waiters_mutex_);
++    for (auto* waiter : alertable_waiters_) { waiter->Notify(); }
++  }
++
+   std::condition_variable cond_;
+   std::mutex mutex_;
++  std::mutex alertable_waiters_mutex_;
++  std::vector<MultiWaitState*> alertable_waiters_;
+ };
+ 
+ // There really is no native POSIX handle for a single wait/signal construct
+@@ -450,6 +551,7 @@ class PosixCondition<Event> : public PosixConditionBase {
      auto lock = std::unique_lock<std::mutex>(mutex_);
      signal_ = true;
      cond_.notify_all();
@@ -590,7 +670,7 @@ index 9ac8d15..312c7ba 100644
      return true;
    }
  
-@@ -487,6 +541,7 @@ class PosixCondition<Semaphore> : public PosixConditionBase {
+@@ -487,6 +589,7 @@ class PosixCondition<Semaphore> : public PosixConditionBase {
      }
      count_ += release_count;
      cond_.notify_all();
@@ -598,7 +678,7 @@ index 9ac8d15..312c7ba 100644
      return true;
    }
  
-@@ -519,6 +574,7 @@ class PosixCondition<Mutant> : public PosixConditionBase {
+@@ -519,6 +622,7 @@ class PosixCondition<Mutant> : public PosixConditionBase {
        // Free to be acquired by another thread
        if (count_ == 0) {
          cond_.notify_all();
@@ -606,7 +686,7 @@ index 9ac8d15..312c7ba 100644
        }
        return true;
      }
-@@ -551,6 +607,7 @@ class PosixCondition<Timer> : public PosixConditionBase {
+@@ -551,6 +655,7 @@ class PosixCondition<Timer> : public PosixConditionBase {
      std::lock_guard<std::mutex> lock(mutex_);
      signal_ = true;
      cond_.notify_all();
@@ -614,7 +694,29 @@ index 9ac8d15..312c7ba 100644
      return true;
    }
  
-@@ -979,6 +1036,7 @@ class PosixCondition<Thread> : public PosixConditionBase {
+@@ -857,6 +962,8 @@ class PosixCondition<Thread> : public PosixConditionBase {
+       std::unique_lock<std::mutex> lock(callback_mutex_);
+       user_callbacks_.push_back(std::move(callback));
+       has_pending_user_callbacks_.store(true, std::memory_order_release);
++      // Only this thread's waiter is notified, never a global wait condition.
++      if (alertable_wait_) { alertable_wait_->Notify(); }
+     }
+ 
+     // If the callback is queued on the current thread, don't self-signal.
+@@ -887,6 +994,12 @@ class PosixCondition<Thread> : public PosixConditionBase {
+     }
+   }
+ 
++  MultiWaitState* SetAlertableWait(MultiWaitState* waiter) {
++    std::lock_guard<std::mutex> lock(callback_mutex_);
++    if (waiter) { waiter->pending_callbacks = &has_pending_user_callbacks_; }
++    return std::exchange(alertable_wait_, waiter);
++  }
++
+   bool DispatchQueuedUserCallbacks() {
+     if (!has_pending_user_callbacks_.load(std::memory_order_acquire)) {
+       return false;
+@@ -979,6 +1092,7 @@ class PosixCondition<Thread> : public PosixConditionBase {
        exit_code_ = exit_code;
        signaled_ = true;
        cond_.notify_all();
@@ -622,11 +724,166 @@ index 9ac8d15..312c7ba 100644
      }
      if (is_current_thread) {
        pthread_exit(reinterpret_cast<void*>(exit_code));
-@@ -1449,6 +1507,7 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
+@@ -1043,6 +1157,7 @@ class PosixCondition<Thread> : public PosixConditionBase {
+   mutable std::condition_variable state_signal_;
+   std::deque<std::function<void()>> user_callbacks_;
+   std::atomic<bool> has_pending_user_callbacks_{false};
++  MultiWaitState* alertable_wait_ = nullptr;  // Guarded by callback_mutex_.
+ #if REX_PLATFORM_ANDROID
+   // Name accessible via name() on Android before API 26 which added
+   // pthread_getname_np.
+@@ -1070,50 +1185,28 @@ bool DispatchCurrentThreadUserCallback() {
+ 
+ namespace {
+ 
+-constexpr auto kAlertablePollSlice = std::chrono::milliseconds(1);
+-
+ class ScopedAlertableState {
+  public:
+-  explicit ScopedAlertableState(bool alertable) : alertable_(alertable) {
+-    if (alertable_) {
+-      alertable_state_ = true;
+-    }
++  ScopedAlertableState() : previous_alertable_(alertable_state_) {
++    if (!current_thread_condition_) { Thread::GetCurrentThread(); }
++    thread_ = current_thread_condition_;
++    previous_waiter_ = thread_->SetAlertableWait(&waiter_);
++    alertable_state_ = true;
+   }
+   ~ScopedAlertableState() {
+-    if (alertable_) {
+-      alertable_state_ = false;
+-    }
++    // QueueUserCallback holds the same lock while notifying: no dangling target.
++    thread_->SetAlertableWait(previous_waiter_);
++    alertable_state_ = previous_alertable_;
+   }
++  MultiWaitState& waiter() { return waiter_; }
+ 
+  private:
+-  bool alertable_;
++  MultiWaitState waiter_;
++  PosixCondition<Thread>* thread_;
++  MultiWaitState* previous_waiter_;
++  bool previous_alertable_;
+ };
+ 
+-std::chrono::steady_clock::time_point ComputeAlertableDeadline(std::chrono::milliseconds timeout) {
+-  if (timeout == std::chrono::milliseconds::max()) {
+-    return std::chrono::steady_clock::time_point::max();
+-  }
+-  return std::chrono::steady_clock::now() + timeout;
+-}
+-
+-bool HasAlertableTimeoutElapsed(std::chrono::steady_clock::time_point deadline) {
+-  return deadline != std::chrono::steady_clock::time_point::max() &&
+-         std::chrono::steady_clock::now() >= deadline;
+-}
+-
+-std::chrono::milliseconds ComputeAlertableWaitTimeout(
+-    std::chrono::steady_clock::time_point deadline) {
+-  if (deadline == std::chrono::steady_clock::time_point::max()) {
+-    return kAlertablePollSlice;
+-  }
+-  auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+-      deadline - std::chrono::steady_clock::now());
+-  if (remaining <= std::chrono::milliseconds::zero()) {
+-    return std::chrono::milliseconds::zero();
+-  }
+-  return std::min(remaining, kAlertablePollSlice);
+-}
+-
+ }  // namespace
+ 
+ // This wraps a condition object as our handle because posix has no single
+@@ -1163,26 +1256,12 @@ WaitResult Wait(WaitHandle* wait_handle, bool is_alertable, std::chrono::millise
+     return posix_wait_handle->condition().Wait(timeout);
+   }
+ 
+-  ScopedAlertableState alertable_state_guard(true);
+-  auto deadline = ComputeAlertableDeadline(timeout);
+-
+-  while (true) {
+-    if (DispatchCurrentThreadUserCallback()) {
+-      return WaitResult::kUserCallback;
+-    }
+-    if (HasAlertableTimeoutElapsed(deadline)) {
+-      return WaitResult::kTimeout;
+-    }
+-    auto result = posix_wait_handle->condition().Wait(ComputeAlertableWaitTimeout(deadline));
+-    if (result != WaitResult::kTimeout) {
+-      return result;
+-    }
+-  }
++  WaitHandle* handles[] = {wait_handle};
++  return WaitMultiple(handles, 1, false, true, timeout).first;
+ }
+ 
+ WaitResult SignalAndWait(WaitHandle* wait_handle_to_signal, WaitHandle* wait_handle_to_wait_on,
+                          bool is_alertable, std::chrono::milliseconds timeout) {
+-  auto result = WaitResult::kFailed;
+   auto posix_wait_handle_to_signal = dynamic_cast<PosixWaitHandle*>(wait_handle_to_signal);
+   auto posix_wait_handle_to_wait_on = dynamic_cast<PosixWaitHandle*>(wait_handle_to_wait_on);
+   if (posix_wait_handle_to_signal == nullptr || posix_wait_handle_to_wait_on == nullptr) {
+@@ -1192,24 +1271,7 @@ WaitResult SignalAndWait(WaitHandle* wait_handle_to_signal, WaitHandle* wait_han
+     return WaitResult::kFailed;
+   }
+ 
+-  if (!is_alertable) {
+-    return posix_wait_handle_to_wait_on->condition().Wait(timeout);
+-  }
+-
+-  ScopedAlertableState alertable_state_guard(true);
+-  auto deadline = ComputeAlertableDeadline(timeout);
+-  while (true) {
+-    if (DispatchCurrentThreadUserCallback()) {
+-      return WaitResult::kUserCallback;
+-    }
+-    if (HasAlertableTimeoutElapsed(deadline)) {
+-      return WaitResult::kTimeout;
+-    }
+-    result = posix_wait_handle_to_wait_on->condition().Wait(ComputeAlertableWaitTimeout(deadline));
+-    if (result != WaitResult::kTimeout) {
+-      return result;
+-    }
+-  }
++  return Wait(wait_handle_to_wait_on, is_alertable, timeout);
+ }
+ 
+ std::pair<WaitResult, size_t> WaitMultiple(WaitHandle* wait_handles[], size_t wait_handle_count,
+@@ -1228,21 +1290,13 @@ std::pair<WaitResult, size_t> WaitMultiple(WaitHandle* wait_handles[], size_t wa
+     return PosixConditionBase::WaitMultiple(std::move(conditions), wait_all, timeout);
+   }
+ 
+-  ScopedAlertableState alertable_state_guard(true);
+-  auto deadline = ComputeAlertableDeadline(timeout);
+-  while (true) {
+-    if (DispatchCurrentThreadUserCallback()) {
+-      return std::make_pair(WaitResult::kUserCallback, 0);
+-    }
+-    if (HasAlertableTimeoutElapsed(deadline)) {
+-      return std::make_pair(WaitResult::kTimeout, 0);
+-    }
+-    auto result = PosixConditionBase::WaitMultiple(std::vector<PosixConditionBase*>(conditions),
+-                                                   wait_all, ComputeAlertableWaitTimeout(deadline));
+-    if (result.first != WaitResult::kTimeout) {
+-      return result;
+-    }
++  ScopedAlertableState alertable_state_guard;
++  auto result = PosixConditionBase::WaitMultiple(std::move(conditions), wait_all, timeout,
++                                                &alertable_state_guard.waiter());
++  if (result.first == WaitResult::kUserCallback) {
++    DispatchCurrentThreadUserCallback();
+   }
++  return result;
+ }
+ 
+ class PosixEvent : public PosixConditionHandle<Event> {
+@@ -1449,6 +1503,7 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
      thread->handle_.exit_code_ = 0;
      thread->handle_.signaled_ = true;
      thread->handle_.cond_.notify_all();
-+    NotifyMultiWaiters();
++    thread->handle_.NotifyMultiWaiters();
    }
  
    current_thread_ = nullptr;
