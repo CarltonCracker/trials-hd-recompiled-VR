@@ -8,6 +8,14 @@
 
 namespace trials_hd {
 using RenderMatrix = std::array<float, 16>;
+using RenderPoint = std::array<float, 3>;
+
+// Row-vector transform (D3D layout, translation in elements 12..14).
+inline RenderPoint TransformPoint(const RenderMatrix& m, const RenderPoint& p) {
+  RenderPoint out;
+  for (int j = 0; j < 3; ++j) out[j] = p[0] * m[j] + p[1] * m[4 + j] + p[2] * m[8 + j] + m[12 + j];
+  return out;
+}
 
 inline RenderMatrix Multiply(const RenderMatrix& a, const RenderMatrix& b) {
   RenderMatrix out{};
@@ -77,7 +85,13 @@ inline bool Rotation(const RenderMatrix& m, std::array<float, 4>& q,
   return true;
 }
 
-inline RenderMatrix InterpolatePose(const RenderMatrix& a, const RenderMatrix& b, float alpha) {
+// Blends rotation along the arc and moves `pivot` (in the matrix's input space)
+// in a straight line. A matrix that spins about a point other than its origin -
+// Trials HD's wheels turn about a hub 0.83 units from theirs - needs that point
+// as the pivot: blending the origin in a straight line would cut across the
+// circle it swings on and pull the hub off its axle between ticks.
+inline RenderMatrix InterpolatePose(const RenderMatrix& a, const RenderMatrix& b, float alpha,
+                                    const RenderPoint& pivot = {}) {
   if (alpha <= 0) return a;
   if (alpha >= 1 || a == b) return b;
   RenderMatrix out;
@@ -102,27 +116,85 @@ inline RenderMatrix InterpolatePose(const RenderMatrix& a, const RenderMatrix& b
                          {2 * (x*z - y*w), 2 * (y*z + x*w), 1 - 2 * (x*x + y*y)}};
   for (int i = 0; i < 3; ++i)
     for (int j = 0; j < 3; ++j) out[i * 4 + j] = r[i][j] * std::lerp(sa[i], sb[i], alpha);
+  const auto pa = TransformPoint(a, pivot), pb = TransformPoint(b, pivot);
+  for (int j = 0; j < 3; ++j) out[12 + j] = 0;
+  const auto rotated = TransformPoint(out, pivot);
+  for (int j = 0; j < 3; ++j) out[12 + j] = std::lerp(pa[j], pb[j], alpha) - rotated[j];
   return out;
 }
+
+// The point (in a matrix's input space) that moves most steadily across ticks:
+// least squares on zero second differences of its transformed position over
+// consecutive ticks, decayed over time. Slowly rotating transforms constrain it
+// little, and the ridge term keeps their pivot near the origin.
+class PivotEstimate {
+ public:
+  void Add(const RenderMatrix& a, const RenderMatrix& b, const RenderMatrix& c) {
+    for (auto& row : normal_) for (auto& x : row) x *= kDecay;
+    for (auto& x : rhs_) x *= kDecay;
+    double d[3][3], e[3];
+    for (int i = 0; i < 3; ++i)
+      for (int j = 0; j < 3; ++j) d[i][j] = double(c[i * 4 + j]) - 2.0 * b[i * 4 + j] + a[i * 4 + j];
+    for (int j = 0; j < 3; ++j) e[j] = double(c[12 + j]) - 2.0 * b[12 + j] + a[12 + j];
+    for (int i = 0; i < 3; ++i) {
+      for (int k = 0; k < 3; ++k)
+        for (int j = 0; j < 3; ++j) normal_[i][k] += d[i][j] * d[k][j];
+      for (int j = 0; j < 3; ++j) rhs_[i] -= d[i][j] * e[j];
+    }
+    double m[3][3];
+    for (int i = 0; i < 3; ++i)
+      for (int k = 0; k < 3; ++k) m[i][k] = normal_[i][k] + (i == k ? kRidge : 0.0);
+    const double det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) -
+                       m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
+                       m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+    RenderPoint pivot{};
+    for (int col = 0; col < 3; ++col) {  // Cramer's rule.
+      double mc[3][3];
+      for (int i = 0; i < 3; ++i)
+        for (int k = 0; k < 3; ++k) mc[i][k] = k == col ? rhs_[i] : m[i][k];
+      pivot[col] = float((mc[0][0] * (mc[1][1] * mc[2][2] - mc[1][2] * mc[2][1]) -
+                          mc[0][1] * (mc[1][0] * mc[2][2] - mc[1][2] * mc[2][0]) +
+                          mc[0][2] * (mc[1][0] * mc[2][1] - mc[1][1] * mc[2][0])) / det);
+    }
+    if (std::isfinite(pivot[0] + pivot[1] + pivot[2]) &&
+        std::hypot(pivot[0], pivot[1], pivot[2]) < kMaxPivot) {
+      pivot_ = pivot;
+    }
+  }
+  const RenderPoint& pivot() const { return pivot_; }
+
+ private:
+  static constexpr double kDecay = 0.9, kRidge = 1e-3;
+  static constexpr float kMaxPivot = 8.f;
+  double normal_[3][3]{}, rhs_[3]{};
+  RenderPoint pivot_{};
+};
 
 // Larger changes between ticks are teleports (respawns, cuts) and snap.
 constexpr float kPoseSnapDistance = 2.f;
 
 class PoseHistory {
  public:
+  // Cameras pass false: their origin is the eye, which is what should move straight.
+  PoseHistory() = default;
+  explicit PoseHistory(bool estimate_pivot) : estimate_pivot_(estimate_pivot) {}
+
   RenderMatrix Sample(uint32_t tick, const RenderMatrix& pose, float alpha) {
+    const auto& pivot = pivot_.pivot();
+    const auto moved = TransformPoint(pose, pivot), last = TransformPoint(current_, pivot);
     // shortcut: >2-unit jumps snap as teleports; use explicit reset signals to blend faster debris.
     if (!valid_ || (tick != tick_ && tick != tick_ + 1) ||
-        std::hypot(pose[12] - current_[12], pose[13] - current_[13],
-                   pose[14] - current_[14]) > kPoseSnapDistance) {
+        std::hypot(moved[0] - last[0], moved[1] - last[1], moved[2] - last[2]) > kPoseSnapDistance) {
       previous_ = pose;
+      consecutive_ = 1;
     } else if (tick != tick_) {
+      if (estimate_pivot_ && ++consecutive_ >= 3) pivot_.Add(previous_, current_, pose);
       previous_ = current_;
     }
     current_ = pose;
     tick_ = tick;
     valid_ = true;
-    return InterpolatePose(previous_, current_, alpha);
+    return InterpolatePose(previous_, current_, alpha, pivot_.pivot());
   }
   uint32_t tick() const { return tick_; }
   bool valid() const { return valid_; }
@@ -136,8 +208,9 @@ class PoseHistory {
   }
  private:
   RenderMatrix previous_{}, current_{};
-  uint32_t tick_ = 0;
-  bool valid_ = false;
+  PivotEstimate pivot_;
+  uint32_t tick_ = 0, consecutive_ = 0;
+  bool valid_ = false, estimate_pivot_ = true;
 };
 
 // One camera object can render several views in a frame (Trials HD draws the
@@ -167,12 +240,13 @@ class PoseTracks {
         }
         if (uint32_t(tick - track.tick()) > uint32_t(tick - best->tick())) best = &track;
       }
-      *best = {};
+      *best = PoseHistory(false);
     }
     return best->Sample(tick, pose, alpha);
   }
  private:
-  std::array<PoseHistory, 4> tracks_{};
+  std::array<PoseHistory, 4> tracks_{PoseHistory(false), PoseHistory(false), PoseHistory(false),
+                                     PoseHistory(false)};
 };
 
 // Restore graphics-camera/renderer inputs; model matrices only live in guest-stack scratch.

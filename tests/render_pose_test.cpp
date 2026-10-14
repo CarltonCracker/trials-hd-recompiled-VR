@@ -104,6 +104,36 @@ int main() {
   Check(views.Sample(23, Pose(40), .5f) == Pose(40)); // A new view or a cut snaps.
   Check(Near(views.Sample(23, Pose(.69f), .5f)[12], .675f)); // Existing views still blend.
 
+  // A wheel spinning 55 degrees per tick about a hub 0.83 units from its matrix origin, while
+  // flying along: its hub must stay on a straight path between ticks (blending the origin in a
+  // straight line pulled the hub up to 0.06 units off its axle - an oval wobble).
+  {
+    const RenderPoint hub = {.1f, .35f, -.75f};
+    auto wheel = [&](uint32_t tick) {
+      const float angle = .96f * float(tick), c = std::cos(angle), s = std::sin(angle);
+      RenderMatrix m = {1,0,0,0, 0,c,s,0, 0,-s,c,0, 0,0,0,1};  // Spin about the X axle.
+      const auto spun = TransformPoint(m, hub);
+      const RenderPoint at = {.15f * float(tick), 2 - .01f * float(tick * tick), 0};
+      for (int j = 0; j < 3; ++j) m[12 + j] = at[j] - spun[j];
+      return m;
+    };
+    PoseHistory spinning;
+    float worst = 0;
+    for (uint32_t tick = 0; tick < 30; ++tick) {
+      for (float alpha : {.25f, .5f, .75f}) {
+        const auto drawn = TransformPoint(spinning.Sample(tick, wheel(tick), alpha), hub);
+        if (tick < 4) continue;
+        const auto from = TransformPoint(wheel(tick - 1), hub), to = TransformPoint(wheel(tick), hub);
+        for (int j = 0; j < 3; ++j) worst = std::max(worst, std::abs(drawn[j] - std::lerp(from[j], to[j], alpha)));
+      }
+    }
+    Check(worst < .002f);
+    // Transforms turning slowly about their own origin keep the origin as the pivot.
+    PoseHistory turning;
+    for (uint32_t tick = 0; tick < 30; ++tick) turning.Sample(tick, Pose(.05f * float(tick), .01f * float(tick)), .5f);
+    Check(Near(turning.Sample(30, Pose(1.5f, .3f), .5f)[12], 1.475f));
+  }
+
   // At 120/144/240 Hz, shader poses are distinct even though simulation stays at 60 Hz.
   for (int fps : {120,144,240}) {
     FrameClock clock;
