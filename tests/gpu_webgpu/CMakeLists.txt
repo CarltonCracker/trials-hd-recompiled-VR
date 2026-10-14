@@ -100,6 +100,23 @@ target_compile_options(pipeline_state_test PRIVATE -fno-strict-aliasing -ffp-mod
 target_link_libraries(pipeline_state_test PRIVATE
     ${_runtime} ${_spdlog} ${_fmt} dawn::webgpu_dawn Threads::Threads)
 
+add_executable(wgsl_prelude_test
+    wgsl_prelude_test.cpp
+    ${_prelude}
+    ${REXSDK_DIR}/src/graphics/xenos.cpp
+    ${REXSDK_DIR}/src/graphics/registers.cpp
+    ${REXSDK_DIR}/src/graphics/flags.cpp)
+target_include_directories(wgsl_prelude_test PRIVATE
+    ${_repo}/src/gpu_webgpu ${CMAKE_CURRENT_BINARY_DIR}
+    ${REXSDK_DIR}/include ${REXSDK_BUILD_DIR}/include
+    ${REXSDK_DIR}/thirdparty/renderdoc
+    ${REXSDK_DIR}/thirdparty/simde
+    ${REXSDK_DIR}/thirdparty/fmt/include ${REXSDK_DIR}/thirdparty/spdlog/include)
+target_compile_definitions(wgsl_prelude_test PRIVATE SPDLOG_COMPILED_LIB SPDLOG_FMT_EXTERNAL)
+target_compile_options(wgsl_prelude_test PRIVATE -fno-strict-aliasing -ffp-model=strict -fno-char8_t)
+target_link_libraries(wgsl_prelude_test PRIVATE
+    ${_runtime} ${_spdlog} ${_fmt} dawn::webgpu_dawn Threads::Threads)
+
 enable_testing()
 add_test(NAME shared_memory COMMAND shared_memory_test)
 add_test(NAME alu COMMAND alu_test)
@@ -107,3 +124,5 @@ add_test(NAME format_tables COMMAND format_tables_test)
 add_test(NAME sampler_cache COMMAND sampler_cache_test)
 add_test(NAME diff_draws COMMAND python3 ${_repo}/tools/diff_draws.py --self-test)
 add_test(NAME pipeline_state COMMAND pipeline_state_test)
+add_test(NAME wgsl_prelude COMMAND wgsl_prelude_test)
+

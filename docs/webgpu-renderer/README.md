@@ -1812,7 +1812,7 @@ ambiguity, it stops and writes the question into the task's notes instead of gue
 | ID | Status | Tier | Task | Depends | Done when |
 | --- | --- | --- | --- | --- | --- |
 | S-17 | todo | M | Compute-shader test harness for WGSL helpers: run a WGSL function over input arrays on the GPU via Dawn and compare against a C++ reference. | S-13 | sample test passes |
-| S-18 | todo | S | `wgsl_prelude.wgsl` helpers with tests against the SDK's C++ (`include/rex/graphics/xenos.h`): endian swaps (8in16, 8in32, 16in32), float24 (20e4) ↔ float32, 7e3 ↔ float32, signed and unsigned 10:10:10:2 unpack, 16-bit snorm/float unpack, Xenos `k_16_16` RT ±32 scaling. | S-17 | all helper tests pass |
+| S-18 | done 2026-10-14 | S | `wgsl_prelude.wgsl` helpers with tests against the SDK's C++ (`include/rex/graphics/xenos.h`): endian swaps (8in16, 8in32, 16in32), float24 (20e4) ↔ float32, 7e3 ↔ float32, signed and unsigned 10:10:10:2 unpack, 16-bit snorm/float unpack, Xenos `k_16_16` RT ±32 scaling. | S-17 | all helper tests pass (`wgsl_prelude_test 0/1`) |
 | S-19 | todo | S | Port texture-load compute shaders to WGSL, **one task per shader**: `texture_load_32bpb`, `_64bpb`, `_8bpb`, `_128bpb` (BC block copies), `_depth_float`. Source: Xenia's XeSL at the SDK's revision (or `tint` from the SDK's SPIR-V headers, then clean up). Test: same input buffer through the SDK's Vulkan SPIR-V version and the WGSL version, outputs compared byte for byte. | S-17 | identical output on synthetic tiled inputs (never commit game data) |
 | S-20 | todo | S | Port the gamma shaders (`apply_gamma_table`, `apply_gamma_pwl`) to WGSL with tests. | S-17 | matches CPU reference |
 | S-21 | done 2026-10-14 c2c132d ( inside L-02, checked with the F1 menu, not `webgpu_smoke`) | S | WGSL for the ImGui immediate drawer (textured, vertex-colored quads, scissor). | S-13 | renders the ImGui demo window in `webgpu_smoke` |
@@ -2282,5 +2282,14 @@ finding: `YYYY-MM-DD <agent> <task ID>: what changed; evidence; what is left`.
     and `WebGpuBackend`. Authored comprehensive unit tests in `tests/gpu_webgpu/pipeline_state_test.cpp` verifying
     all Section 5.4 blend modes, stencil operations, rasterizer states, depth bias scaling, and live Dawn render
     pipeline compilation across both GPUs (NVIDIA RTX 2070 SUPER and AMD RX 6600) with 0 validation errors.
+  - **S-18:** Added essential Xenos format conversion helpers to `src/gpu_webgpu/wgsl/wgsl_prelude.wgsl`:
+    vector endian swap `xe_endian_swap4` (8in16, 8in32, 16in32), Float24 (20e4) [0, 2) depth ↔ IEEE float32 (`xe_float20e4_to_32`,
+    `xe_float32_to_20e4`), Float 7e3 [0, 32) color ↔ IEEE float32 (`xe_float7e3_to_32`, `xe_float32_to_7e3`), 10:10:10:2 unpack
+    for unorm and snorm (including `no_zero` mode), 16-bit unpacks (`xe_unpack_16_16_float`, `_snorm`, `_unorm`), and Xenos
+    `k_16_16` RT ±32 range scaling (`xe_scale_k_16_16_to_host`, `_from_host`). Created differential GPU compute unit tests in
+    `tests/gpu_webgpu/wgsl_prelude_test.cpp` verifying execution on physical GPUs via Dawn compute pipelines against the SDK's C++
+    implementations in `include/rex/graphics/xenos.h` (`Float7e3To32`, `Float20e4To32`, `Float32To20e4`, `__builtin_bswap32`); verified
+    exact bit-for-bit matches on both NVIDIA RTX 2070 SUPER and AMD RX 6600 with 0 Dawn validation errors.
+
 
 
