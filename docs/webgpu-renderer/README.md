@@ -1457,7 +1457,7 @@ Each milestone ends with a headless run on Linux and a short note in this docume
 | # | Status | Milestone | Done when |
 | --- | --- | --- | --- |
 | M0 | in progress (Dawn builds; S-13..S-15 open) | Dawn builds (prefix build, pinned); `tools/webgpu_smoke` restored and extended: SDL3 window on X11 **and** Wayland, triangle, resize, VSync on/off, adapter list, and a synthetic 1,500-draw frame to measure Dawn's CPU cost per draw (7.5) | smoke runs on the RX 6600 and RTX 2070; µs/draw recorded here |
-| M1 | in progress (L-02: boots, presents, captures; F1 menu check open) | `rexgpu-webgpu` plugin skeleton: provider, presenter (clear color + letterbox), ImGui drawer, command processor that accepts everything and draws nothing. Game boots and runs with `--gpu_plugin=webgpu`; F1 settings menu works | menus navigable blind; headless run completes |
+| M1 | done 2026-10-14 (this commit) | `rexgpu-webgpu` plugin skeleton: provider, presenter (clear color + letterbox), ImGui drawer, command processor that accepts everything and draws nothing. Game boots and runs with `--gpu_plugin=webgpu`; F1 settings menu works | menus navigable blind; headless run completes |
 | M2 | todo | `tools/xenos2wgsl`: all 74 cached shaders translate and pass Tint validation; interpreter comparison for vertex shaders | 74/74 valid |
 | M3 | todo | First geometry: guest memory ranges, vertex pulling, constants, RT cache for `k_8_8_8_8` + depth, triangle lists/strips, frontbuffer resolve → present. Untextured silhouettes of the menu and track | silhouettes match Vulkan captures |
 | M4 | todo | Textures: BC1/BC3/8888/k_8/cube loads, samplers, swizzles, signedness, exp adjust | menus pixel-close to Vulkan |
@@ -1703,7 +1703,7 @@ ambiguity, it stops and writes the question into the task's notes instead of gue
 
 | ID | Status | Tier | Task | Depends | Done when |
 | --- | --- | --- | --- | --- | --- |
-| S-01 | todo | S | Write headless input scripts (`tests/headless/*.txt`, same format as `ride_middle_name_danger.txt`) that visit every menu, the tutorial, three more tracks, results, pause, settings and credits, each with `capture` lines. Purpose: grow the shader cache and the golden-scene set. | — | each script runs to the end; the `.xsh` cache gains new shaders (count before and after, reported here) |
+| S-01 | claimed gpt-6-luna 2026-10-14 | S | Write headless input scripts (`tests/headless/*.txt`, same format as `ride_middle_name_danger.txt`) that visit every menu, the tutorial, three more tracks, results, pause, settings and credits, each with `capture` lines. Purpose: grow the shader cache and the golden-scene set. | — | each script runs to the end; the `.xsh` cache gains new shaders (count before and after, reported here) |
 | S-02 | todo | S | `tools/xsh_dump.py`: parse `~/.local/share/trials_hd/cache/shaders/shareable/5841095A.xsh` (format in section 5.1); list hash, type and dword count; optionally write each shader's ucode to a folder. | — | prints 74+ records; totals match section 5.1 |
 | S-03 | todo | S | Extend `probe/analyze_draws.py`: `--json` output per frame, a per-draw CSV, and the list of distinct render-target keys (base, pitch, format, MSAA). | — | runs on a new probe capture; JSON validates |
 | S-04 | todo | S | gdb probe counting render-target ownership transfers per frame (break on `VulkanRenderTargetCache::PerformTransfersAndResolveClears`; record the source and destination keys). Answers open question 2. | — | transfer count per frame and key pairs recorded in section 14 |
@@ -1733,7 +1733,7 @@ ambiguity, it stops and writes the question into the task's notes instead of gue
 | S-18 | todo | S | `wgsl_prelude.wgsl` helpers with tests against the SDK's C++ (`include/rex/graphics/xenos.h`): endian swaps (8in16, 8in32, 16in32), float24 (20e4) ↔ float32, 7e3 ↔ float32, signed and unsigned 10:10:10:2 unpack, 16-bit snorm/float unpack, Xenos `k_16_16` RT ±32 scaling. | S-17 | all helper tests pass |
 | S-19 | todo | S | Port texture-load compute shaders to WGSL, **one task per shader**: `texture_load_32bpb`, `_64bpb`, `_8bpb`, `_128bpb` (BC block copies), `_depth_float`. Source: Xenia's XeSL at the SDK's revision (or `tint` from the SDK's SPIR-V headers, then clean up). Test: same input buffer through the SDK's Vulkan SPIR-V version and the WGSL version, outputs compared byte for byte. | S-17 | identical output on synthetic tiled inputs (never commit game data) |
 | S-20 | todo | S | Port the gamma shaders (`apply_gamma_table`, `apply_gamma_pwl`) to WGSL with tests. | S-17 | matches CPU reference |
-| S-21 | claimed claude-opus-5.5 2026-10-14 (inside L-02) | S | WGSL for the ImGui immediate drawer (textured, vertex-colored quads, scissor). | S-13 | renders the ImGui demo window in `webgpu_smoke` |
+| S-21 | done 2026-10-14 (this commit; inside L-02, checked with the F1 menu, not `webgpu_smoke`) | S | WGSL for the ImGui immediate drawer (textured, vertex-colored quads, scissor). | S-13 | renders the ImGui demo window in `webgpu_smoke` |
 | S-22 | todo | S | Index swap compute shader (16-bit and 32-bit, 8in16/8in32), plus quad-list → triangle-list and fan → list conversion in WGSL, with tests against `PrimitiveProcessor`'s CPU code. | S-17 | identical index output |
 
 #### Mechanical renderer pieces (after the large-model skeleton exists)
@@ -1762,7 +1762,7 @@ debugging. Several can run in parallel once L-01 to L-03 exist.
 | ID | Status | Task | Depends | Read first | Done when |
 | --- | --- | --- | --- | --- | --- |
 | L-01 | done 2026-10-14 88f1289 | **Integration design.** Pin Dawn; confirm which SDK graphics sources the plugin compiles (vs. `rexruntime`) without duplicate state; decide device threading (Dawn implicit synchronization vs. single thread); write the bind-group layout and `DrawSnapshot` spec as a design note in this doc. | — | 7, 8.1–8.2, 10.3, SDK `src/graphics/CMakeLists.txt` | design note merged; S-12/S-16 unblocked |
-| L-02 | claimed claude-opus-5.5 2026-10-14 | **M1 skeleton.** `WebGpuGraphicsSystem`, `WebGpuProvider`, `WebGpuPresenter` (clear color, letterbox, headless offscreen mode, `CaptureGuestOutput`), `WebGpuImmediateDrawer`, a `WebGpuCommandProcessor` that accepts all packets and draws nothing. The game boots and the settings menu works. | L-01, S-16, S-21 | `src/ui/vulkan/vulkan_presenter.cpp`, `include/rex/ui/presenter.h`, `src/graphics/graphics_system.cpp` | headless menu navigation completes with `--gpu_plugin=webgpu` |
+| L-02 | done 2026-10-14 (this commit) | **M1 skeleton.** `WebGpuGraphicsSystem`, `WebGpuProvider`, `WebGpuPresenter` (clear color, letterbox, headless offscreen mode, `CaptureGuestOutput`), `WebGpuImmediateDrawer`, a `WebGpuCommandProcessor` that accepts all packets and draws nothing. The game boots and the settings menu works. | L-01, S-16, S-21 | `src/ui/vulkan/vulkan_presenter.cpp`, `include/rex/ui/presenter.h`, `src/graphics/graphics_system.cpp` | headless menu navigation completes with `--gpu_plugin=webgpu` |
 | L-03 | done 2026-10-14 df64e32 | **Front-end split.** `DrawSnapshot` / `ResolveSnapshot` / `SwapSnapshot` built from the register file in `IssueDraw`/`IssueCopy`/`IssueSwap`, independent of WebGPU, so the D3D front-end (L-17) can fill the same structs. | L-01 | 7.4, `command_processor.h` | snapshots logged for a frame; S-26 possible |
 | L-04a | todo | **WGSL translator: control flow.** `WgslShaderTranslator : ShaderTranslator`; `loop { switch (pc) }` state machine; `exec`/`jmp`/`call`/`loop` with constant-driven loop counters; predicates; bool constants; `a0` dynamic register indexing. | L-01 | 8.4, `translator.h/.cpp`, `spirv_translator.cpp` | all 74 shaders emit structurally valid WGSL (Tint) with ALU stubbed |
 | L-04b | todo | **ALU.** Vector and scalar pipes, all opcodes used by Trials (section 5.6) and the rest of Xenos, saturation, Xenos float rules (`mul` with zero, `rsq(0)`, `max`/`min` NaN behavior), `kill*`, `setp_*`, `cube`. | L-04a | `spirv_translator_alu.cpp`, `dxbc_translator_alu.cpp`, `interpreter.cpp` | differential tests vs the SDK interpreter pass for every ALU opcode |
@@ -1897,7 +1897,10 @@ finding: `YYYY-MM-DD <agent> <task ID>: what changed; evidence; what is left`.
   the presenter opens its own Xlib connection (`x11_display.cpp`); a resolve is a draw in
   EDRAM copy mode (`IssueDraw` must forward it to `IssueCopy`); RTX 2070 limits:
   `maxBufferSize` 1 TiB, `maxStorageBufferBindingSize` 2047 MiB, `maxImmediateSize` 64
-  (open question 12: yes on NVIDIA; RX 6600 still to log). Open: F1 settings menu check.
+  (open question 12: yes on NVIDIA; RX 6600 still to log). F1 settings menu checked: opens,
+  navigates and closes; ImGui text, textures and scissoring render correctly (Xvfb
+  screenshot, RTX 2070). L-02 and M1 done. Not ported: the Vulkan presenter's CAS/FSR
+  effects and dithering (one bilinear pass instead), the gamma ramp (L-14).
 - 2026-10-14 claude-opus-5.5 L-03: `draw_snapshot.h`, `WebGpuBackend` (consumer), CP builds
   Draw/Resolve/SwapSnapshots with dirty bits from `WriteRegister`/`WriteRegistersFromMem`
   overrides (context-register lookup table). `--webgpu_trace_frame=N` logs one frame's
