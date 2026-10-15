@@ -50,7 +50,16 @@ The default SDK paths refer to `thirdparty/rexglue-sdk` and the existing
   Covers all eight alpha functions, disabled alpha testing, finite/NaN references,
   NaN/infinite alpha, discard preserving color/depth clears, finite depth clamping,
   interpolators, and front/back-facing and point-parameter sign generation.
-  Point-sprite Z/W coordinates and other target-format conversions are not covered.
+- **Target conversions:** 128 additional real-fragment cases use the production
+  format table's Tier-1 and fallback mappings: RGBA8Unorm, RGB10A2Unorm,
+  RG/RGBA16Snorm, RG/RGBA16Float and R/RG32Float. Covers four MRTs, signed
+  range/clamping, quantization and per-target exponent scales. Half attachments
+  accept exactly the two neighboring representable results permitted by
+  [Vulkan floating-point conversion](https://docs.vulkan.org/spec/latest/chapters/fundamentals.html),
+  rather than assuming CPU round-to-nearest.
+  `output_test` requires `TextureFormatsTier1`; other fixtures retain their
+  default feature requirements. Gamma RT output and point-sprite Z/W coordinates
+  are not covered.
 
 Floating arithmetic uses a 2e-5 relative/absolute tolerance; NaN and infinity
 classification must match. Reserved opcodes are not instructions and are excluded.

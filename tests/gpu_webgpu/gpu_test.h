@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <initializer_list>
 #include <string>
 #include <vector>
 
@@ -27,7 +28,7 @@ struct GpuTest {
   std::atomic<unsigned> errors{0};
   wgpu::Device device;
 
-  explicit GpuTest(unsigned index) {
+  explicit GpuTest(unsigned index, std::initializer_list<wgpu::FeatureName> features = {}) {
     wgpu::RequestAdapterOptions options;
     options.backendType = wgpu::BackendType::Vulkan;
     auto adapters = native.EnumerateAdapters(&options);
@@ -36,7 +37,10 @@ struct GpuTest {
     wgpu::AdapterInfo info;
     adapter.GetInfo(&info);
     std::printf("adapter %u: %.*s\n", index, int(info.device.length), info.device.data);
+    for (auto feature : features) { GPU_CHECK(adapter.HasFeature(feature)); }
     wgpu::DeviceDescriptor device_desc;
+    device_desc.requiredFeatureCount = features.size();
+    device_desc.requiredFeatures = features.begin();
     device_desc.SetUncapturedErrorCallback(
         [](const wgpu::Device&, wgpu::ErrorType, wgpu::StringView message, GpuTest* test) {
           ++test->errors;

@@ -12,6 +12,7 @@
 #include <rex/string/buffer.h>
 #include <rex/system/xmemory.h>
 #include "gpu_test.h"
+#include "format_tables.h"
 #include "wgsl/wgsl_shader_translator.h"
 
 using namespace rex::graphics;
@@ -121,9 +122,136 @@ void CheckPositions(GpuTest& gpu) {
   std::puts("PASS: 256 position cases: all VTE formats, signed/reciprocal W, Y flip, half-pixel offsets and reverse-Z transform");
 }
 
+void CheckFormats(GpuTest& gpu, Shader& shader, ShaderInterpreter& interpreter,
+                  RegisterFile& regs, const wgpu::ShaderModule& vertex) {
+  using F = xenos::ColorRenderTargetFormat;
+  const std::array<F, 8> formats = {F::k_8_8_8_8, F::k_2_10_10_10, F::k_2_10_10_10_FLOAT,
+      F::k_16_16, F::k_16_16_16_16, F::k_16_16_FLOAT, F::k_32_FLOAT, F::k_32_32_FLOAT};
+  auto uniform = gpu.Buffer(sizeof(WgslSystemConstants), wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst);
+  auto constants = gpu.Buffer(4 * sizeof(Vec), wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst);
+  wgpu::TextureDescriptor td; td.size = {2, 2, 1};
+  td.format = wgpu::TextureFormat::Depth32Float; td.usage = wgpu::TextureUsage::RenderAttachment;
+  auto depth_texture = gpu.device.CreateTexture(&td);
+  WgslShaderTranslator translator;
+  WgslShaderTranslator::Modification modification;
+  modification.value = translator.GetDefaultPixelShaderModification(64);
+  modification.interpolator_mask = 15; modification.color_targets = 15;
+  auto* translation = shader.GetOrCreateTranslation(modification.value);
+  GPU_CHECK(translator.TranslateAnalyzedShader(*translation));
+  GPU_CHECK(translation->errors().empty());
+  auto fragment = gpu.Module(translation->GetTranslatedBinaryString());
+  unsigned cases = 0;
+  for (bool tier1_mapping : {false, true}) {
+    auto features = format_tables::DeviceFeatures::FromDevice(gpu.device);
+    features.texture_formats_tier1 = tier1_mapping;
+    for (auto format : formats) {
+      auto info = format_tables::GetColorRenderTargetFormatInfo(format, features);
+      GPU_CHECK(info.is_supported);
+      auto host = info.host_format;
+      unsigned channels = host == wgpu::TextureFormat::R32Float ? 1 :
+          (host == wgpu::TextureFormat::RG16Float || host == wgpu::TextureFormat::RG16Snorm ||
+           host == wgpu::TextureFormat::RG32Float) ? 2 : 4;
+      unsigned pixel_bytes = host == wgpu::TextureFormat::RGBA8Unorm || host == wgpu::TextureFormat::RGB10A2Unorm ? 4 :
+          (host == wgpu::TextureFormat::R32Float || host == wgpu::TextureFormat::RG32Float) ? channels * 4 : channels * 2;
+      std::array<wgpu::Texture, 4> targets;
+      std::array<wgpu::ColorTargetState, 4> colors;
+      td.format = host; td.usage = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::CopySrc;
+      for (unsigned i = 0; i < 4; ++i) { targets[i] = gpu.device.CreateTexture(&td); colors[i].format = host; }
+      wgpu::FragmentState fs; fs.module = fragment; fs.entryPoint = "main";
+      fs.targetCount = colors.size(); fs.targets = colors.data();
+      wgpu::DepthStencilState ds; ds.format = wgpu::TextureFormat::Depth32Float;
+      ds.depthWriteEnabled = true; ds.depthCompare = wgpu::CompareFunction::Always;
+      wgpu::RenderPipelineDescriptor pd; pd.vertex.module = vertex; pd.vertex.entryPoint = "vs";
+      pd.fragment = &fs; pd.depthStencil = &ds;
+      auto pipeline = gpu.device.CreateRenderPipeline(&pd);
+      std::array<wgpu::BindGroupEntry, 3> entries;
+      entries[0].binding = 0; entries[0].buffer = uniform; entries[0].size = sizeof(WgslSystemConstants);
+      entries[1].binding = 2; entries[1].buffer = constants; entries[1].size = 4 * sizeof(Vec);
+      entries[2].binding = 7; entries[2].buffer = constants; entries[2].size = 4 * sizeof(Vec);
+      wgpu::BindGroupDescriptor bd; bd.layout = pipeline.GetBindGroupLayout(0);
+      bd.entryCount = entries.size(); bd.entries = entries.data();
+      auto group = gpu.device.CreateBindGroup(&bd);
+      for (float value : {-40.0f, -32.0f, -0.5f, 0.0f, 0.5f, 31.999f, 32.0f, 40.0f}) {
+        const std::array<Vec, 4> input = {{{value, value * 0.5f, -value, 0.75f}, {-value, 1, 0.5f, value},
+            {value * 2, 0.125f, -0.25f, 1}, {0.03125f, value, -8, 0.5f}}};
+        WgslSystemConstants system;
+        const std::array<float, 4> exponents = {0.125f, 1.0f, 8.0f, 0.5f};
+        for (unsigned i = 0; i < 4; ++i) { system.color_output_scale[i] = info.output_scale * exponents[i]; }
+        gpu.device.GetQueue().WriteBuffer(uniform, 0, &system, sizeof(system));
+        gpu.device.GetQueue().WriteBuffer(constants, 0, input.data(), sizeof(input));
+        std::memcpy(&regs.values[XE_GPU_REG_SHADER_CONSTANT_000_X], input.data(), sizeof(input));
+        std::fill_n(interpreter.temp_registers(), xenos::kMaxShaderTempRegisters * 4, 0.0f);
+        for (unsigned i = 0; i < 4; ++i) { std::copy(input[i].begin(), input[i].end(), interpreter.temp_registers() + i * 4); }
+        Exports exports; interpreter.SetExportSink(&exports); interpreter.Execute();
+        std::array<wgpu::RenderPassColorAttachment, 4> attachments;
+        for (unsigned i = 0; i < 4; ++i) {
+          attachments[i].view = targets[i].CreateView(); attachments[i].loadOp = wgpu::LoadOp::Clear;
+          attachments[i].storeOp = wgpu::StoreOp::Store;
+        }
+        wgpu::RenderPassDepthStencilAttachment depth; depth.view = depth_texture.CreateView();
+        depth.depthLoadOp = wgpu::LoadOp::Clear; depth.depthStoreOp = wgpu::StoreOp::Store; depth.depthClearValue = 1;
+        wgpu::RenderPassDescriptor rp; rp.colorAttachmentCount = attachments.size();
+        rp.colorAttachments = attachments.data(); rp.depthStencilAttachment = &depth;
+        auto encoder = gpu.device.CreateCommandEncoder(); auto pass = encoder.BeginRenderPass(&rp);
+        pass.SetPipeline(pipeline); pass.SetBindGroup(0, group); pass.Draw(3); pass.End();
+        auto readback = gpu.Buffer(4 * 512, wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::CopySrc);
+        for (unsigned i = 0; i < 4; ++i) {
+          wgpu::TexelCopyTextureInfo from; from.texture = targets[i];
+          wgpu::TexelCopyBufferInfo to; to.buffer = readback; to.layout.offset = i * 512;
+          to.layout.bytesPerRow = 256; to.layout.rowsPerImage = 2;
+          wgpu::Extent3D extent{2, 2, 1}; encoder.CopyTextureToBuffer(&from, &to, &extent);
+        }
+        auto command = encoder.Finish(); gpu.device.GetQueue().Submit(1, &command);
+        auto bytes = gpu.Read(readback, 4 * 512);
+        for (unsigned i = 0; i < 4; ++i) {
+          const uint8_t* pixel = bytes.data() + i * 512 + 256 + pixel_bytes;
+          for (unsigned c = 0; c < channels; ++c) {
+            float expected = exports.values[i][c] * system.color_output_scale[i];
+            float actual, tolerance = 2e-5f * std::max(1.0f, std::abs(expected));
+            if (host == wgpu::TextureFormat::RGBA8Unorm || host == wgpu::TextureFormat::RGB10A2Unorm) {
+              unsigned maximum = host == wgpu::TextureFormat::RGBA8Unorm ? 255 : c == 3 ? 3 : 1023;
+              uint32_t packed; std::memcpy(&packed, pixel, 4);
+              unsigned component = host == wgpu::TextureFormat::RGBA8Unorm ? pixel[c] : (packed >> (c * 10)) & maximum;
+              actual = float(component) / maximum; expected = std::clamp(expected, 0.0f, 1.0f);
+              tolerance = 0.51f / maximum + 2e-5f;
+            } else if (host == wgpu::TextureFormat::RG16Snorm || host == wgpu::TextureFormat::RGBA16Snorm) {
+              int16_t component; std::memcpy(&component, pixel + c * 2, 2);
+              actual = std::max(-1.0f, float(component) / 32767.0f); expected = std::clamp(expected, -1.0f, 1.0f);
+              tolerance = 0.51f / 32767.0f + 2e-5f;
+            } else if (host == wgpu::TextureFormat::R32Float || host == wgpu::TextureFormat::RG32Float) {
+              std::memcpy(&actual, pixel + c * 4, 4);
+            } else {
+              _Float16 component; std::memcpy(&component, pixel + c * 2, 2);
+              actual = float(component);
+              _Float16 nearest = _Float16(expected);
+              float rounded = float(nearest), adjacent = rounded;
+              // Vulkan attachment conversion permits either neighboring half, not only round-to-nearest.
+              if (rounded != expected) {
+                uint16_t bits; std::memcpy(&bits, &nearest, 2);
+                bits = uint16_t(((rounded < expected) != std::signbit(expected)) ? bits + 1 : bits - 1);
+                std::memcpy(&nearest, &bits, 2); adjacent = float(nearest);
+              }
+              expected = actual == adjacent ? adjacent : rounded;
+              tolerance = 0;
+            }
+            if (!std::isfinite(actual) || std::abs(actual - expected) > tolerance) {
+              std::fprintf(stderr, "RT format%u tier1%u input%.9g target%u c%u GPU%.9g CPU%.9g\n",
+                  unsigned(format), unsigned(tier1_mapping), value, i, c, actual, expected);
+              GPU_CHECK(false);
+            }
+          }
+        }
+        ++cases;
+      }
+    }
+  }
+  std::printf("PASS: %u MRT format-conversion cases, production Tier-1/fallback mappings and exponent scales\n", cases);
+}
+
 int main(int argc, char** argv) {
   rex::InitLogging();
-  GpuTest gpu(argc > 1 ? unsigned(std::strtoul(argv[1], nullptr, 10)) : 0);
+  GpuTest gpu(argc > 1 ? unsigned(std::strtoul(argv[1], nullptr, 10)) : 0,
+      {wgpu::FeatureName::TextureFormatsTier1});
   CheckPositions(gpu);
   rex::memory::Memory memory; // The authored pixel shader does not access guest memory.
   RegisterFile regs;
@@ -274,5 +402,6 @@ struct Out {
       }
     }
   }
+  CheckFormats(gpu, shader, interpreter, regs, vertex);
   std::printf("PASS: %u output cases: 4 MRTs, exponent scales, alpha comparisons/discards, depth, interpolators and facing/point parameter signs\n", cases);
 }

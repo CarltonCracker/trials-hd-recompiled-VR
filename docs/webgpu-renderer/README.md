@@ -2289,9 +2289,18 @@ finding: `YYYY-MM-DD <agent> <task ID>: what changed; evidence; what is left`.
     This is one menu scene, not whole-game parity; SDK heap-release (52), audio
     device and duplicate-cvar errors remain, so it is not a clean-runtime claim.
     Images/logs stay local under `out/webgpu-fetch-game/output-menu`.
+  - Added **128 real-fragment host RT conversion cases per GPU**, passing on
+    both adapters together with the 256 position / 810 fragment cases. Uses
+    Gemini's production format table for Tier-1 and fallback paths: RGBA8Unorm,
+    RGB10A2Unorm, RG/RGBA16Snorm, RG/RGBA16Float and R/RG32Float; four MRTs,
+    signed range/clamping, quantization and independent exponent scales.
+    The fixture requests TextureFormatsTier1 explicitly; existing fixtures keep
+    their default feature set. Vulkan permits either neighboring half on
+    attachment conversion; the oracle checks those exact candidates instead of
+    incorrectly requiring CPU round-to-nearest (observed at 31.999 / 8 on NVIDIA).
   - L-04e remains claimed/in progress: broader viewport-register coverage,
-    rasterized reverse-Z/float24, other RT conversions and actual point
-    coordinates remain open.
+    rasterized reverse-Z/float24, gamma RT output and actual point coordinates
+    remain open.
 - 2026-10-14 antigravity (Tier S tasks completion):
   - **S-01:** Executed 7 headless test scripts (`main_menu_nav.txt`, `settings_menu.txt`,
     `credits.txt`, `ride_tutorial.txt`, `ride_middle_name_danger.txt`, `ride_hello_world.txt`,
