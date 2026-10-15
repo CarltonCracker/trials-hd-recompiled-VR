@@ -64,6 +64,9 @@ class TextureCache {
   // Resolve aliases are dropped when the CPU writes the memory again.
 
   size_t texture_count() const { return textures_.size(); }
+  // Changes whenever a view or its contents may change (a CPU write to a
+  // texture, a resolve): views from GetView stay valid while it is the same.
+  uint64_t epoch() const { return epoch_.load(std::memory_order_acquire); }
   SamplerCache& sampler_cache() { return sampler_cache_; }
   const SamplerCache& sampler_cache() const { return sampler_cache_; }
 
@@ -141,6 +144,7 @@ class TextureCache {
   rex::thread::global_critical_region alias_mutex_;
   void* alias_watch_ = nullptr;
   SamplerCache sampler_cache_;
+  std::atomic<uint64_t> epoch_{0};
   wgpu::TextureView black_2d_;
   wgpu::TextureView black_cube_;
 };

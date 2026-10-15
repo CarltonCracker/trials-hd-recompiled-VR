@@ -32,10 +32,6 @@ class WebGpuCommandProcessor final : public CommandProcessor {
   bool SetupContext() override;
   void ShutdownContext() override;
 
-  void WriteRegister(uint32_t index, uint32_t value) override;
-  void WriteRegistersFromMem(uint32_t start_index, uint32_t* base,
-                             uint32_t num_registers) override;
-
   Shader* LoadShader(xenos::ShaderType shader_type, uint32_t guest_address,
                      const uint32_t* host_address, uint32_t dword_count) override;
 
@@ -47,8 +43,6 @@ class WebGpuCommandProcessor final : public CommandProcessor {
   ui::webgpu::WebGpuProvider* provider_ = nullptr;
   std::unique_ptr<WebGpuBackend> backend_;
 
-  // DrawDirty bits accumulated since the last DrawSnapshot.
-  uint32_t pending_dirty_ = kDirtyAll;
   uint32_t frame_index_ = 0;
   uint32_t draw_index_ = 0;
   uint32_t resolve_index_ = 0;

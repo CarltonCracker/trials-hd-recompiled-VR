@@ -206,6 +206,7 @@ void TextureCache::WatchCallback(const std::unique_lock<std::recursive_mutex>& g
                                  bool invalidated_by_gpu) {
   // Guest thread, inside the global critical region: no WebGPU calls.
   auto* texture = static_cast<Texture*>(data);
+  static_cast<TextureCache*>(context)->epoch_.fetch_add(1, std::memory_order_acq_rel);
   texture->dirty_chunks.fetch_or(uint64_t(1) << argument, std::memory_order_relaxed);
   texture->dirty.store(true, std::memory_order_release);
 }
@@ -214,6 +215,7 @@ void TextureCache::AliasWatchCallback(const std::unique_lock<std::recursive_mute
     void* context, uint32_t first, uint32_t last, bool) {
   // Guest-thread callback: only invalidate metadata, never call WebGPU here.
   auto& cache = *static_cast<TextureCache*>(context);
+  cache.epoch_.fetch_add(1, std::memory_order_acq_rel);
   for (auto& [address, alias] : cache.resolve_aliases_) {
     if (first < uint64_t(alias.guest_start) + alias.guest_length && last >= alias.guest_start) {
       alias.dirty = true;
@@ -229,6 +231,7 @@ wgpu::Texture TextureCache::GetOrCreateResolveAlias(uint32_t address, wgpu::Text
   if (!width || !height || width > limits.maxTextureDimension2D || height > limits.maxTextureDimension2D ||
       !guest_length || uint64_t(guest_start) + guest_length > (512ull << 20)) { return {}; }
   auto alias_lock = alias_mutex_.Acquire();
+  epoch_.fetch_add(1, std::memory_order_acq_rel);
   // Protect guest pages so subsequent CPU writes invalidate the GPU-only alias.
   if (!shared_memory_.RequestRange(guest_start, guest_length)) { return {}; }
   address &= 0x1FFFFFFF;

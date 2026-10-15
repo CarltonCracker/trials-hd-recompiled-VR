@@ -14,6 +14,7 @@
 #include <rex/graphics/pipeline/shader/shader.h>
 #include <rex/graphics/registers.h>
 #include <rex/graphics/util/draw.h>
+#include <rex/hash.h>
 #include <rex/logging.h>
 #include <rex/math.h>
 #include <rex/ui/presenter.h>
@@ -134,6 +135,13 @@ struct WebGpuBackendState {
   BlitResources blit;
   // Texture bind groups by (layout, views, samplers).
   std::unordered_map<uint64_t, wgpu::BindGroup> texture_bind_groups;
+  // By shaders and fetch constants (see GetTextureBindGroup).
+  struct FastTextureBindGroup {
+    uint64_t epoch;
+    wgpu::BindGroup bind_group;
+    uint32_t resolution_scaled;
+  };
+  std::unordered_map<uint64_t, FastTextureBindGroup> texture_bind_groups_fast;
   // Per group 0 binding: the last upload, reused while it is in the ring.
   std::array<UniformCache, 5> uniforms;
   PassState pass;
@@ -574,6 +582,36 @@ wgpu::BindGroup WebGpuBackend::GetTextureBindGroup(const RegisterFile& regs,
   resolution_scaled_out = 0;
   wgpu::BindGroup texture_bind_group = pipeline_cache_->empty_texture_bind_group();
   if (texture_signature.value) {
+    // Fast path: the same shaders and fetch constants while no texture or
+    // resolve changed give the same bind group.
+    std::array<uint64_t, 3 + 3 * 2 * wgsl_binding::kMaxTexturesPerStage> key_words = {};
+    size_t key_size = 0;
+    key_words[key_size++] = texture_signature.value;
+    key_words[key_size++] = uint64_t(uintptr_t(&vertex_shader));
+    key_words[key_size++] = uint64_t(uintptr_t(pixel_shader));
+    auto add_key_stage = [&](const Shader& shader) {
+      for (const auto& slot : WgslShaderTranslator::GetTextureSlots(shader)) {
+        const uint32_t* fetch_words =
+            &regs.values[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + slot.fetch_constant * 6];
+        for (uint32_t i = 0; i < 6; i += 2) {
+          if (key_size < key_words.size()) {
+            key_words[key_size++] = fetch_words[i] | (uint64_t(fetch_words[i + 1]) << 32);
+          }
+        }
+      }
+    };
+    if (pixel_shader) {
+      add_key_stage(*pixel_shader);
+    }
+    add_key_stage(vertex_shader);
+    uint64_t fast_key = XXH3_64bits(key_words.data(), key_size * sizeof(uint64_t));
+    uint64_t epoch = texture_cache_->epoch();
+    auto& fast = State().texture_bind_groups_fast;
+    if (auto fast_it = fast.find(fast_key);
+        fast_it != fast.end() && fast_it->second.epoch == epoch) {
+      resolution_scaled_out = fast_it->second.resolution_scaled;
+      return fast_it->second.bind_group;
+    }
     std::vector<wgpu::BindGroupEntry> entries;
     uint64_t bind_group_hash = texture_signature.value;
     auto add_stage = [&](const Shader& shader, uint32_t base) {
@@ -618,6 +656,10 @@ wgpu::BindGroup WebGpuBackend::GetTextureBindGroup(const RegisterFile& regs,
       texture_bind_group = provider_.device().CreateBindGroup(&desc);
       bind_groups.emplace(bind_group_hash, texture_bind_group);
     }
+    if (fast.size() > 4096) {
+      fast.clear();
+    }
+    fast[fast_key] = {epoch, texture_bind_group, resolution_scaled_out};
   }
   return texture_bind_group;
 }
@@ -1378,6 +1420,7 @@ void WebGpuBackend::Swap(const SwapSnapshot& swap) {
     // pointers (the key) are not reused while cached; just bound the size.
     if (State().texture_bind_groups.size() > 4096) {
       State().texture_bind_groups.clear();
+      State().texture_bind_groups_fast.clear();
     }
     auto it = State().resolved_regions.find(swap.frontbuffer_ptr & 0x1FFFFFFF);
     if (it == State().resolved_regions.end()) {
