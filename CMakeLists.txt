@@ -64,7 +64,6 @@ set(TRIALSHD_SOURCES
     src/package_license.cpp
     src/virtual_pad.cpp
     src/exit_button.cpp
-    src/splash_screen.cpp
 )
 
 if(WIN32)
