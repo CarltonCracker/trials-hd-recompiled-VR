@@ -1134,6 +1134,26 @@ and the uncapped mode map to "present every frame" and the browser's refresh lim
 uncapped numbers in the browser are bounded by the display rate unless the canvas is
 hidden.
 
+W-S04's standalone build (no game code):
+
+```sh
+source ~/emsdk/emsdk_env.sh
+em++ tools/web/spikes/gpu_triangle.cpp -o out/web-spikes/gpu_triangle.html \
+  --shell-file tools/web/spikes/gpu_triangle_shell.html --target=wasm64 \
+  --use-port=emdawnwebgpu -std=c++20 -O2 -pthread -sPROXY_TO_PTHREAD \
+  -sPTHREAD_POOL_SIZE=2 -sOFFSCREENCANVAS_SUPPORT \
+  '-sOFFSCREENCANVASES_TO_PTHREAD=#canvas' -sASSERTIONS=1
+python3 tools/web/serve.py out/web-spikes
+```
+
+This uses Emscripten's explicit canvas transfer to the proxied-main pthread (not a
+WebGPU-object proxy). C++ asserts the canvas is an `OffscreenCanvas` there and
+adapter/device callbacks and frame rendering never run on the browser main thread.
+The worker registers its own `emscripten_request_animation_frame_loop`; it returns
+to the event loop each frame. The full game's separate GPU thread still needs W-L06.
+The pinned Emscripten 6.0.12 remote port downloaded emdawnwebgpu `v20260423.175430`;
+the spike compiles with its C++ bindings unchanged.
+
 ### 9.4 Threading inside the renderer
 
 - Natively the command-processor thread and the UI thread share the device under
