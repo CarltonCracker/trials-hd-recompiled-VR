@@ -465,14 +465,15 @@ void WgslShaderTranslator::EmitPixelShaderEntryPoint(std::string& out) const {
     let alpha = xe_out_color[0].a;
     let reference = xe_system.alpha_test_reference;
     var alpha_pass = true;
+    // Integer NaN guards preserve ordered tests and unordered NotEqual on drivers.
     switch (xe_system.alpha_test_function) {
       case 0u: { alpha_pass = false; }
-      case 1u: { alpha_pass = alpha < reference; }
-      case 2u: { alpha_pass = alpha == reference; }
-      case 3u: { alpha_pass = alpha <= reference; }
-      case 4u: { alpha_pass = alpha > reference; }
-      case 5u: { alpha_pass = alpha != reference; }
-      case 6u: { alpha_pass = alpha >= reference; }
+      case 1u: { alpha_pass = xe_lt(alpha, reference); }
+      case 2u: { alpha_pass = xe_ordered(alpha, reference) && alpha == reference; }
+      case 3u: { alpha_pass = xe_ge(reference, alpha); }
+      case 4u: { alpha_pass = xe_lt(reference, alpha); }
+      case 5u: { alpha_pass = !xe_ordered(alpha, reference) || alpha != reference; }
+      case 6u: { alpha_pass = xe_ge(alpha, reference); }
       default: { alpha_pass = true; }
     }
     if (!alpha_pass) { discard; }

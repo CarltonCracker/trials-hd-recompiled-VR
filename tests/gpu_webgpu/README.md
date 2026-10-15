@@ -12,6 +12,7 @@ PATH="$PWD/.venv/bin:$PATH" cmake --build out/webgpu-tests -j2
 out/webgpu-tests/shared_memory_test 0
 out/webgpu-tests/alu_test 0
 out/webgpu-tests/vertex_fetch_test 0
+out/webgpu-tests/output_test 0
 # Repeat with adapter 1; each executable prints the selected GPU.
 ```
 
@@ -36,6 +37,14 @@ The default SDK paths refer to `thirdparty/rexglue-sdk` and the existing
   mini fetches (including address-only full fetches), and direct/pulled u16/u32
   guest-index helpers with base offsets and limits. The fixture pins a low guest
   physical address so it does not require a 512 MiB storage binding.
+
+- **Pixel outputs:** 810 authored real-fragment cases, with SDK-interpreted
+  exports and a CPU alpha-test oracle. Four RGBA16Float render targets exercise
+  positive/negative HDR values, half conversion and independent exponent scales.
+  Covers all eight alpha functions, disabled alpha testing, finite/NaN references,
+  NaN/infinite alpha, discard preserving color/depth clears, finite depth clamping,
+  interpolators, and front/back-facing and point-parameter sign generation.
+  Point-sprite Z/W coordinates and other target-format conversions are not covered.
 
 Floating arithmetic uses a 2e-5 relative/absolute tolerance; NaN and infinity
 classification must match. Reserved opcodes are not instructions and are excluded.
