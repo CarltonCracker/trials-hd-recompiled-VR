@@ -1603,6 +1603,10 @@ Each milestone ends with a headless run on Linux and a short note in this docume
 
 ## 13. Later: Android and browsers
 
+**Browsers now have their own plan:** [`docs/web-port/README.md`](../web-port/README.md)
+(measurements, architecture and task list, 2026-10-15). The browser notes below are the
+original sketch.
+
 Kept short on purpose; Linux and macOS come first. The renderer design above already
 avoids the main traps (no interlock, no geometry shaders, no writable storage in vertex
 shaders, no giant storage bindings, WGSL only). The rest of the port is the hard part.
