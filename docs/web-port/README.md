@@ -250,6 +250,27 @@ python3 tools/web/serve.py out/web-spikes
 .venv/bin/python tools/web/spikes/record.py http://127.0.0.1:9222 out/thread_memory64.json
 ```
 
+W-S03 measured 2026-10-15 in Chromium 154.0.8037.92 (one fresh-profile local run,
+48 prepooled workers, Emscripten 6.0.12, `-O2`, assertions enabled):
+
+| Measurement | Value |
+| --- | --- |
+| Shell start → proxied `main` stdout received | 152.7 ms |
+| Allocate 3 GiB (untouched) | 0.25 ms |
+| Create 40 pthreads | 5.11 ms |
+| Barrier release → fill/verify 640 MiB → join | 48.19 ms |
+| C++ test total | 53.55 ms |
+| Shell start → completed result | 207.3 ms |
+| Wasm renderer RSS / peak RSS (`/proc/2133631/status`) | 957,172 KiB (934.7 MiB) |
+| Wasm renderer OS threads (includes browser helper threads) | 70 |
+
+All 40 joins and every page's data verification passed; pointer size is 8 bytes and
+`crossOriginIsolated=true`. Renderer PID came from CDP `SystemInfo.getProcessInfo`,
+then `/proc/<pid>/status` supplied RSS (not the huge, mostly uncommitted `VmSize`).
+Raw result and console: `out/web-spikes/thread_memory64.*`. This proves the memory/thread
+configuration works; **not** game startup performance (this module is tiny). Host-stack
+sizing and thread churn for the actual game remain W-S06.
+
 ### 4.6 Game data
 
 206 MiB total: `data/data.pak` 112 MiB, `data_menu.pak` 36 MiB, `XACT/Music.xwb` 40 MiB,
@@ -989,6 +1010,9 @@ one extra atomic OR inside that rare branch.
   otherwise, and a guest thread created while the main thread is busy would stall).
 - Stack sizes: guest threads run on guest stacks in guest memory; host pthread stacks
   need only the recursion depth of recompiled code (measure the native maximum, W-S06).
+- W-S03 verified the proposed 48-worker pool with 40 simultaneous pthreads and shared
+  Memory64 in Chromium 154: 152.7 ms shell-to-main startup, 934.7 MiB renderer RSS after
+  touching 640 MiB (section 4.5). Actual game module/stack costs remain unmeasured.
 
 ### 8.5 Audio (`src/audio/`)
 
