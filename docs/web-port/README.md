@@ -257,6 +257,31 @@ anyone relies on them.
 | JSPI (JavaScript Promise Integration) | Chrome 137+, Firefox 153+ (caniuse), Safari 27 (caniuse; **unverified**) | Lets wasm suspend on a Promise; key to D6 [W-S03] |
 | Engine limits (V8 `wasm-limits.h`) | functions ≤ 1,000,000; function body ≤ 7,654,321 bytes; locals ≤ 50,000; module ≤ 1 GiB; wasm32 memory ≤ 4 GiB (older: 2 GiB), wasm64 ≤ 16 GiB | Our largest function: 218 KiB (section 6) |
 
+**W-S02 measured matrix (2026-10-15):** served cross-origin-isolated on localhost,
+Chromium 154.0.8037.92 on this Linux server. Every detection below passed; raw
+result/console are in `out/web-spikes/wasm_features.*` (not committed).
+
+| Probe | Chromium 154 (verified) | Firefox desktop | Safari macOS |
+| --- | --- | --- | --- |
+| Shared Memory64 module | yes | unverified | unverified |
+| Threads (shared memory + atomic load) | yes | unverified | unverified |
+| SIMD128 | yes | unverified | unverified |
+| Relaxed SIMD | yes | unverified | unverified |
+| Exception handling (`exnref`, `try_table`, `catch_all_ref`) | yes | unverified | unverified |
+| JSPI (`WebAssembly.Suspending` + `promising`) | yes | unverified | unverified |
+| `crossOriginIsolated` | yes | unverified | unverified |
+| `SharedArrayBuffer` | yes | unverified | unverified |
+
+W-S02's reproducible probe is `tools/web/spikes/wasm_features.html`. It uses five tiny,
+handwritten modules with `WebAssembly.validate` (shared Memory64, atomic load, SIMD,
+relaxed swizzle, and `try_table`/`catch_all_ref` with `exnref`), positive/negative
+validation controls, plus JSPI API and isolation checks. Validate the fixtures with
+`python3 tools/web/spikes/test_wasm_features.py ~/emsdk/upstream/bin/wasm-as`
+(Binaryen 133); serve the spikes folder, open `wasm_features.html` in the browser,
+and record with `.venv/bin/python tools/web/spikes/record.py
+http://127.0.0.1:9222 out/wasm_features.json`. JSPI API detection alone does **not**
+prove JSPI works in pthreads or with WebGPU callbacks; W-S05 remains required.
+
 ### 5.2 WebGPU
 
 | Browser | Status (desktop) |
@@ -1372,8 +1397,8 @@ Every task's "Done when" implicitly includes **`tools/check_native.sh check` pas
 | ID | Status | Tier | Task | Depends | Done when |
 | --- | --- | --- | --- | --- | --- |
 | W-S01 | done 2026-10-15 b2b504e | S | Test page `tools/web/spikes/limits.html`: request the adapter, print `adapter.info`, all `adapter.limits` and `adapter.features`; run it in headless Chromium (11.1) with a 10-line CDP script that saves the console output. Record the values the renderer needs (9.2) in section 9.2. | — | Section 9.2 lists Chromium 154 / RX 6600 values for `maxBufferSize`, `maxStorageBufferBindingSize`, the 8 wanted features; question 14.1 answered |
-| W-S02 | claimed pi-gpt 2026-10-15 | S | Feature-detect page `tools/web/spikes/wasm_features.html` using `WebAssembly.validate` on tiny modules: shared memory64, threads, simd128, relaxed SIMD, exception handling (exnref), JSPI (`WebAssembly.Suspending`), plus `crossOriginIsolated`. Run in Chromium here; write the matrix into 5.1. Add the result columns for Firefox and Safari as `unverified` until someone runs it there. | — | 5.1 table updated with "verified in Chromium 154" values |
-| W-S03 | todo | S | Emscripten "hello pthreads + Memory64" page: `em++ --target=wasm64 -pthread -sPROXY_TO_PTHREAD -sPTHREAD_POOL_SIZE=48 -sINITIAL_MEMORY=3800mb -sMAXIMUM_MEMORY=8gb`; spawn 40 threads that each touch 16 MiB at addresses spread over 3 GiB and join; print timings. | — | Runs in Chromium; startup time and RSS (from `chrome://memory-internals` or `/proc` of the renderer process) recorded in 4.5 |
+| W-S02 | done 2026-10-15 7008da0 | S | Feature-detect page `tools/web/spikes/wasm_features.html` using `WebAssembly.validate` on tiny modules: shared memory64, threads, simd128, relaxed SIMD, exception handling (exnref), JSPI (`WebAssembly.Suspending`), plus `crossOriginIsolated`. Run in Chromium here; write the matrix into 5.1. Add the result columns for Firefox and Safari as `unverified` until someone runs it there. | — | 5.1 table updated with "verified in Chromium 154" values |
+| W-S03 | claimed pi-gpt 2026-10-15 | S | Emscripten "hello pthreads + Memory64" page: `em++ --target=wasm64 -pthread -sPROXY_TO_PTHREAD -sPTHREAD_POOL_SIZE=48 -sINITIAL_MEMORY=3800mb -sMAXIMUM_MEMORY=8gb`; spawn 40 threads that each touch 16 MiB at addresses spread over 3 GiB and join; print timings. | — | Runs in Chromium; startup time and RSS (from `chrome://memory-internals` or `/proc` of the renderer process) recorded in 4.5 |
 | W-S04 | todo | S | emdawnwebgpu "triangle in an OffscreenCanvas on a pthread" spike: main transfers the canvas, a pthread creates the device, draws a triangle per `requestAnimationFrame` in the worker. | W-S03 | Screenshot via CDP shows the triangle; notes on any proxying needed |
 | W-S05 | todo | M | Same as W-S04 but the pthread runs an endless C++ loop that calls a JSPI-suspending yield (`emscripten_sleep(0)` with `-sJSPI`) after each frame, and uses `wgpu::Buffer::MapAsync` with `CallbackMode::AllowSpontaneous`/`AllowProcessEvents`. Answers question 14.2. Design note from W-L01 first. | W-S04, W-L01 | Frames present while the loop runs; map callbacks arrive; findings in 7.4 |
 | W-S06 | todo | S | Native measurements for sizing: maximum host stack depth of guest threads (`/proc/<tid>/status` VmStk or a guard-page probe), number of threads created over a full ride and menus, and startup time to the first swap. | — | Numbers in 4.5 and 8.4 |
@@ -1426,6 +1451,14 @@ details of W-L04 to W-L09. The critical path is W-L01 → W-L02/W-L04 → W-L15 
 W-L06/W-L07 (graphics).
 
 ### 16.6 Notes log
+
+- 2026-10-15 (pi-gpt): **W-S02 done** (`7008da0`). All five WAT fixtures assemble to
+  the checked-in hex with Binaryen 133; positive/negative validation controls pass.
+  Headless Chromium 154 reports all eight detections true (matrix in 5.1), recorded
+  by `tools/web/spikes/record.py`; `W-S02 Chromium 154 feature checks PASSED`.
+  The native guard on unchanged native code passed (WebGPU 41.7 dB, Vulkan 45.1 dB;
+  `NATIVE CHECK PASSED`). Firefox/Safari remain unverified, not implied by this result.
+  Claimed W-S03 next: actual 48-worker Memory64 startup + 40-thread memory test.
 
 - 2026-10-15 (pi-gpt): **W-S01 done** (`b2b504e`). The reviewed-codegen
   baseline + native check finished successfully: WebGPU 9 captures / worst 41.7 dB;
