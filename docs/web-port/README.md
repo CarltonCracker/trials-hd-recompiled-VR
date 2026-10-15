@@ -75,6 +75,7 @@ Decisions (each is justified in section 7; change them only with a Notes-log ent
 | D11 | **Audio through an AudioWorklet** reading a shared ring; XMA decoded by FFmpeg compiled to wasm | Web Audio's only low-latency path; FFmpeg already does XMA in the SDK. |
 | D12 | **Local build and local serving only**; never publish the `.wasm` | Contains recompiled game code (legal constraint above). |
 | D13 | **Target: 60 FPS at 1280x720 in desktop Chrome** on RX 6600-class hardware; uncapped numbers are tracked, not promised | Native uses 117% of one core at 60 FPS (4.3); wasm code is 1.5–3× slower and browser WebGPU validates every call. |
+| D14 | **The web port must not change the Linux or macOS builds.** Web code is additive and compiled only by Emscripten; every web task passes `tools/check_native.sh check` (section 7.8) | The native builds are the product; the web build is an extra target. |
 
 ---
 
@@ -455,6 +456,82 @@ Gamepad/keyboard ──main thread──▶ SAB input block ──▶ input driv
 - The page asks for the user's game package on first run (section 8.6).
 - **Nothing is uploaded or hosted.** Document this in the web README section, and make
   `tools/web/serve.py` bind to `127.0.0.1` by default.
+
+### 7.8 Isolation from the native builds (D14)
+
+The web port is **additive**. A Linux or macOS build configured and built the way the
+README says must produce the same game whether or not the web work exists. Rules:
+
+**Where web code lives**
+
+- New files only, in web-only places: `src/web/` (app shell, input, audio driver),
+  `tools/web/` (build/serve/CDP scripts, spikes), `web/` (HTML shell, JS, AudioWorklet),
+  and `*_emscripten.cpp` files next to their `*_posix.cpp` siblings in the SDK
+  (selected by CMake, like `_posix`/`_win` today).
+- Shared files get web code **only inside `#if defined(__EMSCRIPTEN__)`** (or
+  `REX_PLATFORM_EMSCRIPTEN`, defined only under `__EMSCRIPTEN__`). New platform branches
+  are added as a new `#elif` **before the final `#else`/`#error`**. Never reorder,
+  rewrite or "simplify" existing `__APPLE__`, `__aarch64__`, `__x86_64__` or Linux
+  branches. Checked 2026-10-15 (`em++ -dM -E`): Emscripten defines `__EMSCRIPTEN__`,
+  `__wasm__` and `__unix__`, but not `__linux__`, `__gnu_linux__`, `__APPLE__`,
+  `__x86_64__` or `__aarch64__`; the native clang defines neither `__EMSCRIPTEN__` nor
+  `__wasm__`. So web branches cannot capture a native compiler. Caution: code guarded only
+  by `__unix__` **is** compiled for the web; check such guards when porting a file.
+- No behavior change for native callers when an API is generalized for the web (for
+  example the dirty bitmap, 8.3): the native implementation keeps page protection, and the
+  web implementation is a separate file or `#if` branch.
+
+**Build system**
+
+- `TRIALSHD_WEB` defaults to OFF and is a `FATAL_ERROR` unless `EMSCRIPTEN` is set
+  (Emscripten's toolchain file). Native configure never enters web directories, never
+  needs `~/emsdk`, and gains no new required packages.
+- Web builds use their own presets and build directories (`out/build/web-*`) and their own
+  FFmpeg build. They never write into native build directories.
+- The web build **reads** `generated/default/` and never regenerates or edits it. If the
+  web build ever needs different codegen output, it goes to `generated/web/`, not over the
+  native files (a rewrite of `generated/default` forces a full native rebuild and changes
+  the native game).
+- Emscripten lives in `~/emsdk` and is activated only per shell (`source
+  ~/emsdk/emsdk_env.sh`); it is not on the default `PATH` (checked 2026-10-15), so native
+  builds keep using `/usr/bin/clang`.
+
+**Changes that touch code both builds use** (must keep native output identical or be
+reviewed as a native change too):
+
+| Task | Shared code touched | Extra native proof |
+| --- | --- | --- |
+| W-S10, W-S11 | SDK headers (`platform.h`, `fpscr.h`, `intrinsics.h`, `chrono.h`) | Only new `__EMSCRIPTEN__`/`__wasm__` branches; `check_native.sh check` passes with an **unchanged** generated-code fingerprint |
+| W-L02 | Codegen (`setFromMask` rename; web memory macros) | The rename is the only native difference: regenerate, confirm the diff of `generated/default` is just the method names, run golden scenes, then re-record the baseline. Web macros are emitted inside `#if defined(__EMSCRIPTEN__)` in the PCH header only |
+| W-L04, W-L05 | SDK memory, shared memory, primitive processor, renderer texture cache | Web implementation in `memory_emscripten.cpp` / `#if` branches; native watch path unchanged |
+| W-L06, W-L07, W-L09 | Renderer (`src/gpu_webgpu/`) | `#if __EMSCRIPTEN__` only; the split mirror (W-L09) is opt-in natively (`--webgpu_split_mirror`, default off); native FPS within 3% of the numbers in renderer doc 16.6 |
+| W-L15 | CMake, SDK build | Native configure output and targets unchanged; `TRIALSHD_WEB` guarded |
+
+**The check.** `tools/check_native.sh` (Linux):
+
+```sh
+tools/check_native.sh baseline   # before starting a task (records out/native_baseline/)
+tools/check_native.sh check      # before marking it done
+```
+
+`check` rebuilds the native game and fails when:
+- the build fails or has `TRIALSHD_WEB` on;
+- a native binary contains Emscripten/web symbols;
+- `generated/default` differs from the baseline (the files are listed);
+- the WebGPU or Vulkan renderer fails to boot through `tests/headless/main_menu_nav.txt`,
+  or the menu captures fall below 33 dB against the baseline.
+
+Measured 2026-10-15 on an unchanged tree: WebGPU worst 40.5 dB, Vulkan 44.9 dB between
+runs (normal animation noise). Negative test: a tampered fingerprint and a blanked capture
+(13.7 dB) both failed the check as intended.
+
+**macOS** cannot be built on this server. Any task in the table above must also be built
+and booted on the user's Mac (`cmake --build` + reach the main menu) before it is marked
+`done`; until then its Status stays `review` with "needs macOS check" in the Notes log.
+Tasks that add only new web-only files need no macOS check.
+
+**`main` branch.** Web-port code is not ported to `main` until the user asks; until then
+`main`'s Linux/macOS builds cannot be affected at all.
 
 ---
 
@@ -890,8 +967,13 @@ model reviews every small-model result before it is marked `done`.
 - SDK changes go through `patches/rexglue-sdk/trials-hd.patch` via
   `tools/export_sdk_patch.sh`; keep them small and guarded by `__EMSCRIPTEN__` /
   `REX_PLATFORM_EMSCRIPTEN` so the native builds are unchanged.
-- Every web change must leave the native Linux build working: build it and run
-  `tests/headless/main_menu_nav.txt` before marking a task done if you touched shared code.
+- **The native builds must not change (D14, section 7.8).** Run `tools/check_native.sh
+  baseline` before starting and `tools/check_native.sh check` before marking any task
+  `done` or `review`; paste its last lines into the Notes log. Tasks that touch shared code
+  (table in 7.8) also need a macOS build-and-boot on the user's Mac before `done`.
+- Web code goes in web-only files or `#if defined(__EMSCRIPTEN__)` branches; never edit
+  existing `__APPLE__`/arm64/x86-64/Linux branches, and never regenerate or edit
+  `generated/default` from the web build.
 - Browser tests use the recipe in 11.1 on the RX 6600. Keep waits short (≤ 90 s) and runs
   headless.
 - Report: what changed, how it was verified (commands + output), what is still open.
@@ -909,6 +991,9 @@ Done when commands that prove it, and the expected output
 
 Small-model tasks: finishable in one session, few files, mechanical "done when", no
 architectural decisions. On ambiguity, stop and write the question into the Notes log.
+
+Every task's "Done when" implicitly includes **`tools/check_native.sh check` passes**
+(section 7.8), whether or not the row repeats it.
 
 ### 16.3 Small-model tasks (S, or M = needs a design note first)
 
@@ -953,7 +1038,7 @@ architectural decisions. On ambiguity, stop and write the question into the Note
 | W-L12 | todo | **Audio**: FFmpeg for wasm (XMA only), web audio driver with an AudioWorklet and SAB ring, AudioContext unlock on first gesture (8.5). | W-L01 | 8.5, SDK `src/audio/` | WM5 |
 | W-L13 | todo | **Option B (wasm32 remapped window)** if W-L03 or Safari requires it: heap range limits in the SDK, segment table macro, 32-bit pointer audit. | W-L03 | 7.1 | Same golden checks as WM2/WM4 in a wasm32 build |
 | W-L14 | todo | **Review gate** for small-model work: review each `review` task within a day; check native builds still pass. | — | 16.1 | Ongoing |
-| W-L15 | todo | **Web build system** (10.1, 10.2): `web-wasm64-release` preset, `TRIALSHD_WEB`, static WebGPU renderer library, third-party subset, shell HTML, link flags; boots to WM1 with the GPU plugin stubbed. Also: kernel/threading web layer (timers thread, affinity no-ops, exception handler and `dlopen` compiled out, fibers per W-S08, sockets stubbed). | W-L01, W-L02, W-L04, W-S10, W-S11 | 3.5, 8.2, 8.4, 10 | WM1 |
+| W-L15 | todo | **Web build system** (10.1, 10.2): `web-wasm64-release` preset, `TRIALSHD_WEB` (OFF by default, `FATAL_ERROR` without Emscripten, 7.8), static WebGPU renderer library, third-party subset, shell HTML, link flags; boots to WM1 with the GPU plugin stubbed. Also: kernel/threading web layer (timers thread, affinity no-ops, exception handler and `dlopen` compiled out, fibers per W-S08, sockets stubbed). | W-L01, W-L02, W-L04, W-S10, W-S11 | 3.5, 8.2, 8.4, 10 | WM1 |
 
 ### 16.5 Order and parallelism
 
@@ -972,6 +1057,10 @@ W-L06/W-L07 (graphics).
 
 ### 16.6 Notes log
 
+- 2026-10-15 (claude-opus-5.5): added D14 and section 7.8 (isolation from the native
+  builds) and `tools/check_native.sh` (baseline/check). Ran baseline + check on an unchanged
+  tree: PASSED (WebGPU worst 40.5 dB, Vulkan 44.9 dB); negative test with a tampered
+  fingerprint and a blanked capture: FAILED as intended.
 - 2026-10-15 (claude-opus-5.5): document written. Measurements in sections 4 and 6
   were taken on the build server with the commands shown there. Scripts used:
   function-size scan of `generated/default/*.cpp` (Python, counts lines between
