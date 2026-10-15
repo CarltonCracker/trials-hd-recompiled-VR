@@ -1371,7 +1371,7 @@ Every task's "Done when" implicitly includes **`tools/check_native.sh check` pas
 
 | ID | Status | Tier | Task | Depends | Done when |
 | --- | --- | --- | --- | --- | --- |
-| W-S01 | claimed pi-gpt 2026-10-15 | S | Test page `tools/web/spikes/limits.html`: request the adapter, print `adapter.info`, all `adapter.limits` and `adapter.features`; run it in headless Chromium (11.1) with a 10-line CDP script that saves the console output. Record the values the renderer needs (9.2) in section 9.2. | — | Section 9.2 lists Chromium 154 / RX 6600 values for `maxBufferSize`, `maxStorageBufferBindingSize`, the 8 wanted features; question 14.1 answered |
+| W-S01 | done 2026-10-15 b2b504e | S | Test page `tools/web/spikes/limits.html`: request the adapter, print `adapter.info`, all `adapter.limits` and `adapter.features`; run it in headless Chromium (11.1) with a 10-line CDP script that saves the console output. Record the values the renderer needs (9.2) in section 9.2. | — | Section 9.2 lists Chromium 154 / RX 6600 values for `maxBufferSize`, `maxStorageBufferBindingSize`, the 8 wanted features; question 14.1 answered |
 | W-S02 | claimed pi-gpt 2026-10-15 | S | Feature-detect page `tools/web/spikes/wasm_features.html` using `WebAssembly.validate` on tiny modules: shared memory64, threads, simd128, relaxed SIMD, exception handling (exnref), JSPI (`WebAssembly.Suspending`), plus `crossOriginIsolated`. Run in Chromium here; write the matrix into 5.1. Add the result columns for Firefox and Safari as `unverified` until someone runs it there. | — | 5.1 table updated with "verified in Chromium 154" values |
 | W-S03 | todo | S | Emscripten "hello pthreads + Memory64" page: `em++ --target=wasm64 -pthread -sPROXY_TO_PTHREAD -sPTHREAD_POOL_SIZE=48 -sINITIAL_MEMORY=3800mb -sMAXIMUM_MEMORY=8gb`; spawn 40 threads that each touch 16 MiB at addresses spread over 3 GiB and join; print timings. | — | Runs in Chromium; startup time and RSS (from `chrome://memory-internals` or `/proc` of the renderer process) recorded in 4.5 |
 | W-S04 | todo | S | emdawnwebgpu "triangle in an OffscreenCanvas on a pthread" spike: main transfers the canvas, a pthread creates the device, draws a triangle per `requestAnimationFrame` in the worker. | W-S03 | Screenshot via CDP shows the triangle; notes on any proxying needed |
@@ -1426,6 +1426,14 @@ details of W-L04 to W-L09. The critical path is W-L01 → W-L02/W-L04 → W-L15 
 W-L06/W-L07 (graphics).
 
 ### 16.6 Notes log
+
+- 2026-10-15 (pi-gpt): **W-S01 done** (`b2b504e`). The reviewed-codegen
+  baseline + native check finished successfully: WebGPU 9 captures / worst 41.7 dB;
+  Vulkan 9 captures / worst 45.1 dB; `NATIVE CHECK PASSED`. Command:
+  `flock out/native-web-check.lock bash -c 'tools/check_native.sh baseline
+  out/native_baseline_pi && tools/check_native.sh check out/native_baseline_pi'`.
+  No unexpected generated changes; W-S02 adds only standalone web fixtures/page and
+  shares this unchanged native-code verification. Browser verification follows.
 
 - 2026-10-15 (pi-gpt): claimed W-S02 per the user's request for a task independent
   of Claude's W-L02/W-S10/W-S11. Scope: new feature-detection fixtures/page in
