@@ -4,8 +4,9 @@ Research for running Trials HD Recompiled in a web browser: the recompiled game,
 ReXGlue runtime and the native WebGPU renderer (`src/gpu_webgpu/`, see
 [`docs/webgpu-renderer/README.md`](../webgpu-renderer/README.md)) compiled to
 WebAssembly with Emscripten and drawing through the browser's WebGPU. Written 2026-10-15
-for the agents (and people) who will build it. **No web-port code exists yet**; this
-document is the starting point and the specification.
+for the agents (and people) who will build it. **The localhost server and standalone
+browser spikes exist; the complete game web build is not implemented yet.** This
+document is the specification and live progress record.
 
 **This document is also the web port's task list.** Section 16 holds every task with its
 status. Agents claim, update and complete tasks there (rules in 16.0) and keep the rest of
@@ -293,7 +294,7 @@ anyone relies on them.
 | Memory64 | Chrome/Edge 133+, Firefox 134+ (some sources say later or flagged), **Safari: unverified** (Technology Preview only in some reports) [W-S02] | JS API caps memory at 16 GiB. Bounds checks cannot be elided as for wasm32 (guard regions), so expect some cost [W-L03]. |
 | Shared Memory64 + threads | **Works in Chromium 154 here** (section 5.6) | |
 | Exception handling (`-fwasm-exceptions`), `setjmp` via wasm EH | All current browsers | `-sSUPPORT_LONGJMP=wasm` |
-| JSPI (JavaScript Promise Integration) | Chrome 137+, Firefox 153+ (caniuse), Safari 27 (caniuse; **unverified**) | Lets wasm suspend on a Promise; key to D6 [W-S03] |
+| JSPI (JavaScript Promise Integration) | Chrome 137+, Firefox 153+ (caniuse), Safari 27 (caniuse; **unverified**) | Lets wasm suspend on a Promise; key to D6 [W-S05] |
 | Engine limits (V8 `wasm-limits.h`) | functions ≤ 1,000,000; function body ≤ 7,654,321 bytes; locals ≤ 50,000; module ≤ 1 GiB; wasm32 memory ≤ 4 GiB (older: 2 GiB), wasm64 ≤ 16 GiB | Our largest function: 218 KiB (section 6) |
 
 **W-S02 measured matrix (2026-10-15):** served cross-origin-isolated on localhost,
@@ -1153,6 +1154,14 @@ The worker registers its own `emscripten_request_animation_frame_loop`; it retur
 to the event loop each frame. The full game's separate GPU thread still needs W-L06.
 The pinned Emscripten 6.0.12 remote port downloaded emdawnwebgpu `v20260423.175430`;
 the spike compiles with its C++ bindings unchanged.
+
+**W-S04 browser result (2026-10-15):** Chromium 154 presents the triangle after five
+worker-rAF frames. Worker/canvas/callback-thread assertions all pass. CDP screenshot
+`out/web-spikes/gpu_triangle.png` shows the orange triangle: center `(160,120)` =
+RGB `(255,51,0)`, background `(5,5)` = `(13,13,25)` (pixel assertions passed).
+No WebGPU object is proxied or shared; only stdout is delivered back to the page.
+The browser and GPU callbacks progress because the worker returns from each rAF
+callback. W-S05 must separately prove yielding from an endless C++ loop works.
 
 ### 9.4 Threading inside the renderer
 
