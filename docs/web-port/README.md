@@ -413,7 +413,10 @@ em++ [-sMEMORY64=1] -O2 -std=gnu++23 -msimd128 -pthread -matomics -mbulk-memory 
    `setFromMask(simde__m128i)` become the same function** because SIMDe maps both types
    to `v128_t` on wasm (`simde/x86/sse.h:151`, `sse2.h:242`). They mean different things
    (4-lane vs 16-byte mask). The spike removed one overload (wrong semantics, sizes only).
-   Real fix: codegen emits `setFromMaskPs` / `setFromMaskEpi8` (137 call sites) (W-L02).
+   W-L02's smaller fix retains both native overloads and uses one wasm overload:
+   every emitted float-mask call passes `0xF`, every byte-mask call `0xFFFF`, so that
+   existing immediate selects the correct movemask. No method rename or native API
+   change is needed; the unit test distinguishes both semantics (not just compilation).
 
 **Results:**
 
@@ -669,8 +672,8 @@ Total 2.75 GiB. The aliases are exactly the native view table (`map_info` in
 lookup by `addr >> 24`:
 
 ```cpp
-// rex/memory/web_fold.h (web only). host = window + addr + rex_web_fold[addr >> 24].
-extern "C" const int64_t rex_web_fold[256];
+// rex/memory/web_guest.h (web only). host = window + addr + kFold[addr >> 24].
+// rex::memory::web::kFold is an inline constexpr std::array<int64_t, 256>.
 //   [0x00..0x7E] = 0
 //   [0x7F]       = +0x11000000             (0x7F000000 -> window 0x90000000)
 //   [0x80..0x8F] = 0
@@ -684,8 +687,8 @@ Codegen (W-L02) emits, for the web only:
 
 ```cpp
 #if defined(__EMSCRIPTEN__)
-#include <rex/memory/web_fold.h>
-#define REX_PHYS_HOST_OFFSET(addr) rex_web_fold[(u32)(addr) >> 24]
+#include <rex/memory/web_guest.h>
+#define REX_PHYS_HOST_OFFSET(addr) (::rex::memory::web::kFold[(u32)(addr) >> 24])
 #endif
 ```
 
@@ -697,7 +700,7 @@ natively).
 
 - `BaseHeap::host_address_offset_` becomes `int64_t` on the web only
   (`using HostAddressOffset = std::conditional_t<REX_PLATFORM_EMSCRIPTEN, int64_t, uint32_t>`),
-  set to `rex_web_fold[heap_base >> 24]` for every heap. `TranslateRelative`,
+  set to `rex::memory::web::kFold[heap_base >> 24]` for every heap. `TranslateRelative`,
   `TranslateVirtual` and `HostToGuestVirtual` then work unchanged in shape.
   `TranslateVirtual` on the web uses the fold table directly (it also covers `0x7F…`,
   which belongs to no heap).
@@ -717,7 +720,7 @@ natively).
 #### 7.9.3 Write tracking (dirty bitmap)
 
 ```cpp
-// rex/memory/web_dirty.h (web only)
+// rex/memory/web_guest.h (web only; shares the fold table and store helpers)
 namespace rex::memory::web {
 inline constexpr uint32_t kPageShift = 12;                    // 4 KiB pages
 inline constexpr uint32_t kPageCount = 0x20000000 >> 12;      // 131,072 physical pages
@@ -727,13 +730,14 @@ extern uint8_t* g_physical_base;                              // window + 0x9000
 
 // Called after a write of `size` bytes at host pointer p (any guest address form).
 inline void MarkHostWrite(const uint8_t* p, uint32_t size) {
-  uint64_t d = uint64_t(p - g_physical_base);
-  if (d >= 0x20000000) return;                                // not physical: nothing to track
-  for (uint64_t page = d >> 12, last = (d + size - 1) >> 12; page <= last; ++page) {
+  uint64_t d = uintptr_t(p) - uintptr_t(g_physical_base);
+  if (!g_physical_base || size == 0 || d >= 0x20000000) return;
+  for (uint64_t page = d >> 12, last = (d + size - 1) >> 12;
+       page <= last && page < kPageCount; ++page) {
     uint64_t bit = 1ull << (page & 63);
     auto& word = g_dirty[page >> 6];
-    if (!(word.load(std::memory_order_relaxed) & bit)) {      // RMW once per page per delivery
-      word.fetch_or(bit, std::memory_order_release);
+    // RMW must observe a concurrent clear; a relaxed precheck can miss a write.
+    if (!(word.fetch_or(bit, std::memory_order_release) & bit)) {
       g_dirty_summary[page >> 12].fetch_or(1ull << ((page >> 6) & 63), std::memory_order_release);
     }
   }
@@ -951,8 +955,8 @@ linker would drop them). The Vulkan plugin is not built for the web.
 | Interface | Defined in | Implemented by task |
 | --- | --- | --- |
 | `REX_PLATFORM_EMSCRIPTEN`, header fixes | `rex/platform.h` etc. | W-S10, W-S11 |
-| Fold table, `rex_web_*` store helpers, `setFromMaskPs/Epi8` | `rex/memory/web_fold.h`, codegen | W-L02 |
-| Window, heaps, `MarkGuestWrite`, `DeliverPhysicalWrites`, dirty bitmap | `rex/memory/web_dirty.h`, `xmemory.cpp`, `memory_emscripten.cpp` | W-L04 |
+| Fold table, store helpers, wasm mask dispatch | `rex/memory/web_guest.h`, codegen, `ppc/context.h` | W-L02 |
+| Window, heaps, `MarkGuestWrite`, `DeliverPhysicalWrites`, dirty bitmap | `rex/memory/web_guest.h`, `xmemory.cpp`, `memory_emscripten.cpp` | W-L04 |
 | Consumers of delivery, verify mode | `shared_memory.cpp`, `primitive_processor.cpp`, renderer | W-L05 |
 | `YieldToEventLoop`, transferred canvas, timer thread | `rex/thread/web_yield.h`, `threading_posix.cpp` | W-L06, W-L15 |
 | `kGuestOutputThreadWithUI`, web `Window`, `WebWindowedAppContext` | SDK `ui/` | W-L06, W-L08 |
@@ -1509,7 +1513,7 @@ Every task's "Done when" implicitly includes **`tools/check_native.sh check` pas
 | ID | Status | Task | Depends | Read first | Done when |
 | --- | --- | --- | --- | --- | --- |
 | W-L01 | done 2026-10-15 (section 7.9) | **Web platform design note.** Turn sections 7–9 into concrete interfaces: the `REX_PLATFORM_EMSCRIPTEN` layer, the memory-model macro and helpers (7.2, 8.1), the dirty-bitmap API (8.3), the SAB layouts for input and audio, the GPU-worker yield points (7.4), the ImGui draw-list mailbox (9.4). Write it into this document. | — | 3, 7, 8, 9 | Design note merged; W-S05, W-S16, W-S18 unblocked |
-| W-L02 | claimed pi-gpt 2026-10-15 (takeover) | **Codegen changes.** Emit `setFromMaskPs`/`setFromMaskEpi8` (section 6 item 5) for all targets; emit the web memory macros (`REX_PHYS_HOST_OFFSET` replacement and the dirty-marking store) under `__EMSCRIPTEN__`; keep native output identical apart from the renamed method. | W-L01 | `src/codegen/builders/{memory,vector,context}.cpp`, 3.3 | Native build boots, golden scenes unchanged; all 107 files compile with `em++` without the spike's scratch headers |
+| W-L02 | claimed pi-gpt 2026-10-15 (takeover) | **Codegen changes.** Resolve the SIMDe mask-type collision (section 6 item 5) using the existing `0xF`/`0xFFFF` immediate on wasm (native overloads unchanged); emit web memory macros and dirty-marking store helpers under `__EMSCRIPTEN__`. Native raw-write expressions become identity macros; their expansions stay identical. | W-L01 | `src/codegen/builders/{memory,vector,context}.cpp`, 3.3 | Native build boots, golden scenes unchanged; all 107 files compile with `em++` without the spike's scratch headers |
 | W-L03 | todo | **Memory-model cost.** Build a micro-benchmark from real generated functions (a physics-heavy one and a VMX-heavy one, driven with captured inputs) for native, wasm32 and wasm64; then compare the full game's busiest guest threads once WM1 runs. Decide A vs B (7.1) with numbers. | W-S03, W-S10, W-S11 | 7.1, 7.2 | Table of ns/call in 7.1; decision recorded in 1 (D1) |
 | W-L04 | todo | **Runtime memory for the web** (`xmemory.cpp`, `memory_posix.cpp` → `memory_emscripten.cpp`): one linear-memory window, folded physical views, bookkeeping-only protection, `MarkPhysicalWritten`, the dirty bitmap and write epochs; `TranslateVirtual`/`TranslatePhysical`/`GetPhysicalAddress` consistent with the macro. | W-L01 | 3.4, 8.1, 8.3 | Unit test (native-hosted with the web memory model compiled in): guest writes through all three views land in the same physical bytes; bitmap bits match the writes |
 | W-L05 | todo | **Write tracking consumers**: `SharedMemory`, `PrimitiveProcessor` and the renderer's texture cache and memory mirror use the dirty bitmap on the web; debug assertion mode compares against chunk hashes (14.8). | W-L04, W-S09 | 8.3, renderer doc 8.3, 8.9 | WM4 ride shows no stale textures; assertion mode passes over `ride_middle_name_danger` |
@@ -1540,6 +1544,15 @@ details of W-L04 to W-L09. The critical path is W-L01 → W-L02/W-L04 → W-L15 
 W-L06/W-L07 (graphics).
 
 ### 16.6 Notes log
+
+- 2026-10-15 (pi-gpt): takeover audit keeps Claude's smaller mask fix: wasm can
+  distinguish float/byte semantics by the already emitted `0xF`/`0xFFFF` immediate;
+  native overloads and call sites remain unchanged. This supersedes the proposed
+  W-L02 method rename. Fold/dirty/store interfaces share `rex/memory/web_guest.h`
+  rather than two sketch headers. Fixed zero-size dirty-mark underflow, non-object
+  pointer subtraction, and a stale relaxed-precheck race by using the atomic RMW's
+  prior bit. Debug wasm FPSCR now logs each non-nearest mode once per thread.
+  New standalone header tests and full generated-code compile are running.
 
 - 2026-10-15 (pi-gpt): **W-S05 done** (`6916330`): JSPI endless pthread loop,
   both MapAsync callback modes, and changing OffscreenCanvas pixels all pass in

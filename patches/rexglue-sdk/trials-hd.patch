@@ -41,6 +41,22 @@ commit by CMake at configure time; regenerate with tools/export_sdk_patch.sh).
   achievement toast only does while showing one (the window was repainted
   ~1400 times per second with VSync off)
 
+diff --git a/include/rex/chrono/chrono.h b/include/rex/chrono/chrono.h
+index d876846..cbe49e0 100644
+--- a/include/rex/chrono/chrono.h
++++ b/include/rex/chrono/chrono.h
+@@ -116,8 +116,9 @@ using XSystemClock = detail::NtSystemClock<detail::Domain::Guest>;
+ 
+ namespace std::chrono {
+ 
+-#ifdef __APPLE__
+-// Apple libc++ does not expose clock_time_conversion or clock_cast.
++#if defined(__APPLE__) || defined(__EMSCRIPTEN__)
++// Apple libc++ and Emscripten's libc++ do not expose clock_time_conversion or
++// clock_cast.
+ template <class, class>
+ struct clock_time_conversion {};
+ 
 diff --git a/include/rex/graphics/command_processor.h b/include/rex/graphics/command_processor.h
 index da8e432..74b87ff 100644
 --- a/include/rex/graphics/command_processor.h
@@ -293,6 +309,316 @@ index c8751b7..9271ff4 100644
  
    // Packet number incremented on state change
    uint32_t packet_number_ = 0;
+diff --git a/include/rex/memory/web_guest.h b/include/rex/memory/web_guest.h
+new file mode 100644
+index 0000000..5d3cb3a
+--- /dev/null
++++ b/include/rex/memory/web_guest.h
+@@ -0,0 +1,125 @@
++/**
++ * @file        memory/web_guest.h
++ * @brief       Guest memory access for the web (Emscripten) build
++ *
++ * WebAssembly has one linear memory without page aliasing or protection.
++ * Guest address aliases (the physical views, 0x7F000000 and 0x90000000) are
++ * folded onto one 2.75 GiB window by a table indexed by the top 8 address
++ * bits, and every write to guest physical memory marks its 4 KiB page in a
++ * dirty bitmap that the GPU front-end consumes before it reads guest memory.
++ * See docs/web-port/README.md (Trials HD Recompiled), sections 7.9.2-7.9.3.
++ *
++ * Web builds only; native builds keep mmap aliasing and page protection.
++ */
++#pragma once
++
++#if !defined(__EMSCRIPTEN__)
++#error "rex/memory/web_guest.h is for the web (Emscripten) build only"
++#endif
++
++#include <array>
++#include <atomic>
++#include <cstdint>
++#include <cstring>
++
++#include <simde/x86/sse2.h>
++
++namespace rex::memory::web {
++
++// Window offsets (relative to the guest base pointer).
++inline constexpr uint64_t kWindowSize = 0xB0000000ull;            // 2.75 GiB
++inline constexpr uint64_t kPhysicalWindowOffset = 0x90000000ull;  // physical memory
++inline constexpr uint32_t kPhysicalSize = 0x20000000u;            // 512 MiB
++
++// Host offset added to `base + guest_address`, by guest_address >> 24. Mirrors
++// the native view table (map_info in src/system/xmemory.cpp).
++inline constexpr std::array<int64_t, 256> kFold = [] {
++  std::array<int64_t, 256> fold{};
++  fold[0x7F] = int64_t(kPhysicalWindowOffset) - 0x7F000000;  // GPU writeback -> physical 0
++  for (uint32_t i = 0x90; i < 0xA0; ++i) {
++    fold[i] = -0x10000000;  // 0x9xxxxxxx aliases 0x8xxxxxxx
++  }
++  for (uint32_t i = 0xA0; i < 0xC0; ++i) {
++    fold[i] = int64_t(kPhysicalWindowOffset) - 0xA0000000;
++  }
++  for (uint32_t i = 0xC0; i < 0xE0; ++i) {
++    fold[i] = int64_t(kPhysicalWindowOffset) - 0xC0000000;
++  }
++  for (uint32_t i = 0xE0; i < 0x100; ++i) {
++    fold[i] = int64_t(kPhysicalWindowOffset) - 0xE0000000 + 0x1000;  // physical + 0x1000
++  }
++  return fold;
++}();
++
++// Dirty bitmap over guest physical memory, 1 bit per 4 KiB page, and a summary
++// with 1 bit per bitmap word. Defined by the runtime (memory_emscripten.cpp).
++inline constexpr uint32_t kPageShift = 12;
++inline constexpr uint32_t kPageCount = kPhysicalSize >> kPageShift;  // 131,072
++extern std::atomic<uint64_t> g_dirty[kPageCount / 64];
++extern std::atomic<uint64_t> g_dirty_summary[kPageCount / 64 / 64];
++// base + kPhysicalWindowOffset; set when guest memory is created.
++extern uint8_t* g_physical_base;
++
++// Marks the pages of a completed write of `size` bytes at host pointer `p`
++// (any guest address form). Not physical memory: nothing to do.
++inline void MarkHostWrite(const void* p, uint32_t size) {
++  uint64_t offset = uintptr_t(p) - uintptr_t(g_physical_base);
++  if (!g_physical_base || size == 0 || offset >= kPhysicalSize) {
++    return;
++  }
++  uint64_t last = (offset + size - 1) >> kPageShift;
++  for (uint64_t page = offset >> kPageShift; page <= last && page < kPageCount; ++page) {
++    uint64_t bit = uint64_t(1) << (page & 63);
++    std::atomic<uint64_t>& word = g_dirty[page >> 6];
++    // An RMW must observe a concurrent consumer's clear, not a stale relaxed load.
++    if (!(word.fetch_or(bit, std::memory_order_release) & bit)) {
++      g_dirty_summary[page >> 12].fetch_or(uint64_t(1) << ((page >> 6) & 63),
++                                           std::memory_order_release);
++    }
++  }
++}
++
++// Guest stores (the recompiler's REX_STORE_* etc. on the web): the store, then
++// the mark. Same byte order and truncation as the native macros.
++inline void Store8(uint8_t* p, uint8_t value) {
++  *reinterpret_cast<volatile uint8_t*>(p) = value;
++  MarkHostWrite(p, 1);
++}
++inline void Store16(uint8_t* p, uint16_t value) {
++  *reinterpret_cast<volatile uint16_t*>(p) = __builtin_bswap16(value);
++  MarkHostWrite(p, 2);
++}
++inline void Store32(uint8_t* p, uint32_t value) {
++  *reinterpret_cast<volatile uint32_t*>(p) = __builtin_bswap32(value);
++  MarkHostWrite(p, 4);
++}
++inline void Store64(uint8_t* p, uint64_t value) {
++  *reinterpret_cast<volatile uint64_t*>(p) = __builtin_bswap64(value);
++  MarkHostWrite(p, 8);
++}
++inline void Store128(uint8_t* p, simde__m128i value) {
++  simde_mm_store_si128(reinterpret_cast<simde__m128i*>(p), value);
++  MarkHostWrite(p, 16);
++}
++template <typename E, typename D>
++inline bool Cas32(uint8_t* p, E expected, D desired) {
++  bool stored = __sync_bool_compare_and_swap(reinterpret_cast<uint32_t*>(p), expected, desired);
++  if (stored) {
++    MarkHostWrite(p, 4);
++  }
++  return stored;
++}
++template <typename E, typename D>
++inline bool Cas64(uint8_t* p, E expected, D desired) {
++  bool stored = __sync_bool_compare_and_swap(reinterpret_cast<uint64_t*>(p), expected, desired);
++  if (stored) {
++    MarkHostWrite(p, 8);
++  }
++  return stored;
++}
++inline void Zero(uint8_t* p, uint32_t size) {
++  std::memset(p, 0, size);
++  MarkHostWrite(p, size);
++}
++
++}  // namespace rex::memory::web
+diff --git a/include/rex/platform.h b/include/rex/platform.h
+index e90418d..a9c828b 100644
+--- a/include/rex/platform.h
++++ b/include/rex/platform.h
+@@ -38,6 +38,10 @@
+ #elif defined(__gnu_linux__)
+ #define REX_PLATFORM_GNU_LINUX 1
+ #define REX_PLATFORM_LINUX 1
++#elif defined(__EMSCRIPTEN__)
++// WebAssembly in a browser (docs/web-port/README.md in Trials HD Recompiled).
++// POSIX-like, but not Linux: no /proc, memfd, signals or page protection.
++#define REX_PLATFORM_EMSCRIPTEN 1
+ #else
+ #error Unsupported target OS.
+ #endif
+@@ -59,6 +63,9 @@
+ #ifndef REX_PLATFORM_LINUX
+ #define REX_PLATFORM_LINUX 0
+ #endif
++#ifndef REX_PLATFORM_EMSCRIPTEN
++#define REX_PLATFORM_EMSCRIPTEN 0
++#endif
+ 
+ #if defined(__clang__)
+ #define REX_COMPILER_CLANG 1
+@@ -82,6 +89,8 @@
+ #error Rex is not supported on 32-bit platforms.
+ #elif defined(_M_PPC) || defined(__powerpc__)
+ #define REX_ARCH_PPC 1
++#elif defined(__wasm__)
++#define REX_ARCH_WASM 1
+ #endif
+ 
+ #if REX_PLATFORM_WIN32
+diff --git a/include/rex/platform/fpscr.h b/include/rex/platform/fpscr.h
+index c2c4fd4..2b26ea9 100644
+--- a/include/rex/platform/fpscr.h
++++ b/include/rex/platform/fpscr.h
+@@ -16,6 +16,11 @@
+ #include <rex/types.h>
+ 
+ #include <simde/x86/sse.h>
++#if defined(__wasm__)
++#include <cstdint>
++#include <cstdio>
++#include <simde/x86/sse2.h>
++#endif
+ 
+ // SSE3 constants are missing from simde
+ #ifndef _MM_DENORMALS_ZERO_MASK
+@@ -82,6 +87,62 @@ struct FPSCRPlatform {
+   }
+ };
+ 
++#elif defined(__wasm__)
++// WebAssembly has no floating-point control register: arithmetic always rounds
++// to nearest-even and never flushes denormals. A per-thread shadow keeps the
++// guest's mode bits (x86 MXCSR encoding: rounding in bits 0-1, flush in bit 2)
++// so FPSCR reads round-trip, and the one recompiled operation whose result
++// depends on the mode, fctid (simde_mm_cvtsd_si64), applies it explicitly
++// (see the web block of the codegen PCH template). Trials HD switches to
++// round-toward-zero thousands of times per ride through its _controlfp helper
++// (docs/web-port/README.md 14 Q6).
++struct FPSCRPlatform {
++  static constexpr size_t RoundShift = 0;
++  static constexpr size_t RoundMaskVal = 3;
++  static constexpr size_t FlushMask = 1 << 2;
++  static constexpr u32 ExceptionMask = 0;
++  // Guest: nearest, toward zero, +infinity, -infinity -> x86 RC encoding.
++  static constexpr size_t GuestToHost[] = {0, 3, 2, 1};
++
++  static inline thread_local u32 shadow_csr = 0;
++  static inline u32 getcsr() noexcept { return shadow_csr; }
++  static inline void setcsr(u32 csr) noexcept {
++    shadow_csr = csr;
++#if !defined(NDEBUG)
++    static thread_local u32 reported_modes = 0;
++    u32 mode = csr & RoundMaskVal;
++    if (mode && !(reported_modes & (1u << mode))) {
++      reported_modes |= 1u << mode;
++      std::fprintf(stderr, "wasm FPSCR: requested rounding mode %u (shadow; explicit fctid rounding)\n", mode);
++    }
++#endif
++  }
++  static inline void InitHostExceptions(u32&) noexcept {}
++
++  // cvtsd2si with the shadow rounding mode; out-of-range and NaN give
++  // INT64_MIN like the x86 instruction.
++  static inline int64_t CvtsdSi64(simde__m128d value) noexcept {
++    double d = simde_mm_cvtsd_f64(value);
++    switch (shadow_csr & RoundMaskVal) {
++      case 1:
++        d = std::floor(d);
++        break;
++      case 2:
++        d = std::ceil(d);
++        break;
++      case 3:
++        d = std::trunc(d);
++        break;
++      default:
++        d = std::nearbyint(d);
++        break;
++    }
++    if (!(d >= -9223372036854775808.0 && d < 9223372036854775808.0)) {
++      return INT64_MIN;
++    }
++    return int64_t(d);
++  }
++};
+ #else
+ #error "Missing implementation for FPSCR."
+ #endif
+diff --git a/include/rex/ppc/context.h b/include/rex/ppc/context.h
+index 0ede542..7afcef5 100644
+--- a/include/rex/ppc/context.h
++++ b/include/rex/ppc/context.h
+@@ -101,13 +101,22 @@ struct CRRegister {
+   }
+ 
+   inline void setFromMask(simde__m128 mask, int imm) noexcept {
++#if defined(__wasm__)
++    int m = imm == 0xFFFF ? simde_mm_movemask_epi8(simde_mm_castps_si128(mask))
++                          : simde_mm_movemask_ps(mask);
++#else
+     int m = simde_mm_movemask_ps(mask);
++#endif
+     lt = m == imm;
+     gt = 0;
+     eq = m == 0;
+     so = 0;
+   }
+ 
++  // On wasm SIMDe makes simde__m128 and simde__m128i the same type (v128_t),
++  // so the overload above takes both: the recompiler passes 0xF for the
++  // 4-lane float form and 0xFFFF for the 16-byte form, and it picks by that.
++#if !defined(__wasm__)
+   inline void setFromMask(simde__m128i mask, int imm) noexcept {
+     int m = simde_mm_movemask_epi8(mask);
+     lt = m == imm;
+@@ -115,6 +124,7 @@ struct CRRegister {
+     eq = m == 0;
+     so = 0;
+   }
++#endif
+ };
+ 
+ //=============================================================================
+diff --git a/include/rex/ppc/intrinsics.h b/include/rex/ppc/intrinsics.h
+index 3c2fe09..95f7db1 100644
+--- a/include/rex/ppc/intrinsics.h
++++ b/include/rex/ppc/intrinsics.h
+@@ -236,7 +236,7 @@ inline simde__m128i simde_mm_vsl(simde__m128i a, simde__m128i b) {
+   if (shift == 0)
+     return a;
+ 
+-#if defined(__x86_64__) || defined(_M_X64)
++#if defined(__x86_64__) || defined(_M_X64) || defined(__wasm__)
+   // Split into high and low 64-bit parts
+   simde__m128i low_shifted = simde_mm_slli_epi64(a, shift);
+   simde__m128i high_carry = simde_mm_srli_epi64(a, 64 - shift);
+@@ -287,7 +287,7 @@ inline simde__m128i simde_mm_vslo(simde__m128i a, simde__m128i b) {
+   if (shift_bytes >= 16)
+     return simde_mm_setzero_si128();
+ 
+-#if defined(__x86_64__) || defined(_M_X64)
++#if defined(__x86_64__) || defined(_M_X64) || defined(__wasm__)
+   alignas(16) uint8_t src[16], dst[16];
+   simde_mm_store_si128((simde__m128i*)src, a);
+   memset(dst, 0, sizeof(dst));
+@@ -318,7 +318,7 @@ inline simde__m128i simde_mm_vsro(simde__m128i a, simde__m128i b) {
+   if (shift_bytes >= 16)
+     return simde_mm_setzero_si128();
+ 
+-#if defined(__x86_64__) || defined(_M_X64)
++#if defined(__x86_64__) || defined(_M_X64) || defined(__wasm__)
+   alignas(16) uint8_t src[16], dst[16];
+   simde_mm_store_si128((simde__m128i*)src, a);
+   memset(dst, 0, sizeof(dst));
 diff --git a/include/rex/ui/imgui_dialog.h b/include/rex/ui/imgui_dialog.h
 index a7ab6b3..5db4278 100644
 --- a/include/rex/ui/imgui_dialog.h
@@ -390,6 +716,163 @@ index 4edde2b..022c961 100644
 +    bool ext_EXT_headless_surface = false;                     // #257
      bool ext_KHR_portability_enumeration = false;              // #395
    };
+ 
+diff --git a/resources/templates/codegen/pch_h.inja b/resources/templates/codegen/pch_h.inja
+index 68274d2..eef5a11 100644
+--- a/resources/templates/codegen/pch_h.inja
++++ b/resources/templates/codegen/pch_h.inja
+@@ -333,3 +333,84 @@ inline std::atomic<i32>& ppc_global_lock_count_() {
+     assert(old_count_ >= 1 && "LeaveGlobalLock called without matching EnterGlobalLock"); \
+     rex::thread::global_critical_region::mutex().unlock();                                \
+   } while (0)
++
++//=============================================================================
++// Raw-pointer writes
++//=============================================================================
++// At the end of this header so that adding it moved no line above (logging
++// in the inline helpers records __LINE__).
++// Emitted for stvx, stwcx./stdcx. and dcbz/dcbz128.
++#define REX_STORE_V128(x, v) simde_mm_store_si128((simde__m128i*)REX_RAW_ADDR(x), v)
++#define REX_CAS_U32(x, expected, desired) \
++  __sync_bool_compare_and_swap(reinterpret_cast<uint32_t*>(REX_RAW_ADDR(x)), expected, desired)
++#define REX_CAS_U64(x, expected, desired) \
++  __sync_bool_compare_and_swap(reinterpret_cast<uint64_t*>(REX_RAW_ADDR(x)), expected, desired)
++#define REX_ZERO_CACHE_LINE(x, size) memset((void*)REX_RAW_ADDR(x), 0, size)
++
++//=============================================================================
++// Web (Emscripten) memory model
++//=============================================================================
++// docs/web-port/README.md 7.9.2-7.9.3: WebAssembly has no page aliasing or
++// page protection, so guest address aliases are folded by a table and every
++// write to guest physical memory marks its page for the GPU, after the write.
++// Native builds never see this block.
++
++#if defined(__EMSCRIPTEN__)
++#include <rex/memory/web_guest.h>
++
++#undef REX_PHYS_HOST_OFFSET
++#define REX_PHYS_HOST_OFFSET(addr) (::rex::memory::web::kFold[(u32)(addr) >> 24])
++
++#undef REX_STORE_U8
++#undef REX_STORE_U16
++#undef REX_STORE_U32
++#undef REX_STORE_U64
++#undef REX_STORE_V128
++#undef REX_CAS_U32
++#undef REX_CAS_U64
++#undef REX_ZERO_CACHE_LINE
++#define REX_STORE_U8(x, y) ::rex::memory::web::Store8(REX_RAW_ADDR(x), (y))
++#define REX_STORE_U16(x, y) ::rex::memory::web::Store16(REX_RAW_ADDR(x), (y))
++#define REX_STORE_U32(x, y) ::rex::memory::web::Store32(REX_RAW_ADDR(x), (y))
++#define REX_STORE_U64(x, y) ::rex::memory::web::Store64(REX_RAW_ADDR(x), (y))
++#define REX_STORE_V128(x, v) ::rex::memory::web::Store128(REX_RAW_ADDR(x), (v))
++#define REX_CAS_U32(x, expected, desired) \
++  ::rex::memory::web::Cas32(REX_RAW_ADDR(x), (expected), (desired))
++#define REX_CAS_U64(x, expected, desired) \
++  ::rex::memory::web::Cas64(REX_RAW_ADDR(x), (expected), (desired))
++#define REX_ZERO_CACHE_LINE(x, size) ::rex::memory::web::Zero(REX_RAW_ADDR(x), (size))
++
++// fctid follows the guest rounding mode (no host rounding control on wasm).
++#define simde_mm_cvtsd_si64(v) ::rex::platform::FPSCRPlatform::CvtsdSi64(v)
++
++#undef REX_MM_STORE_U8
++#undef REX_MM_STORE_U16
++#undef REX_MM_STORE_U32
++#undef REX_MM_STORE_U64
++#define REX_MM_STORE_WEB_(addr, val, store)                                              \
++  do {                                                                                   \
++    u32 _mmio_addr = (addr);                                                             \
++    if (REX_IS_MMIO_ADDR(_mmio_addr)) {                                                  \
++      rex::runtime::MMIOHandler::global_handler()->CheckStore(_mmio_addr,                \
++                                                              static_cast<u32>(val));    \
++    } else {                                                                             \
++      store(_mmio_addr, val);                                                            \
++    }                                                                                    \
++  } while (0)
++#define REX_MM_STORE_U8(addr, val) REX_MM_STORE_WEB_(addr, val, REX_STORE_U8)
++#define REX_MM_STORE_U16(addr, val) REX_MM_STORE_WEB_(addr, val, REX_STORE_U16)
++#define REX_MM_STORE_U32(addr, val) REX_MM_STORE_WEB_(addr, val, REX_STORE_U32)
++#define REX_MM_STORE_U64(addr, val)                                                      \
++  do {                                                                                   \
++    u32 _mmio_addr = (addr);                                                             \
++    if (REX_IS_MMIO_ADDR(_mmio_addr)) {                                                  \
++      u64 _v64 = static_cast<u64>(val);                                                  \
++      rex::runtime::MMIOHandler::global_handler()->CheckStore(_mmio_addr,                \
++                                                              static_cast<u32>(_v64 >> 32)); \
++      rex::runtime::MMIOHandler::global_handler()->CheckStore(_mmio_addr + 4,            \
++                                                              static_cast<u32>(_v64));   \
++    } else {                                                                             \
++      REX_STORE_U64(_mmio_addr, val);                                                    \
++    }                                                                                    \
++  } while (0)
++#endif  // __EMSCRIPTEN__
+diff --git a/src/codegen/builders/helpers.h b/src/codegen/builders/helpers.h
+index dbc8d51..331190f 100644
+--- a/src/codegen/builders/helpers.h
++++ b/src/codegen/builders/helpers.h
+@@ -11,6 +11,8 @@
+ 
+ #pragma once
+ 
++#include <string_view>
++
+ #include "builder_context.h"
+ 
+ #include <cstring>
+@@ -304,11 +306,11 @@ inline void emitAtomicStoreConditional(BuilderContext& ctx, const char* ptr_type
+   ctx.println("{}.u32;", ctx.r(ctx.insn.operands[2]));
+   ctx.println("\t{}.lt = 0;", ctx.cr(0));
+   ctx.println("\t{}.gt = 0;", ctx.cr(0));
+-  ctx.println(
+-      "\t{}.eq = __sync_bool_compare_and_swap(reinterpret_cast<{}*>(REX_RAW_ADDR({})), "
+-      "{}.{}, {}({}.{}));",
+-      ctx.cr(0), ptr_type, ctx.ea(), ctx.reserved(), field, bswap_func, ctx.r(ctx.insn.operands[0]),
+-      field);
++  // REX_CAS_U32/U64: __sync_bool_compare_and_swap on the guest address
++  // natively; the web build also marks the page written (pch_h.inja).
++  ctx.println("\t{}.eq = {}({}, {}.{}, {}({}.{}));", ctx.cr(0),
++              std::string_view(ptr_type) == "uint64_t" ? "REX_CAS_U64" : "REX_CAS_U32", ctx.ea(),
++              ctx.reserved(), field, bswap_func, ctx.r(ctx.insn.operands[0]), field);
+   ctx.println("\t{}.so = {}.so;", ctx.cr(0), ctx.xer());
+ }
+ 
+diff --git a/src/codegen/builders/memory.cpp b/src/codegen/builders/memory.cpp
+index 3dd7fa5..95b9ba8 100644
+--- a/src/codegen/builders/memory.cpp
++++ b/src/codegen/builders/memory.cpp
+@@ -645,8 +645,10 @@ bool build_stvrx(BuilderContext& ctx) {
+ 
+ bool build_stvx(BuilderContext& ctx) {
+   emitVectorEA(ctx, "0xF");
++  // REX_STORE_V128: a plain 16-byte store natively; the web build also marks
++  // the page written (pch_h.inja).
+   ctx.println(
+-      "\tsimde_mm_store_si128((simde__m128i*)REX_RAW_ADDR({}), "
++      "\tREX_STORE_V128({}, "
+       "simde_mm_shuffle_epi8(simde_mm_load_si128((simde__m128i*){}.u8), "
+       "simde_mm_load_si128((simde__m128i*)VectorMaskL)));",
+       ctx.ea(), ctx.v(ctx.insn.operands[0]));
+diff --git a/src/codegen/builders/system.cpp b/src/codegen/builders/system.cpp
+index b2d70f5..d7493df 100644
+--- a/src/codegen/builders/system.cpp
++++ b/src/codegen/builders/system.cpp
+@@ -153,7 +153,7 @@ bool build_dcbz(BuilderContext& ctx) {
+   if (ctx.insn.operands[0] != 0)
+     ctx.print("{}.u32 + ", ctx.r(ctx.insn.operands[0]));
+   ctx.println("{}.u32) & ~31;", ctx.r(ctx.insn.operands[1]));
+-  ctx.println("\tmemset((void*)REX_RAW_ADDR({}), 0, 32);", ctx.ea());
++  ctx.println("\tREX_ZERO_CACHE_LINE({}, 32);", ctx.ea());
+   return true;
+ }
+ 
+@@ -163,7 +163,7 @@ bool build_dcbzl(BuilderContext& ctx) {
+   if (ctx.insn.operands[0] != 0)
+     ctx.print("{}.u32 + ", ctx.r(ctx.insn.operands[0]));
+   ctx.println("{}.u32) & ~127;", ctx.r(ctx.insn.operands[1]));
+-  ctx.println("\tmemset((void*)REX_RAW_ADDR({}), 0, 128);", ctx.ea());
++  ctx.println("\tREX_ZERO_CACHE_LINE({}, 128);", ctx.ea());
+   return true;
+ }
  
 diff --git a/src/core/filesystem_posix.cpp b/src/core/filesystem_posix.cpp
 index ef5bdf4..76b2608 100644
