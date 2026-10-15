@@ -235,6 +235,11 @@ bool ResolveEngine::Copy(const draw_util::ResolveInfo& info, RenderTarget& sourc
   constants.mode = dest_format.mode;
   constants.flags = GetSampleMask(info.rb_copy_control.copy_sample_select) |
                     (info.copy_dest_info.copy_dest_swap ? 16u : 0u);
+  // At 2x/3x the half-pixel offset leaves the first host column and row of
+  // full-screen passes undrawn; copy the next one there, as the SDK does.
+  if ((is_depth ? info.depth_edram_info : info.color_edram_info).fill_half_pixel_offset) {
+    constants.flags |= (std::min(scale_x >> 1, 3u) << 8) | (std::min(scale_y >> 1, 3u) << 10);
+  }
   uint32_t constants_offset = frame_recorder_.UploadUniforms(&constants, sizeof(constants));
 
   bool multisample = source->sample_count > 1;

@@ -100,6 +100,8 @@ PassCategory ClassifyPass(const RenderTargetCache::Binding& targets,
 struct ResolvedRegion {
   RenderTarget* target = nullptr;
   uint32_t x = 0, y = 0, width = 0, height = 0;  // host pixels
+  // Leading host columns / rows to fill from the next one (as the resolve).
+  uint32_t fill_x = 0, fill_y = 0;
 };
 
 struct BlitResources {
@@ -1344,6 +1346,10 @@ bool WebGpuBackend::Resolve(const ResolveSnapshot& resolve) {
                  scale_y;
       region.width = info.coordinate_info.width_div_8 * 8 * scale_x;
       region.height = info.height_div_8 * 8 * scale_y;
+      if (edram.fill_half_pixel_offset) {
+        region.fill_x = std::min(scale_x >> 1, 3u);
+        region.fill_y = std::min(scale_y >> 1, 3u);
+      }
       State().resolved_regions[info.copy_dest_base] = region;
     }
   }
@@ -1543,8 +1549,9 @@ void WebGpuBackend::Swap(const SwapSnapshot& swap) {
             provider_.queue().WriteBuffer(blit.gamma_ramp, 0, ramp,
                                           (pwl ? 128 * 3 : 256) * sizeof(uint32_t));
           }
-          int32_t constants[4] = {int32_t(region.x), int32_t(region.y), int32_t(gamma_mode),
-                                  int32_t(fxaa)};
+          int32_t constants[4] = {
+              int32_t(region.x), int32_t(region.y),
+              int32_t(gamma_mode | (region.fill_x << 8) | (region.fill_y << 10)), int32_t(fxaa)};
           provider_.queue().WriteBuffer(blit.constants, 0, constants, sizeof(constants));
           std::array<wgpu::BindGroupEntry, 3> entries;
           entries[0].binding = 0;
