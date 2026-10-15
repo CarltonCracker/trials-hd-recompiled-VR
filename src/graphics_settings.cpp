@@ -50,6 +50,7 @@ std::string g_startup_renderer;
 int g_startup_webgpu_adapter = -1;
 bool g_startup_vsync = true;
 bool g_startup_fps_unlock = true;
+bool g_startup_arcade_splash = false;
 // Refresh rate of the display mode the window is presented in (UI thread writes).
 std::atomic<float> g_refresh_rate{0.0f};
 
@@ -170,6 +171,7 @@ void ApplyStartupGraphicsSettings() {
 
   g_startup_vsync = REXCVAR_GET(host_vsync);
   g_startup_fps_unlock = GetBool("fps_unlock");
+  g_startup_arcade_splash = GetBool("show_arcade_splash");
   // The presenter prefers immediate, then mailbox, then FIFO-relaxed, then FIFO.
   // VSync on removes the tearing / unsynchronized modes from that list.
   const char* allow = g_startup_vsync ? "false" : "true";
@@ -551,6 +553,17 @@ void GraphicsSettingsDialog::OnDraw(ImGuiIO& io) {
     rex::cvar::SetFlagByName("host_vsync", vsync ? "true" : "false");
   }
   restart_note(vsync != g_startup_vsync);
+
+  // Arcade Splash
+  bool arcade_splash = GetBool("show_arcade_splash");
+  label("Arcade Splash");
+  if (ImGui::Checkbox("##arcade_splash", &arcade_splash)) {
+    rex::cvar::SetFlagByName("show_arcade_splash", arcade_splash ? "true" : "false");
+  }
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip("Show the Xbox Live Arcade splash screen on boot");
+  }
+  restart_note(arcade_splash != g_startup_arcade_splash);
 
   ImGui::Separator();
   if (ImGui::Button("Save")) {
