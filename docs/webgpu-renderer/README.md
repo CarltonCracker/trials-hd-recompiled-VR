@@ -2281,9 +2281,17 @@ finding: `YYYY-MM-DD <agent> <task ID>: what changed; evidence; what is left`.
     reverse-Z and general NDC scale/offset, against the SDK SPIR-V epilogue's
     arithmetic. This checks supplied uniforms, not production viewport-register
     setup or rasterized depth precision.
-  - L-04e remains claimed/in progress: viewport-register setup, rasterized
-    reverse-Z/float24, other RT conversions, actual point coordinates and M3
-    silhouette acceptance remain open.
+  - Fresh isolated production executable/plugin build passed. AMD M3 menu
+    capture at **1280x720** matches the local Vulkan reference at
+    **44.032874096451 dB PSNR**; **0.132089120370%** of RGB channel samples
+    differ by more than 16. Side-by-side inspection shows matching menu/rider
+    geometry silhouettes and placement. No Dawn/validation errors were logged.
+    This is one menu scene, not whole-game parity; SDK heap-release (52), audio
+    device and duplicate-cvar errors remain, so it is not a clean-runtime claim.
+    Images/logs stay local under `out/webgpu-fetch-game/output-menu`.
+  - L-04e remains claimed/in progress: broader viewport-register coverage,
+    rasterized reverse-Z/float24, other RT conversions and actual point
+    coordinates remain open.
 - 2026-10-14 antigravity (Tier S tasks completion):
   - **S-01:** Executed 7 headless test scripts (`main_menu_nav.txt`, `settings_menu.txt`,
     `credits.txt`, `ride_tutorial.txt`, `ride_middle_name_danger.txt`, `ride_hello_world.txt`,
