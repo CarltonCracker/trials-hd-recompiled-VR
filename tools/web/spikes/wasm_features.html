@@ -1,0 +1,52 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Trials HD web spike: WASM features</title>
+<pre id="result">Checking WebAssembly features…</pre>
+<script>
+// Handwritten fixtures, assembled with Binaryen 133: wasm-as --all-features.
+// Keep WAT and hex together so test_wasm_features.py can reassemble and compare.
+const fixtures = {
+  sharedMemory64: {
+    wat: '(module (memory i64 1 1 shared))',
+    hex: '0061736d01000000050401070101',
+  },
+  threads: {
+    wat: '(module (memory 1 1 shared) (func (drop (i32.atomic.load (i32.const 0)))))',
+    hex: '0061736d01000000010401600000030201000504010301010a0b0109004100fe1002001a0b',
+  },
+  simd128: {
+    wat: '(module (func (result v128) (v128.const i32x4 0 0 0 0)))',
+    hex: '0061736d010000000105016000017b030201000a16011400fd0c000000000000000000000000000000000b',
+  },
+  relaxedSimd: {
+    wat: '(module (func (result v128) (i8x16.relaxed_swizzle (v128.const i32x4 0 0 0 0) (v128.const i32x4 0 0 0 0))))',
+    hex: '0061736d010000000105016000017b030201000a2b012900fd0c00000000000000000000000000000000fd0c00000000000000000000000000000000fd80020b',
+  },
+  exceptionHandling: {
+    wat: '(module (tag $e) (func (result exnref) (block $catch (result exnref) (try_table (catch_all_ref $catch) (throw $e)) (ref.null exn))))',
+    hex: '0061736d0100000001080260000060000169030201010d030100000a10010e0002691f4001030008000b000b0b',
+  },
+};
+
+window.spikeResult = (async () => {
+  const bytes = hex => Uint8Array.from(hex.match(/../g), pair => parseInt(pair, 16));
+  if (!WebAssembly.validate(bytes('0061736d01000000')) ||
+      WebAssembly.validate(bytes('ff61736d01000000'))) {
+    throw new Error('WebAssembly.validate failed the positive/negative control');
+  }
+  const features = Object.fromEntries(Object.entries(fixtures).map(([name, fixture]) =>
+    [name, WebAssembly.validate(bytes(fixture.hex))]));
+  features.jspi = typeof WebAssembly.Suspending === 'function' &&
+                  typeof WebAssembly.promising === 'function';
+  features.crossOriginIsolated = crossOriginIsolated;
+  features.sharedArrayBuffer = typeof SharedArrayBuffer === 'function';
+  const result = {userAgent: navigator.userAgent, features};
+  document.querySelector('#result').textContent = JSON.stringify(result, null, 2);
+  console.log('WASM_FEATURES ' + JSON.stringify(result));
+  return result;
+})().catch(error => {
+  document.querySelector('#result').textContent = error.stack;
+  console.error(error.stack);
+  throw error;
+});
+</script>
