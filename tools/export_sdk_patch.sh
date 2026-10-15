@@ -55,6 +55,11 @@ commit by CMake at configure time; regenerate with tools/export_sdk_patch.sh).
 - ui: dialogs say whether they need continuous repaint; the always-present
   achievement toast only does while showing one (the window was repainted
   ~1400 times per second with VSync off)
+- web (Emscripten) memory model (docs/web-port/README.md 7.9.2-7.9.3, W-L04):
+  one guest window with the aliases folded per heap, page protection as
+  bookkeeping, dirty-bitmap write tracking delivered to the invalidation
+  callbacks (memory_emscripten.cpp, exception_handler_emscripten.cpp and
+  REX_PLATFORM_EMSCRIPTEN / REX_ARCH_WASM branches; native code unchanged)
 
 EOF
   git -C "$sdk" diff

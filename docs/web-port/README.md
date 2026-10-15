@@ -700,26 +700,46 @@ so `REX_RAW_ADDR`, `REX_LOAD_*` and `REX_STORE_*` keep their native text. The `b
 argument of every recompiled function is the window start (as `virtual_membase_` is
 natively).
 
-**`Memory` changes (W-L04):**
+**`Memory` changes (W-L04, as built 2026-10-15):**
 
-- `BaseHeap::host_address_offset_` becomes `int64_t` on the web only
-  (`using HostAddressOffset = std::conditional_t<REX_PLATFORM_EMSCRIPTEN, int64_t, uint32_t>`),
-  set to `rex::memory::web::kFold[heap_base >> 24]` for every heap. `TranslateRelative`,
-  `TranslateVirtual` and `HostToGuestVirtual` then work unchanged in shape.
-  `TranslateVirtual` on the web uses the fold table directly (it also covers `0x7F…`,
-  which belongs to no heap).
+- **Heaps fold through their base pointer, not `host_address_offset_`** (supersedes the
+  first draft, which made that offset an `int64_t`). `BaseHeap::Initialize` on the web sets
+  `membase_ = window + kFold[heap_base >> 24]` for every view of the window (the physical
+  heap is passed `physical_membase_` and is left alone), so `TranslateRelative` lands on the
+  folded bytes. `host_address_offset_` keeps its native meaning (0 here: 4 KiB granularity),
+  because `PhysicalHeap::EnableAccessCallbacks`/`TriggerCallbacks` and
+  `SyncHostPageAccess` use it to number host pages; a negative fold there broke that math.
+  No header type changes.
+- `detail::PhysicalHostOffset` (used by `GuestPtr`, hence the kernel, hooks and
+  `src/crt_hooks.cpp`) returns `kFold[addr >> 24]` (`int64_t`) on the web, and
+  `Memory::TranslateVirtual` uses it directly (it also covers `0x7F…`, which has no heap).
+  Recompiled code, `GuestPtr`, `TranslateVirtual` and each heap's `TranslateRelative` give
+  the same pointer for every 16 MiB block (W-L04 test).
 - `HostToGuestVirtual(host)`: window offsets `0x90000000–0xAFFFFFFF` return the
-  `0xA0000000` alias (only used by fault handling and logging).
-- `Memory::Initialize` on the web: no `CreateFileMappingHandle`/`MapViews`; allocate the
-  window, set `virtual_membase_` and `physical_membase_`, initialize heaps as natively,
-  skip `MMIOHandler::Install`'s exception handler (7.9.4).
-- Page protection is bookkeeping: heaps keep their page tables (protect bits, commit
-  state) for guest-visible `NtQueryVirtualMemory`, but nothing traps. `kMemoryProtectNoAccess`
-  pages stay readable on the web (no fault); this only matters for buggy guests.
-- Decommit/release zero the pages (`memset`) where native would discard them, because
-  the guest expects zero-filled memory on recommit.
+  `0xA0000000` alias (fault handling and `SearchAligned` only).
+- `Memory::Initialize` on the web: no `CreateFileMappingHandle`/`MapViews`;
+  `rex::memory::web::AllocateGuestWindow()` (`memory_emscripten.cpp`) reserves the window
+  with `sbrk`, 64 KiB aligned, plus a 64 KiB tail (guest `0xFFFFFxxx` folds to physical
+  `0x20000xxx`, which the native backing file also has). `sbrk`, not `malloc`: Emscripten's
+  dlmalloc is built with `MORECORE_CANNOT_TRIM`, so memory past the break was never
+  written and the window is zero without touching (committing) its 2.75 GiB; `malloc`
+  keeps working past it. The window is never freed; a second `Memory` gets the same one.
+  `MMIOHandler::Install` runs unchanged: `exception_handler_emscripten.cpp` makes
+  `ExceptionHandler::Install`/`Uninstall` no-ops, and `mmio_handler.cpp` gained
+  `REX_ARCH_WASM` branches for its (never reached) fault decoder.
+- Page protection is bookkeeping: `AllocFixed`/`DeallocFixed`/`Protect`/`QueryProtect` on
+  window addresses succeed without doing anything; the heaps keep their page tables
+  (protect bits, commit state) for guest-visible queries, but nothing traps.
+  `kMemoryProtectNoAccess` pages stay readable on the web; this only matters for buggy
+  guests.
+- **Decommit/release keep the contents**, as natively: the heaps never ask the host to
+  free view pages (`BaseHeap::Decommit`/`Release` only update the page table), and on
+  Linux the views are a shared mapping that keeps its data anyway. (The first draft said
+  "zero on decommit"; reading the code showed native does not.)
+- `Memory::Zero`/`Fill`/`Copy` call `MarkGuestWrite` after writing.
 - Emscripten link: `-sINITIAL_MEMORY=3328mb` (window 2.75 GiB + 576 MiB host start),
-  `-sMAXIMUM_MEMORY=8gb`, `-sALLOW_MEMORY_GROWTH=1` for the host heap.
+  `-sMAXIMUM_MEMORY=8gb`, `-sALLOW_MEMORY_GROWTH=1` for the host heap. With these flags the
+  W-L04 test's window starts at linear-memory offset `0x40000`.
 
 #### 7.9.3 Write tracking (dirty bitmap)
 
@@ -789,6 +809,19 @@ void Memory::DeliverPhysicalWrites();
   (atomic load) before executing the packets, so the data writes and their marks happen
   before the delivery that precedes the draw.
 - Unwatched dirty pages are just cleared.
+- As built (W-L04): a delivery clears a summary bit **before** exchanging its bitmap words
+  (a writer sets the summary bit only when its page bit was clear, so the reverse order
+  can strand a page bit with no summary bit; the W-L04 stress test loses writes within
+  seconds that way). Consecutive dirty pages are merged into runs across words, and each
+  run goes to `PhysicalHeap::TriggerCallbacks` of **all three** physical views
+  (`0xA0…`, `0xC0…`, `0xE0…`): watch flags are per view, and a write through one view must
+  reach a watch made through another. A view that watches none of the run returns at
+  once. Each call holds the global critical region, as the fault path does.
+- Callbacks keep their native contract: the returned range may only cover data the
+  consumer no longer holds valid. `TriggerCallbacks` unwatches up to 4 MiB of it, and
+  dirty pages there are then dropped unwatched - correct for `SharedMemory`, whose
+  callback returns its invalid span; a callback returning `(0, UINT32_MAX)` while
+  keeping data cached would lose updates on the web as it would natively.
 - `enable_data_providers` (read-side callbacks) is not supported on the web; assert it is
   never requested (W-L05 confirms).
 - Debug mode (`--web_dirty_verify`, W-L05): hash each watched 256 KiB chunk at watch time
@@ -796,9 +829,10 @@ void Memory::DeliverPhysicalWrites();
 
 #### 7.9.4 MMIO
 
-`MMIOHandler::Install` keeps its range table; on the web it skips
-`arch::ExceptionHandler::Install` (the SDK comment there already says MMIO is handled by
-the `REX_MM_*` macros and the fault handler is only for write tracking). W-S07 proves the
+`MMIOHandler::Install` keeps its range table; on the web `arch::ExceptionHandler::Install`
+is a no-op (`exception_handler_emscripten.cpp`, W-L04; the SDK comment in `Install` already
+says MMIO is handled by the `REX_MM_*` macros and the fault handler is only for write
+tracking). W-S07 proves the
 28 `REX_MM_*` sites cover every MMIO access. In debug web builds, `REX_LOAD_*`/`REX_STORE_*`
 assert `!REX_IS_MMIO_ADDR(addr)` (cost only in debug).
 
@@ -981,10 +1015,11 @@ linker would drop them). The Vulkan plugin is not built for the web.
   Browsers commit pages on first touch, so untouched guest pages cost nothing (the
   reference port starts at 3 GiB).
 - `Memory::Initialize`: on `__EMSCRIPTEN__`, `virtual_membase_` = window start,
-  `physical_membase_` = window + `0xA0000000`; the `vA0000000/vC0000000/vE0000000` heaps
-  keep their allocators but translate to the physical block. No `MapFileView`.
-- `AllocFixed`/`Protect`/`Decommit`: bookkeeping only (zero-fill on decommit where the
-  guest relies on it; check `kMemoryAllocationCommit` semantics).
+  `physical_membase_` = window + `0x90000000` (layout in 7.9.2; the first sketch here said
+  `0xA0000000`); the `vA0000000/vC0000000/vE0000000` heaps keep their allocators but
+  translate to the physical block. No `MapFileView`. Implemented by W-L04 (7.9.2).
+- `AllocFixed`/`Protect`/`Decommit`: bookkeeping only. Checked (W-L04): native decommit
+  and release keep the page contents, so the web does not zero them either.
 - Host code that converts guest addresses (`TranslateVirtual`, `TranslatePhysical`,
   `GetPhysicalAddress`) must apply the same fold as the macro. One helper, used by both.
 
@@ -1375,6 +1410,8 @@ Without ANGLE-on-Vulkan Chromium exposes only SwiftShader to WebGPU.
 | `generated/default/trials_hd_pch.h` | Memory macros (`REX_PHYS_HOST_OFFSET`, `REX_MM_*`), function macros |
 | `thirdparty/rexglue-sdk/src/codegen/builders/` | Where the codegen emits those macros (`memory.cpp`, `vector.cpp`, `context.cpp`) |
 | `thirdparty/rexglue-sdk/src/system/xmemory.cpp`, `src/core/memory_posix.cpp` | Guest memory setup |
+| `thirdparty/rexglue-sdk/src/core/memory_emscripten.cpp`, `include/rex/memory/web_guest.h` | Web guest window, dirty bitmap, `MarkGuestWrite` (W-L04) |
+| `tools/web/tests/run_memory_model.sh` | W-L04 check: SDK `Memory` with the web model, wasm64 under Node (activate emsdk first) |
 | `thirdparty/rexglue-sdk/src/system/mmio_handler.cpp`, `src/core/exception_handler_posix.cpp` | MMIO and fault handling |
 | `thirdparty/rexglue-sdk/src/graphics/shared_memory.cpp`, `primitive_processor.cpp` | Write watches |
 | `thirdparty/rexglue-sdk/src/core/threading_posix.cpp`, `fiber_posix.cpp` | Threads, timers, fibers |
@@ -1519,7 +1556,7 @@ Every task's "Done when" implicitly includes **`tools/check_native.sh check` pas
 | W-L01 | done 2026-10-15 (section 7.9) | **Web platform design note.** Turn sections 7–9 into concrete interfaces: the `REX_PLATFORM_EMSCRIPTEN` layer, the memory-model macro and helpers (7.2, 8.1), the dirty-bitmap API (8.3), the SAB layouts for input and audio, the GPU-worker yield points (7.4), the ImGui draw-list mailbox (9.4). Write it into this document. | — | 3, 7, 8, 9 | Design note merged; W-S05, W-S16, W-S18 unblocked |
 | W-L02 | claimed pi-gpt 2026-10-15 (takeover) | **Codegen changes.** Resolve the SIMDe mask-type collision (section 6 item 5) using the existing `0xF`/`0xFFFF` immediate on wasm (native overloads unchanged); emit web memory macros and dirty-marking store helpers under `__EMSCRIPTEN__`. Native raw-write expressions become identity macros; their expansions stay identical. | W-L01 | `src/codegen/builders/{memory,vector,context}.cpp`, 3.3 | Native build boots, golden scenes unchanged; all 107 files compile with `em++` without the spike's scratch headers |
 | W-L03 | todo | **Memory-model cost.** Build a micro-benchmark from real generated functions (a physics-heavy one and a VMX-heavy one, driven with captured inputs) for native, wasm32 and wasm64; then compare the full game's busiest guest threads once WM1 runs. Decide A vs B (7.1) with numbers. | W-S03, W-S10, W-S11 | 7.1, 7.2 | Table of ns/call in 7.1; decision recorded in 1 (D1) |
-| W-L04 | claimed claude-opus-5.5 2026-10-15 | **Runtime memory for the web** (`xmemory.cpp`, `memory_posix.cpp` → `memory_emscripten.cpp`): one linear-memory window, folded physical views, bookkeeping-only protection, `MarkPhysicalWritten`, the dirty bitmap and write epochs; `TranslateVirtual`/`TranslatePhysical`/`GetPhysicalAddress` consistent with the macro. | W-L01 | 3.4, 8.1, 8.3 | Unit test (native-hosted with the web memory model compiled in): guest writes through all three views land in the same physical bytes; bitmap bits match the writes |
+| W-L04 | review 2026-10-15 (needs macOS check) | **Runtime memory for the web** (`xmemory.cpp`, `memory_posix.cpp` → `memory_emscripten.cpp`): one linear-memory window, folded physical views, bookkeeping-only protection, `MarkPhysicalWritten`, the dirty bitmap and write epochs; `TranslateVirtual`/`TranslatePhysical`/`GetPhysicalAddress` consistent with the macro. | W-L01 | 3.4, 8.1, 8.3 | Unit test (native-hosted with the web memory model compiled in): guest writes through all three views land in the same physical bytes; bitmap bits match the writes |
 | W-L05 | todo | **Write tracking consumers**: `SharedMemory`, `PrimitiveProcessor` and the renderer's texture cache and memory mirror use the dirty bitmap on the web; debug assertion mode compares against chunk hashes (14.8). | W-L04, W-S09 | 8.3, renderer doc 8.3, 8.9 | WM4 ride shows no stale textures; assertion mode passes over `ride_middle_name_danger` |
 | W-L06 | todo | **GPU worker and yielding** (7.4): run the command processor on the canvas-owning pthread; JSPI yield at swap/ring waits (or the resumable loop if W-S05 fails); move presenter paint and ImGui drawing there (9.4). | W-L01, W-S05 | 7.3, 7.4, 9.4 | WM2: menus render and the settings overlay works |
 | W-L07 | todo | **Renderer web build** (section 9): `#if __EMSCRIPTEN__` in provider/presenter/mirror, canvas surface, feature and limit fallbacks (`Unorm16` → tier1, split mirror if W-S01 says so, timestamp degrade), async capture. | W-S01, W-L06 | 9 | Renderer builds with `--use-port=emdawnwebgpu`; WM2 check |
@@ -1548,6 +1585,32 @@ details of W-L04 to W-L09. The critical path is W-L01 → W-L02/W-L04 → W-L15 
 W-L06/W-L07 (graphics).
 
 ### 16.6 Notes log
+
+- 2026-10-15 (claude-opus-5.5): **W-L04 → `review` (needs macOS check, 7.8)**. Web
+  runtime memory: `memory_emscripten.cpp` (`sbrk` guest window, bookkeeping page APIs,
+  dirty-bitmap globals, `MarkGuestWrite`); `REX_PLATFORM_EMSCRIPTEN` branches in
+  `xmemory.cpp`/`xmemory.h` (window init, per-heap folded base pointer, `TranslateVirtual`
+  and `GuestPtr` fold, `HostToGuestVirtual`, marks in `Zero`/`Fill`/`Copy`,
+  `Memory::DeliverPhysicalWrites`); `exception_handler_emscripten.cpp` (no-op install);
+  `REX_ARCH_WASM` branches for `mmio_handler.cpp`'s unused fault decoder; SDK
+  `src/core/CMakeLists.txt` `if(EMSCRIPTEN)` source list (W-L15 completes it). Two
+  corrections to 7.9.2: heaps fold through `membase_`, not a signed
+  `host_address_offset_` (that offset numbers host pages in the watch code), and
+  decommit keeps contents, as natively. Host helpers fold integers before adding the
+  window pointer, as pi-gpt asked. Check: `tools/web/tests/run_memory_model.sh` (the SDK's
+  `Memory` built for wasm64, run under Node 24) printed `W-L04 memory model PASSED: 3
+  physical views + 0x7F/0x9 aliases agree over 256 blocks; 10 marked pages matched;
+  delivery one-shot; 800000 concurrent writes, none lost`, in 6 of 6 runs. Negative controls all
+  fail: no heap fold (translation mismatch), unmarked `Zero` (dirty-bit mismatch),
+  delivery skipping the `0xA0…` view (no callback), summary cleared after its words (the
+  stress test loses writes, 3/3 runs). Native: `xmemory.cpp`/`mmio_handler.cpp` machine
+  code matches the pre-change sources apart from shifted `__LINE__` constants;
+  `flock out/native-web-check.lock tools/check_native.sh check out/native_baseline_claude`
+  (copy of the pre-change `native_baseline_takeover`): build OK, no web symbols,
+  `webgpu: 9 captures, worst 48.0 dB`, `vulkan: 9 captures, worst 49.3 dB`. Its one
+  failure is the `trials_hd_pch.h` fingerprint, caused by pi-gpt's uncommitted W-L02
+  template edit (`REX_RAW_ADDR` integer fold inside `#if defined(__EMSCRIPTEN__)`), not
+  by W-L04. W-L05 and W-L15 can build on these interfaces now.
 
 - 2026-10-15 (claude-opus-5.5): claimed **W-L04** (web runtime memory: window, heaps,
   `MarkGuestWrite`, `DeliverPhysicalWrites`, dirty bitmap). New files
