@@ -100,11 +100,18 @@ int main() {
   for (int i = 0; i < 16; ++i) sequence[i] = i + 1;
   auto vector = simde_mm_load_si128(reinterpret_cast<simde__m128i*>(sequence));
   auto shift = simde_mm_setzero_si128();
-  assert(simde_mm_movemask_epi8(simde_mm_cmpeq_epi8(simde_mm_vsl(vector, shift), vector)) == 0xFFFF);
+  assert(simde_mm_movemask_epi8(simde_mm_cmpeq_epi8(rex::ppc::simde_mm_vsl(vector, shift), vector)) == 0xFFFF);
+  sequence[7] = 0x80;
+  auto with_carry = simde_mm_load_si128(reinterpret_cast<simde__m128i*>(sequence));
+  auto bit_shift = simde_mm_insert_epi8(shift, 1, 15);
+  simde_mm_store_si128(reinterpret_cast<simde__m128i*>(shifted), rex::ppc::simde_mm_vsl(with_carry, bit_shift));
+  for (int i = 0; i < 16; ++i) {
+    assert(shifted[i] == uint8_t((sequence[i] << 1) | (i ? sequence[i - 1] >> 7 : 0)));
+  }
   shift = simde_mm_insert_epi8(shift, 8, 0);
-  simde_mm_store_si128(reinterpret_cast<simde__m128i*>(shifted), simde_mm_vslo(vector, shift));
+  simde_mm_store_si128(reinterpret_cast<simde__m128i*>(shifted), rex::ppc::simde_mm_vslo(vector, shift));
   assert(shifted[0] == 0 && shifted[1] == 1 && shifted[15] == 15);
-  simde_mm_store_si128(reinterpret_cast<simde__m128i*>(shifted), simde_mm_vsro(vector, shift));
+  simde_mm_store_si128(reinterpret_cast<simde__m128i*>(shifted), rex::ppc::simde_mm_vsro(vector, shift));
   assert(shifted[0] == 2 && shifted[14] == 16 && shifted[15] == 0);
   std::puts("SDK web header checks PASSED: folds, stores, dirty bits, masks, rounding, TLS, VMX");
 }

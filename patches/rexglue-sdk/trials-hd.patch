@@ -474,6 +474,20 @@ index e90418d..a9c828b 100644
  #endif
  
  #if REX_PLATFORM_WIN32
+diff --git a/include/rex/platform/dynlib.h b/include/rex/platform/dynlib.h
+index e3fc40d..55dd125 100644
+--- a/include/rex/platform/dynlib.h
++++ b/include/rex/platform/dynlib.h
+@@ -71,6 +71,9 @@ inline constexpr const char* kVulkanLoader = "libvulkan.1.dylib";
+ inline constexpr const char* kRenderDoc = "librenderdoc.dylib";
+ inline constexpr const char* kSpirvToolsSdkPath = "lib/libSPIRV-Tools-shared.dylib";
+ 
++#elif REX_PLATFORM_EMSCRIPTEN
++// Static plugins only; Vulkan, RenderDoc and SPIRV-Tools aren't built on the web.
++
+ #else
+ #error No library names provided for the target platform.
+ #endif
 diff --git a/include/rex/platform/fpscr.h b/include/rex/platform/fpscr.h
 index c2c4fd4..2b26ea9 100644
 --- a/include/rex/platform/fpscr.h

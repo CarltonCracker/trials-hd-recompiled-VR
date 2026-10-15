@@ -29,12 +29,13 @@ def main():
         parser.error('run the native build/codegen first; generated/default is missing')
     output = root / 'out/web-spikes/recomp-objects'
     output.mkdir(parents=True, exist_ok=True)
-    includes = [sdk / 'include', sdk / 'thirdparty/simde', sdk / 'thirdparty/fmt/include',
+    includes = [sdk / 'thirdparty/simde', sdk / 'thirdparty/fmt/include',
                 sdk / 'thirdparty/spdlog/include', sdk / 'thirdparty/tomlplusplus/include']
     flags = ['--target=wasm64', '-O2', '-std=gnu++23', '-msimd128', '-pthread',
              '-matomics', '-mbulk-memory', '-fwasm-exceptions',
              '-DSPDLOG_COMPILED_LIB', '-DSPDLOG_FMT_EXTERNAL',
-             *('-I' + str(path) for path in includes),
+             '-I' + str(sdk / 'include'),
+             *('-isystem' + str(path) for path in includes),
              '-include', str(generated / 'trials_hd_pch.h')]
 
     def compile_source(source):
