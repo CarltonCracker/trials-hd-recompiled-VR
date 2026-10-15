@@ -40,6 +40,7 @@ set(REXGPU_WEBGPU_WGSL
     shaders/immediate.wgsl
     wgsl/wgsl_prelude.wgsl
     shaders/blit.wgsl
+    shaders/fxaa.wgsl
     shaders/resolve.wgsl
     shaders/transfer.wgsl
 )

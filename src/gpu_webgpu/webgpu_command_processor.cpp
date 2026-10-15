@@ -153,6 +153,7 @@ void WebGpuCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
   swap.frame_index = frame_index_;
   swap.gamma_ramp_table = reinterpret_cast<const uint32_t*>(gamma_ramp_256_entry_table());
   swap.gamma_ramp_pwl = reinterpret_cast<const uint32_t*>(gamma_ramp_pwl_rgb());
+  swap.post_effect = uint32_t(GetActualSwapPostEffect());
   ++frame_index_;
   draw_index_ = 0;
   resolve_index_ = 0;

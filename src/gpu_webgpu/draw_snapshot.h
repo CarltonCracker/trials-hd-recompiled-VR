@@ -74,6 +74,8 @@ struct SwapSnapshot {
   // 128 x RGB DC_LUT_PWL_DATA values.
   const uint32_t* gamma_ramp_table = nullptr;
   const uint32_t* gamma_ramp_pwl = nullptr;
+  // 0: none, 1: FXAA, 2: FXAA extreme (CommandProcessor::SwapPostEffect).
+  uint32_t post_effect = 0;
 };
 
 }  // namespace rex::graphics::webgpu

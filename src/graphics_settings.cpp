@@ -157,7 +157,7 @@ void ApplyStartupGraphicsSettings() {
   // Record the renderer chosen at startup (may have come from config or CLI).
   std::string renderer = REXCVAR_GET(gpu_plugin);
   if (renderer.empty()) {
-    renderer = "xenos";
+    renderer = "webgpu";
   }
   g_startup_renderer = renderer;
 
@@ -388,7 +388,7 @@ void GraphicsSettingsDialog::OnDraw(ImGuiIO& io) {
   // Renderer (Vulkan / WebGPU)
   std::string cur_renderer = REXCVAR_GET(gpu_plugin);
   if (cur_renderer.empty()) {
-    cur_renderer = "xenos";
+    cur_renderer = "webgpu";
   }
   label("Renderer");
   if (ImGui::BeginCombo("##renderer", cur_renderer == "webgpu" ? "WebGPU" : "Vulkan")) {
@@ -491,6 +491,32 @@ void GraphicsSettingsDialog::OnDraw(ImGuiIO& io) {
   }
   restart_note(!g_startup_render_scale.empty() &&
                rex::cvar::GetFlagByName("draw_resolution_scale_x") != g_startup_render_scale);
+
+  // Anti-aliasing (FXAA on the final frame; applies immediately)
+  static constexpr std::array<std::pair<const char*, const char*>, 3> kAntiAliasing = {{
+      {"none", "Off"}, {"fxaa", "FXAA"}, {"fxaa_extreme", "FXAA (Extreme)"}}};
+  const std::string aa = rex::cvar::GetFlagByName("swap_post_effect");
+  const char* aa_label = kAntiAliasing[0].second;
+  for (const auto& [value, name] : kAntiAliasing) {
+    if (aa == value) {
+      aa_label = name;
+    }
+  }
+  label("Anti-aliasing");
+  if (ImGui::BeginCombo("##antialiasing", aa_label)) {
+    for (const auto& [value, name] : kAntiAliasing) {
+      if (ImGui::Selectable(name, aa == value)) {
+        rex::cvar::SetFlagByName("swap_post_effect", value);
+      }
+    }
+    ImGui::EndCombo();
+  }
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip(
+        "Smooths edges in the final image. The game's own 4x MSAA only speeds\n"
+        "up its depth and shadow passes, so it does not smooth edges. For\n"
+        "supersampling, raise Render Resolution instead.");
+  }
 
   bool fps_unlock = GetBool("fps_unlock");
   label("Unlock FPS");
