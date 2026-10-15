@@ -4,7 +4,9 @@
 
 #include <cstring>
 #include <mutex>
+#include <string>
 
+#include <fmt/format.h>
 #include <rex/logging.h>
 
 #include "webgpu_provider.h"
@@ -13,7 +15,7 @@ namespace rex::graphics::webgpu {
 
 FrameRecorder::~FrameRecorder() {
   std::lock_guard lock(provider_.device_mutex());
-  pass_ = nullptr;
+  EndRenderPass();
   encoder_ = nullptr;
   uniform_ring_ = nullptr;
   index_ring_ = nullptr;
@@ -82,7 +84,9 @@ const wgpu::CommandEncoder& FrameRecorder::encoder() {
   return encoder_;
 }
 
-const wgpu::RenderPassEncoder& FrameRecorder::BeginRenderPass(const RenderPassTargets& targets) {
+const wgpu::RenderPassEncoder& FrameRecorder::BeginRenderPass(
+    const RenderPassTargets& targets, std::string_view label,
+    const wgpu::PassTimestampWrites* timestamp_writes) {
   if (pass_ && pass_targets_.SameAttachments(targets)) {
     return pass_;
   }
@@ -107,7 +111,9 @@ const wgpu::RenderPassEncoder& FrameRecorder::BeginRenderPass(const RenderPassTa
   }
   wgpu::RenderPassDepthStencilAttachment depth;
   wgpu::RenderPassDescriptor desc;
-  desc.label = "guest pass";
+  std::string pass_label =
+      label.empty() ? fmt::format("guest pass #{}", pass_serial_) : std::string(label);
+  desc.label = pass_label.c_str();
   desc.colorAttachmentCount = color_count;
   desc.colorAttachments = colors.data();
   if (targets.depth_stencil) {
@@ -122,7 +128,10 @@ const wgpu::RenderPassEncoder& FrameRecorder::BeginRenderPass(const RenderPassTa
     }
     desc.depthStencilAttachment = &depth;
   }
+  desc.timestampWrites = timestamp_writes;
   pass_ = encoder().BeginRenderPass(&desc);
+  pass_.PushDebugGroup(pass_label.c_str());
+  has_debug_group_ = true;
   pass_targets_ = targets;
   ++pass_serial_;
   return pass_;
@@ -130,6 +139,10 @@ const wgpu::RenderPassEncoder& FrameRecorder::BeginRenderPass(const RenderPassTa
 
 void FrameRecorder::EndRenderPass() {
   if (pass_) {
+    if (has_debug_group_) {
+      pass_.PopDebugGroup();
+      has_debug_group_ = false;
+    }
     pass_.End();
     pass_ = nullptr;
     pass_targets_ = {};

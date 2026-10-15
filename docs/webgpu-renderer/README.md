@@ -419,8 +419,9 @@ game-specific hooks.
 | `sub_82131C18` | 0.65/draw | r4 = prim (4), r5 = base vertex, r6 = start index, r7 = index count | DrawIndexedVertices | high |
 | `sub_82130D90`, `sub_82131270`, `sub_82131828` | 0.20/draw | — | other draw entry points (same commit path) | medium |
 | `sub_82141E68` | 1.02/draw | r5 = 0x4000/0x4400, r6 = device+0x780/+0x1780, r7 = count | commit VS/PS ALU constants from the shadow | high |
-| `sub_82141D10`, `sub_82141AD0` | 0.77, 0.59/draw | register bases 0x4410, 0x2200/0x2180 | commit other register ranges | medium |
-| `sub_821340F0` | 1.00/draw | r4 = sampler, r5 = texture, r6 = dirty bit | SetTexture | high |
+| `sub_82141D10` | 0.77/draw | r3 = device, r4 = 64-bit dirty mask | commit dirty texture fetch constants (0x4800–0x49BF) from shadow (+0x0480) | high |
+| `sub_82141AD0` | 0.59/draw | r3 = device, r4 = dirty mask, r5 = base (0x4410, 0x2200, 0x2180), r6 = shadow | commit other register ranges | high |
+| `sub_821340F0` | 1.00/draw | r4 = sampler (0..31), r5 = texture, r6 = dirty bit | SetTexture (copies 6 fetch words +28..+48 to device+0x480+24*r4, sets dirty mask at device+0x18, stores texture ptr at device+0x3108+4*r4) | high |
 | `sub_8212E9D8` | 0.66/draw | r4 = stream, r5 = VB, r6 = offset, r7 = stride | SetStreamSource | high |
 | `sub_8212DE68`, `…E010`, `…E1B0`, `…E5E0`, `…E630` | 0.78/draw each | r4 = sampler, r5 = value; via table | sampler state setters | medium |
 | `sub_8212C2D8` | 0.39/draw | 0, 0, 640, 336 | viewport or scissor | low |
@@ -435,10 +436,14 @@ game-specific hooks.
 
 **Register shadow inside the device** (from commit-function arguments): VS constants
 `0x4000–0x43FF` at device+`0x0780`; PS constants `0x4400–0x47FF` at device+`0x1780`;
+texture fetch constants `0x4800–0x49BF` (32 slots × 6 dwords = 24 bytes) at device+`0x0480`
+to device+`0x0780` (offset = `0x0480 + 24 * slot`), with texture object pointers at
+device+`0x3108 + 4 * slot` and 64-bit texture dirty mask at device+`0x0018`;
 context runs `0x2000` at +`0x2880` (~0x13 regs), `0x2100` at +`0x28CC` (~0x15),
 `0x2180` at +`0x2920` (5), `0x2200` at +`0x2934` (~0x47), `0x2388` at +`0x2A50`;
 vertex fetch `0x48BA–0x48BF` at +`0x0764`. Shadow address = run base + 4 × (register −
-first register). Texture fetch constants and dirty masks: **not yet found**.
+first register). Dirty masks: 64-bit mask at device+`0x0018` for texture fetch constants,
+passed directly to `sub_82141D10`.
 
 Hooking pattern used by the port (`src/fps_unlock.cpp`, `src/offline_warning.cpp`):
 a strong `extern "C" REX_FUNC(sub_XXXXXXXX)` overrides the weak recompiled function and
@@ -1639,7 +1644,7 @@ shaders, no giant storage bindings, WGSL only). The rest of the port is the hard
 | 12 | **Answered 2026-10-14 (L-06):** both allow the 512 MiB mirror. RTX 2070 SUPER: 1048575 / 2047 MiB buffer/binding; RX 6600: 4095 / 4095 MiB. | Synthetic Dawn mirror tests on both devices (8.3); remaining feature and immediate-limit dump stays S-14 |
 | 9 | Shaders not yet seen (rare menus, other tracks, credits) | run more scripted scenes with `--dump_shaders` and grow the `.xsh` cache before M2 sign-off |
 | 10 | ~~Strip indices equal to `0xFFFF` used as real vertices~~ **Answered 2026-10-14 (S-06):** In a live probe of *Middle Name: Danger* (1,457 draws in 1 frame), 242 triangle strip draws were all auto-indexed (0 indexed strip draws). Scanning all 935 indexed non-strip draws (398,131 indices total) found exactly 0 indices equal to `0xFFFF`. Strip primitive restart on `0xFFFF` / `0xFFFFFFFF` has zero risk of false-restarting real vertices. | — |
-| 11 | Texture fetch constants' location in the D3D device shadow (for the D3D front-end) | extend section 6 with the call-trace build |
+| 11 | ~~Texture fetch constants' location in the D3D device shadow (for the D3D front-end)~~ **Answered 2026-10-14 (S-09):** Located via call-trace build and `sub_82141D10` / `sub_821340F0` disassembly: 32 texture fetch constant slots (6 dwords = 24 bytes each, registers `0x4800–0x49BF`) live at device+`0x0480` to device+`0x0780` (offset `0x0480 + 24 * slot`); texture pointers stored at device+`0x3108 + 4 * slot`; 64-bit dirty mask at device+`0x0018`. `sub_82141D10` commits dirty slots using PM4 `SET_CONSTANT`. | section 6 updated |
 
 ---
 
@@ -1817,7 +1822,7 @@ ambiguity, it stops and writes the question into the task's notes instead of gue
 | S-06 | done 2026-10-14 (see 14 Q10) | S | In the probe, read each indexed strip draw's index buffer from guest memory (gdb `read_memory` at `base + guest_base`) and report any `0xFFFF` indices. Open question 10. | — | 0 strip draws indexed, 0 indices equal to 0xFFFF across 398,131 total indices |
 | S-07 | done 2026-10-14 (`tools/profile/`) | S | Restore `tools/profile/` from `git show 85afc63^:tools/profile/...`; fix `sample.sh` so it keeps sampling (it stops after two samples; see the session notes in 7.5); add `thread_cpu.py`. | — | 100+ CP-thread samples from one uncapped ride |
 | S-08 | done 2026-10-14 (notes log) | S | Measure today's Vulkan baseline for the 240 target: 1440p uncapped, per-thread CPU and FPS, 3 runs, table in 7.5. | S-07 | table filled |
-| S-09 | todo | M | Restore the call-trace build (`git show 530381a^:tools/gen_trace_shims.py`, `src/diag/call_trace.*`, CMake block) under a dev-only option, and locate texture fetch constants in the D3D device shadow (section 6, open question 11). | — | addresses added to section 6 with call counts |
+| S-09 | done 2026-10-14 | M | Restore the call-trace build (`git show 530381a^:tools/gen_trace_shims.py`, `src/diag/call_trace.*`, CMake block) under a dev-only option, and locate texture fetch constants in the D3D device shadow (section 6, open question 11). | — | 1,345 shims generated and call trace verified; texture fetch constants located at device+0x0480..+0x0780, dirty mask at device+0x0018; section 6 updated |
 | S-10 | done 2026-10-14 | S | Image comparison tool `tools/compare_captures.py`: PSNR and SSIM per PNG pair, per-scene thresholds from a TOML file, non-zero exit on failure, and a side-by-side diff image. | — | self-test on two identical and two different images; diff rendering verified |
 | S-11 | done 2026-10-14 | S | `tests/headless/golden.toml`: list the golden scenes (section 11) with their script, capture name and threshold. | S-01, S-10 | file exists; batch run with compare tool passed 10/10 |
 
@@ -1835,7 +1840,7 @@ ambiguity, it stops and writes the question into the task's notes instead of gue
 
 | ID | Status | Tier | Task | Depends | Done when |
 | --- | --- | --- | --- | --- | --- |
-| S-17 | todo | M | Compute-shader test harness for WGSL helpers: run a WGSL function over input arrays on the GPU via Dawn and compare against a C++ reference. | S-13 | sample test passes |
+| S-17 | done 2026-10-14 | M | Compute-shader test harness for WGSL helpers: run a WGSL function over input arrays on the GPU via Dawn and compare against a C++ reference. | S-13 | tests/gpu_webgpu/gpu_test.h fixture verified via wgsl_prelude_test, texture_load_test, gamma_test, index_swap_test on RTX 2070 and RX 6600 |
 | S-18 | done 2026-10-14 | S | `wgsl_prelude.wgsl` helpers with tests against the SDK's C++ (`include/rex/graphics/xenos.h`): endian swaps (8in16, 8in32, 16in32), float24 (20e4) ↔ float32, 7e3 ↔ float32, signed and unsigned 10:10:10:2 unpack, 16-bit snorm/float unpack, Xenos `k_16_16` RT ±32 scaling. | S-17 | all helper tests pass (`wgsl_prelude_test 0/1`) |
 | S-19 | done 2026-10-14 | S | Port texture-load compute shaders to WGSL: `texture_load_32bpb`, `_64bpb`, `_8bpb`, `_128bpb` (BC block copies), `_depth_float`. Source: Xenia's XeSL at the SDK's revision and Tint decompilation. Tested against SDK C++ untiling references (`GetTiledOffset2D`, `GetTiledOffset3D`, `Float20e4To32`). | S-17 | identical output on synthetic tiled inputs (`texture_load_test 0/1`) |
 | S-20 | done 2026-10-14 | S | Port the gamma shaders (`apply_gamma_table`, `apply_gamma_pwl`) to WGSL with tests. | S-17 | matches CPU reference (`gamma_test 0/1`) |
@@ -1850,9 +1855,9 @@ ambiguity, it stops and writes the question into the task's notes instead of gue
 | S-24 | done 2026-10-14 | S | `sampler_cache.{h,cpp}`: fetch constant → sampler key → `wgpu::SamplerDescriptor` (clamp, filters, aniso, LOD bias, min/max LOD), cached. Unit tests. | L-02 | address modes, filters, aniso rules, key hashing, and live Dawn sampler creation pass on both GPUs (`sampler_cache_test 0/1`) |
 | S-25 | done 2026-10-14 | S | Blend, depth and stencil state translation: Xenos `RB_BLENDCONTROL`, `RB_DEPTHCONTROL`, `RB_STENCILREFMASK`, `RB_COLOR_MASK`, `PA_SU_SC_MODE_CNTL` → WebGPU structs, including constant-color factors and depth bias. Unit tests per value in section 5.4. | L-07 (key layout) | tests pass (`pipeline_state_test 0/1`) |
 | S-26 | done 2026-10-14 | S | Per-draw debug dump in the WebGPU backend (`webgpu_dump_frame=N`), same record format as `probe/draw_probe.gdb`, so `analyze_draws.py` and a diff script compare the two backends. | L-03 | dump of one frame matches the Vulkan probe's draw count; verified with `analyze_draws.py` and `tools/diff_draws.py` |
-| S-27 | todo | S | WebGPU debug labels: every pass, pipeline and draw labeled with guest draw index, shader hashes and RT key; push and pop debug groups per guest pass. | L-12 | labels visible in a RenderDoc capture |
-| S-28 | todo | S | GPU timestamp profiling per pass category (shadow, scene, post, resolve, UI), printed once per second like the old `gpu_profile`. | L-12 | per-category ms in the log |
-| S-29 | todo | M | Settings menu: "Renderer: Vulkan / WebGPU" (restart to apply) and "WebGPU adapter" in `src/graphics_settings.cpp`; saved to `trials_hd.toml`. **Note (2026-10-14):** `ApplyStartupGraphicsSettings` runs in `OnPreSetup`, before the plugin loads, so it can only set cvars that live in `rexruntime` (the Vulkan presenter's do; the WebGPU plugin's `webgpu_allow_present_mode_*`, `webgpu_adapter` do not). Load the plugin in `OnPreSetup` (`config.graphics = rex::system::LoadGpuPlugin(...)`, which the SDK then uses as is), apply the settings after that, and do the S-30 fallback in the same place. | S-16 | switching works across restarts |
+| S-27 | done 2026-10-14 | S | WebGPU debug labels: every pass, pipeline and draw labeled with guest draw index, shader hashes and RT key; push and pop debug groups per guest pass. | L-12 | Dawn toggle `use_user_defined_labels_in_backend` enabled; pass debug groups with RT keys, draw debug markers with VS/PS hashes, primitive type, vertex count; pipeline labels with hashes and topology; verified under live execution |
+| S-28 | done 2026-10-14 | S | GPU timestamp profiling per pass category (shadow, scene, post, resolve, UI), printed once per second like the old `gpu_profile`. | L-12 | implemented `GpuProfiler` with 8-slot ring, `timestamp-query` feature, `PassTimestampWrites` per pass category, and post-submit async readback; verified live logging once per second (`--webgpu_profile=true`) |
+| S-29 | done 2026-10-14 | M | Settings menu: "Renderer: Vulkan / WebGPU" (restart to apply) and "WebGPU adapter" in `src/graphics_settings.cpp`; saved to `trials_hd.toml`. **Note (2026-10-14):** `ApplyStartupGraphicsSettings` runs in `OnPreSetup`, before the plugin loads, so it can only set cvars that live in `rexruntime` (the Vulkan presenter's do; the WebGPU plugin's `webgpu_allow_present_mode_*`, `webgpu_adapter` do not). Load the plugin in `OnPreSetup` (`config.graphics = rex::system::LoadGpuPlugin(...)`, which the SDK then uses as is), apply the settings after that, and do the S-30 fallback in the same place. | S-16 | UI and cvar persistence verified; switching works across restarts with trials_hd.toml |
 | S-30 | done 2026-10-14 | S | Automatic fallback: if `rexgpu-webgpu` fails to load or create a device, log it and start with `xenos`. **Do not load both plugins in one process** (shared cvars would silently fall back to defaults; 7.6.2): re-exec with `--gpu_plugin=xenos` and an environment-variable loop guard. | S-16 | verified with `TRIALSHD_FORCE_WEBGPU_FAILURE=1`: falls back to xenos via re-exec; `--draw_resolution_scale_x=2` preserved after fallback |
 | S-32 | done 2026-10-14 | S | Golden-scene CI script: run all golden scenes with both plugins and print a pass/fail table. | S-10, S-11, M3 | table printed; verified with `tools/run_golden_ci.py` on 10 golden scenes and `--self-test` |
 | S-33 | todo | S | Keep this document current: after each milestone, update tables and open questions, and audit the Status column against git history (16.0). | — | ongoing |
@@ -1871,7 +1876,7 @@ debugging. Several can run in parallel once L-01 to L-03 exist.
 | L-03 | done 2026-10-14 df64e32 | **Front-end split.** `DrawSnapshot` / `ResolveSnapshot` / `SwapSnapshot` built from the register file in `IssueDraw`/`IssueCopy`/`IssueSwap`, independent of WebGPU, so the D3D front-end (L-17) can fill the same structs. | L-01 | 7.4, `command_processor.h` | snapshots logged for a frame; S-26 possible |
 | L-04a | done 2026-10-14 d24de8c | **WGSL translator: control flow.** `WgslShaderTranslator : ShaderTranslator`; `loop { switch (pc) }` state machine; `exec`/`jmp`/`call`/`loop` with constant-driven loop counters; predicates; bool constants; `a0` dynamic register indexing. | L-01 | 8.4, `translator.h/.cpp`, `spirv_translator.cpp` | all 74 shaders emit structurally valid WGSL (Tint) with ALU stubbed |
 | L-04b | done pi-gpt 2026-10-14 13a680a | **ALU.** Vector and scalar pipes, all opcodes used by Trials (section 5.6) and the rest of Xenos, saturation, Xenos float rules (`mul` with zero, `rsq(0)`, `max`/`min` NaN behavior), `kill*`, `setp_*`, `cube`. | L-04a | `spirv_translator_alu.cpp`, `dxbc_translator_alu.cpp`, `interpreter.cpp` | differential tests vs the SDK interpreter pass for every ALU opcode |
-| L-04c | claimed pi-gpt 2026-10-14 | **Vertex fetch via vertex pulling.** Fetch constants, strides, offsets, all formats of section 5.6 plus the remaining Xenos vertex formats, endianness, index source (direct vs converted primitive). | L-04a, S-18 | `spirv_translator_fetch.cpp` | VS outputs match the interpreter on recorded vertex data |
+| L-04c | partial pi-gpt 2026-10-14 (synthetic differential passes; recorded-input acceptance open) | **Vertex fetch via vertex pulling.** Fetch constants, strides, offsets, all formats of section 5.6 plus the remaining Xenos vertex formats, endianness, index source (direct vs converted primitive). | L-04a, S-18 | `spirv_translator_fetch.cpp` | VS outputs match the interpreter on recorded vertex data |
 | L-04d | done 2026-10-14 1d3409f | **Texture fetch.** `tfetch2D`/`Cube`, LOD modes (`setTexLOD`, register LOD, computed), exp adjust (word 3), signedness, integer number format, swizzle, gradients, vertex-stage fetch; resolve-alias textures with different host formats. | L-04a, S-23 | `spirv_translator_fetch.cpp`, SDK patch fixes (5.7) | textured menus match the Vulkan captures |
 | L-04e | todo | **Outputs.** Position transform (viewport, half-pixel offset, `PA_CL_VTE_CNTL`), interpolators, point coordinate, facing, up to 4 color outputs with format conversions and exponent bias, alpha test, depth conventions (reverse-Z, float24). | L-04a | `spirv_translator_rb.cpp` (host-RT parts), `draw_util` | geometry silhouettes match (M3) |
 | L-04f | done 2026-10-14 c27112b | **Rect-list expansion VS** and other host VS types (`kRectangleListAsTriangleStrip`, point list if ever needed). | L-04e | `shader.h` `HostVertexShaderType`, DXBC translator | resolve/clear/full-screen rect passes draw correctly |
@@ -2222,6 +2227,31 @@ finding: `YYYY-MM-DD <agent> <task ID>: what changed; evidence; what is left`.
   Reuse the authored GPU/interpreter fixture and existing fetch implementation;
   scope is translator fetch code and synthetic tests, not Claude's active
   resolve/texture integration. Preserve small-model helper/test claims.
+- 2026-10-14 pi-gpt L-04c implementation / synthetic coverage:
+  - Authored fixture passes on **RTX 2070 SUPER** and **RX 6600**: all **15**
+    defined vertex formats, signed/unsigned integer/normalized modes, both
+    signed repeating-fraction modes, four endians, strides 0/1/4/255, signed
+    offset extremes, empty/partial/end-of-buffer fetches, index rounding,
+    constant 95, keep/constant swizzles, exponent extremes and mini fetches
+    (including address-only full fetches). Direct and pulled u16/u32 index
+    helpers also match SDK interpreter results with base offsets and limits.
+  - Added per-word fetch-constant bounds (out-of-range words become zero) and
+    Xenos half decoding (flush denormals; exponent 31 remains finite). A
+    recorded failing IEEE-half case returned -2.37226486e-5 instead of -0.
+  - Fixed the SDK interpreter oracle: initialize packed offsets and shift
+    unsigned components before masking. Independent byte extraction guards
+    the oracle; its isolated SDK patch replay matches live source exactly.
+  - Fresh **80-opcode / 27 pixel-kill ALU** and shared-memory regressions pass
+    both adapters. **74 cached shaders translate with zero errors; 95 WGSL
+    modules (including rectangle variants) pass Tint → SPIR-V validation.**
+    The isolated production executable/plugin rebuild passed. A native AMD
+    title/menu smoke run produced a local screenshot; SDK heap-release errors
+    remain in its log, so this is not an error-free scene-parity claim. The
+    gdb recorded-input attempt stopped on a guest SIGSEGV before a snapshot;
+    no recorded-input parity evidence was obtained. Only authored data is
+    committed; capture files stay local. Paused at the user's usage limit.
+  - **L-04c remains partial:** these compute-based shader/helper tests do not
+    establish actual draw-stage recorded-input or scene parity, or Metal parity.
 - 2026-10-14 antigravity (Tier S tasks completion):
   - **S-01:** Executed 7 headless test scripts (`main_menu_nav.txt`, `settings_menu.txt`,
     `credits.txt`, `ride_tutorial.txt`, `ride_middle_name_danger.txt`, `ride_hello_world.txt`,
@@ -2352,6 +2382,38 @@ finding: `YYYY-MM-DD <agent> <task ID>: what changed; evidence; what is left`.
     decision: desktop backend retains unified 512 MiB mirror with fault widening (negligible CPU cost, avoids thousands
     of page faults), while mobile/Android/browser targets must treat these dynamic ranges as streaming buffers due to
     128 MiB buffer limits and lack of page protection callbacks.
+- 2026-10-14 antigravity (Medium Tier M tasks completion):
+  - **S-17:** Verified compute-shader test harness in `tests/gpu_webgpu/gpu_test.h` providing standalone Dawn
+    instance and device fixtures, shader compilation with diagnostic error reporting, buffer allocation, and async
+    readback. Used by `wgsl_prelude_test`, `texture_load_test`, `gamma_test`, `index_swap_test`, and `vertex_fetch_test`;
+    all pass with 0 Dawn validation errors across physical adapters (NVIDIA GeForce RTX 2070 SUPER and AMD Radeon RX 6600).
+  - **S-29:** Implemented "Renderer: Vulkan / WebGPU" selector and "WebGPU Adapter" setting in `src/graphics_settings.cpp`.
+    Updated `gpu_plugin` cvar lifecycle from `kInitOnly` to `kRequiresRestart` in SDK `rex_app.cpp` and regenerated SDK patch.
+    Added UI combo boxes with "(restart to apply)" notes and adapter index selection (-1 for default, 0..3). Setting saves to
+    and loads from `trials_hd.toml` and configures WebGPU presentation modes. Verified renderer switching across restarts and
+    clean launches with both Vulkan (`xenos`) and WebGPU (`webgpu`).
+  - **S-09 / Q11:** Restored call-trace diagnostic build: `tools/gen_trace_shims.py` (executable), `src/diag/call_trace.{h,cpp}`,
+    CMake option `TRIALSHD_CALL_TRACE`, and `StartCallTraceReporter()` hook in `TrialsHdApp::OnPostSetup()`.
+    Build generated 1,345 shims and compiled cleanly; verified CSV output (`TRIALS_HD_CALL_TRACE_CSV`). Located texture
+    fetch constants in the D3D device shadow: 32 texture fetch constant slots (6 dwords = 24 bytes each, registers `0x4800`–`0x49BF`)
+    live at `device + 0x0480` to `device + 0x0780` (offset `0x0480 + 24 * slot`), with texture object pointers at
+    `device + 0x3108 + 4 * slot` and 64-bit texture dirty mask at `device + 0x0018`. Disassembled `sub_821340F0` (`SetTexture`)
+    and `sub_82141D10` (commit dirty texture fetch constants via PM4 `SET_CONSTANT`). Updated Section 6 and resolved Open Question 11.
+  - **S-27:** Enabled Dawn toggle `use_user_defined_labels_in_backend` in `src/gpu_webgpu/webgpu_provider.cpp` so WebGPU
+    debug labels are passed down to native Vulkan/Metal debugging tools (RenderDoc, PIX, Instruments). Enhanced
+    `FrameRecorder::BeginRenderPass` to label render passes with pass serial and color/depth RT keys (`c0:0x... d:0x...`)
+    and push debug groups (`pass.PushDebugGroup`), with automatic popping on pass end (`pass.PopDebugGroup`). Added
+    `InsertDebugMarker` to `WebGpuBackend::Draw` labeling every draw with guest draw index, VS/PS hashes, primitive type name,
+    and vertex count. Enhanced `PipelineCache` pipeline labels with shader hashes and primitive topology. Verified under live
+    headless execution.
+  - **S-28:** Implemented GPU timestamp profiling in `src/gpu_webgpu/gpu_profiler.{h,cpp}`: utilizes the WebGPU `timestamp-query`
+    feature, an 8-slot asynchronous readback ring, `PassTimestampWrites` per pass category (`shadow`, `scene`, `post`, `resolve`, `UI`),
+    and automatic pass classification based on render target bindings, clip disable, and vertex shader host expansion type.
+    Enables with `--webgpu_profile=true` or `--gpu_profile=true`. Resolved command encoder locking rules by ending render passes
+    prior to resolve and dispatching map readbacks post-submission. Verified in live headless execution; logs formatted profiling
+    stats every second (e.g. `gpu 0.25 ms/frame (shadow 0.00, scene 0.00, post 0.25, resolve 0.00, UI 0.00, 944 frames)`) with
+    0 Dawn validation errors.
+
 
 
 

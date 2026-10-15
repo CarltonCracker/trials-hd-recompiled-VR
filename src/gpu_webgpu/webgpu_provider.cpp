@@ -148,6 +148,7 @@ bool WebGpuProvider::Initialize() {
   adapter_.GetLimits(&adapter_limits);
 
   std::vector<const char*> enabled_toggles;
+  enabled_toggles.push_back("use_user_defined_labels_in_backend");
   if (!REXCVAR_GET(webgpu_validation)) {
     enabled_toggles.push_back("skip_validation");
   }

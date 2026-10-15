@@ -288,8 +288,9 @@ wgpu::RenderPipeline PipelineCache::GetPipeline(const PipelineKey& key, Shader& 
     }
 
     wgpu::RenderPipelineDescriptor desc;
-    std::string label = fmt::format("{:016X}+{:016X}", key.vertex_shader_hash,
-                                    key.pixel_shader_hash);
+    std::string label = fmt::format("pipeline VS:{:016X} PS:{:016X} (topo:{})",
+                                    key.vertex_shader_hash, key.pixel_shader_hash,
+                                    key.topology);
     desc.label = label.c_str();
     TextureLayoutSignature signature;
     signature.value = key.texture_layout;

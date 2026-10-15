@@ -10,6 +10,7 @@
 
 #include <array>
 #include <cstdint>
+#include <string_view>
 #include <vector>
 
 #include <webgpu/webgpu_cpp.h>
@@ -70,10 +71,14 @@ class FrameRecorder {
   const wgpu::CommandEncoder& encoder();
 
   // Returns the open render pass for the targets, beginning a new one if the
-  // attachments differ.
-  const wgpu::RenderPassEncoder& BeginRenderPass(const RenderPassTargets& targets);
+  // attachments differ. If a new pass begins, it is labeled with `label` and
+  // a debug group is pushed (popped automatically when the pass ends).
+  const wgpu::RenderPassEncoder& BeginRenderPass(
+      const RenderPassTargets& targets, std::string_view label = {},
+      const wgpu::PassTimestampWrites* timestamp_writes = nullptr);
   void EndRenderPass();
   bool in_render_pass() const { return bool(pass_); }
+  const RenderPassTargets& current_targets() const { return pass_targets_; }
   // Changes whenever a new render pass begins (dynamic state is per pass).
   uint64_t pass_serial() const { return pass_serial_; }
 
@@ -90,6 +95,7 @@ class FrameRecorder {
   wgpu::CommandEncoder encoder_;
   wgpu::RenderPassEncoder pass_;
   RenderPassTargets pass_targets_;
+  bool has_debug_group_ = false;
   uint64_t pass_serial_ = 0;
   uint64_t submission_count_ = 0;
 };

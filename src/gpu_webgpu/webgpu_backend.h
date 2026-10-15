@@ -25,6 +25,7 @@ class WebGpuProvider;
 namespace rex::graphics::webgpu {
 
 class FrameRecorder;
+class GpuProfiler;
 class PipelineCache;
 class RenderTargetCache;
 class TextureCache;
@@ -70,6 +71,7 @@ class WebGpuBackend {
   ui::webgpu::WebGpuProvider& provider_;
   ui::Presenter* presenter_;
   std::unique_ptr<FrameRecorder> frame_recorder_;
+  std::unique_ptr<GpuProfiler> gpu_profiler_;
   std::unique_ptr<WebGpuSharedMemory> shared_memory_;
   std::unique_ptr<WebGpuPrimitiveProcessor> primitive_processor_;
   std::unique_ptr<PipelineCache> pipeline_cache_;

@@ -18,6 +18,7 @@
 #include <rex/ui/presenter.h>
 
 #include "frame_recorder.h"
+#include "gpu_profiler.h"
 #include "guest_memory_mirror.h"
 #include "pipeline_cache.h"
 #include "pipeline_state.h"
@@ -50,6 +51,42 @@ namespace {
 
 uint64_t ShaderHash(const Shader* shader) {
   return shader ? shader->ucode_data_hash() : 0;
+}
+
+const char* PrimitiveTypeName(xenos::PrimitiveType type) {
+  switch (type) {
+    case xenos::PrimitiveType::kPointList: return "points";
+    case xenos::PrimitiveType::kLineList: return "lines";
+    case xenos::PrimitiveType::kLineStrip: return "line_strip";
+    case xenos::PrimitiveType::kTriangleList: return "triangles";
+    case xenos::PrimitiveType::kTriangleFan: return "triangle_fan";
+    case xenos::PrimitiveType::kTriangleStrip: return "triangle_strip";
+    case xenos::PrimitiveType::kRectangleList: return "rectangles";
+    case xenos::PrimitiveType::kQuadList: return "quads";
+    default: return "other";
+  }
+}
+
+PassCategory ClassifyPass(const RenderTargetCache::Binding& targets,
+                          const RegisterFile& regs,
+                          Shader::HostVertexShaderType host_vs_type) {
+  if (targets.depth && !targets.color[0] && !targets.color[1] &&
+      !targets.color[2] && !targets.color[3]) {
+    return PassCategory::kShadow;
+  }
+  if (host_vs_type == Shader::HostVertexShaderType::kRectangleListAsTriangleStrip) {
+    return PassCategory::kPost;
+  }
+  if (regs.Get<reg::PA_CL_CLIP_CNTL>().clip_disable && targets.color[0]) {
+    return PassCategory::kUI;
+  }
+  if (targets.depth && targets.color[0]) {
+    return PassCategory::kScene;
+  }
+  if (targets.color[0]) {
+    return PassCategory::kPost;
+  }
+  return PassCategory::kScene;
 }
 
 // A color copy remembered for presenting the frontbuffer (section 8.8 case 4)
@@ -95,6 +132,7 @@ WebGpuBackend::~WebGpuBackend() {
   pipeline_cache_.reset();
   primitive_processor_.reset();
   shared_memory_.reset();
+  gpu_profiler_.reset();
   frame_recorder_.reset();
   if (dump_file_) {
     std::fflush(dump_file_);
@@ -117,6 +155,8 @@ bool WebGpuBackend::Initialize(memory::Memory& memory, const RegisterFile& regis
   if (!frame_recorder_->Initialize()) {
     return false;
   }
+  gpu_profiler_ = std::make_unique<GpuProfiler>(provider_);
+  gpu_profiler_->Initialize();
   shared_memory_ = std::make_unique<WebGpuSharedMemory>(
       memory, provider_.instance(), device, [this](uint64_t size) {
         GuestMemoryUpload upload;
@@ -795,7 +835,26 @@ bool WebGpuBackend::Draw(const DrawSnapshot& draw) {
       target->initialized = true;
     }
   }
-  const wgpu::RenderPassEncoder& pass = frame_recorder_->BeginRenderPass(pass_targets);
+  std::string rt_keys;
+  for (uint32_t i = 0; i < 4; ++i) {
+    if (targets.color[i]) {
+      fmt::format_to(std::back_inserter(rt_keys), " c{}:0x{:08X}", i, targets.color[i]->key.value);
+    }
+  }
+  if (targets.depth) {
+    fmt::format_to(std::back_inserter(rt_keys), " d:0x{:08X}", targets.depth->key.value);
+  }
+  std::string pass_label = fmt::format("guest pass #{}{}", frame_recorder_->pass_serial(), rt_keys);
+  PassCategory category = ClassifyPass(targets, regs, primitive.host_vertex_shader_type);
+  bool new_pass = !frame_recorder_->in_render_pass() ||
+                  !frame_recorder_->current_targets().SameAttachments(pass_targets);
+  wgpu::PassTimestampWrites timestamp_writes;
+  bool has_timestamps = false;
+  if (new_pass && gpu_profiler_) {
+    has_timestamps = gpu_profiler_->BeginPass(category, timestamp_writes);
+  }
+  const wgpu::RenderPassEncoder& pass = frame_recorder_->BeginRenderPass(
+      pass_targets, pass_label, has_timestamps ? &timestamp_writes : nullptr);
   pass.SetPipeline(pipeline);
   pass.SetBindGroup(0, draw_bind_group_, offsets.size(), offsets.data());
   pass.SetBindGroup(1, shared_memory_bind_group_);
@@ -813,6 +872,15 @@ bool WebGpuBackend::Draw(const DrawSnapshot& draw) {
   pass.SetBlendConstant(&blend_constant);
 
   uint32_t count = primitive.host_draw_vertex_count;
+  std::string draw_marker = fmt::format(
+      "draw #{} (VS:{:016X} PS:{:016X} {} {} verts)",
+      draw.draw_index,
+      vertex_shader ? vertex_shader->ucode_data_hash() : 0,
+      pixel_shader ? pixel_shader->ucode_data_hash() : 0,
+      PrimitiveTypeName(draw.primitive_type),
+      count);
+  pass.InsertDebugMarker(draw_marker.c_str());
+
   uint32_t index_size = index_format == wgpu::IndexFormat::Uint16 ? 2 : 4;
   switch (primitive.index_buffer_type) {
     case PrimitiveProcessor::kNone:
@@ -913,6 +981,10 @@ bool WebGpuBackend::Resolve(const ResolveSnapshot& resolve) {
       desc.label = "guest color clear";
       desc.colorAttachmentCount = 1;
       desc.colorAttachments = &attachment;
+      wgpu::PassTimestampWrites timestamp_writes;
+      if (gpu_profiler_ && gpu_profiler_->BeginPass(PassCategory::kResolve, timestamp_writes)) {
+        desc.timestampWrites = &timestamp_writes;
+      }
       frame_recorder_->encoder().BeginRenderPass(&desc).End();
       color_target->initialized = true;
     }
@@ -936,6 +1008,10 @@ bool WebGpuBackend::Resolve(const ResolveSnapshot& resolve) {
       wgpu::RenderPassDescriptor desc;
       desc.label = "guest depth clear";
       desc.depthStencilAttachment = &attachment;
+      wgpu::PassTimestampWrites timestamp_writes;
+      if (gpu_profiler_ && gpu_profiler_->BeginPass(PassCategory::kResolve, timestamp_writes)) {
+        desc.timestampWrites = &timestamp_writes;
+      }
       frame_recorder_->encoder().BeginRenderPass(&desc).End();
       depth_target->initialized = true;
     }
@@ -954,7 +1030,14 @@ void WebGpuBackend::Swap(const SwapSnapshot& swap) {
   {
     std::lock_guard lock(provider_.device_mutex());
     // Everything drawn this frame goes to the GPU before the output refresh.
+    frame_recorder_->EndRenderPass();
+    if (gpu_profiler_) {
+      gpu_profiler_->EndFrame(frame_recorder_->encoder());
+    }
     frame_recorder_->Submit();
+    if (gpu_profiler_) {
+      gpu_profiler_->OnFrameSubmitted();
+    }
     primitive_processor_->EndFrame();
     // Bind groups keep their views alive; start over every frame.
     State().texture_bind_groups.clear();

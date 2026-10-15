@@ -81,6 +81,7 @@ add_library(rexgpu-webgpu SHARED
 target_sources(rexgpu-webgpu PRIVATE
     format_tables.cpp
     frame_recorder.cpp
+    gpu_profiler.cpp
     pipeline_cache.cpp
     pipeline_state.cpp
     primitive_converter.cpp
