@@ -502,7 +502,7 @@ index e3fc40d..55dd125 100644
  #error No library names provided for the target platform.
  #endif
 diff --git a/include/rex/platform/fpscr.h b/include/rex/platform/fpscr.h
-index c2c4fd4..2b26ea9 100644
+index c2c4fd4..8baabfd 100644
 --- a/include/rex/platform/fpscr.h
 +++ b/include/rex/platform/fpscr.h
 @@ -16,6 +16,11 @@
@@ -517,7 +517,7 @@ index c2c4fd4..2b26ea9 100644
  
  // SSE3 constants are missing from simde
  #ifndef _MM_DENORMALS_ZERO_MASK
-@@ -82,6 +87,62 @@ struct FPSCRPlatform {
+@@ -82,6 +87,61 @@ struct FPSCRPlatform {
    }
  };
  
@@ -525,11 +525,10 @@ index c2c4fd4..2b26ea9 100644
 +// WebAssembly has no floating-point control register: arithmetic always rounds
 +// to nearest-even and never flushes denormals. A per-thread shadow keeps the
 +// guest's mode bits (x86 MXCSR encoding: rounding in bits 0-1, flush in bit 2)
-+// so FPSCR reads round-trip, and the one recompiled operation whose result
-+// depends on the mode, fctid (simde_mm_cvtsd_si64), applies it explicitly
-+// (see the web block of the codegen PCH template). Trials HD switches to
-+// round-toward-zero thousands of times per ride through its _controlfp helper
-+// (docs/web-port/README.md 14 Q6).
++// so FPSCR reads round-trip. fctid (simde_mm_cvtsd_si64) applies that mode
++// explicitly (see the codegen PCH template). Native rides use nearest-even
++// and toward-zero (docs/web-port/README.md 14 Q6).
++// shortcut: other FP arithmetic stays nearest-even; emulate it if physics replays diverge.
 +struct FPSCRPlatform {
 +  static constexpr size_t RoundShift = 0;
 +  static constexpr size_t RoundMaskVal = 3;

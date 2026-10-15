@@ -1410,7 +1410,7 @@ Without ANGLE-on-Vulkan Chromium exposes only SwiftShader to WebGPU.
 | 3 | Memory64 bounds-check cost on the guest threads | Microbenchmark plus the full game, native vs wasm32 vs wasm64 | W-L03 |
 | 4 | Are the 28 `REX_MM_*` sites the only MMIO accesses? | Native run with the MMIO fault path fatal | W-S07 |
 | 5 | Does Trials create fibers? | Log `RegisterFiber` natively | W-S08 |
-| 6 | Do the 5 FPSCR rounding-mode changes matter (they become no-ops)? | Log the modes set and the instructions after them; compare physics replays | W-S11 |
+| 6 | Do guest FPSCR rounding-mode changes matter? | **Yes:** native ride uses nearest-even and toward-zero; shadow state and explicit `fctid` rounding tested. Other FP arithmetic/physics replays remain a validation risk (below). | W-S11 |
 | 7 | Browser WebGPU CPU cost for ~1,550 draws per frame | W-S12 benchmark, then the real game | W-S12, W-L11 |
 | 8 | Host writers into physical memory missing from the dirty-bitmap audit → stale textures | Compare against the hash fallback in debug builds (assert no hash change without a dirty bit) | W-S09, W-L05 |
 | 9 | Initial 3.8 GiB memory reservation fails on some systems | Fall back to growing from 3 GiB; catch `RangeError` and show a message | W-L04 |
@@ -1419,6 +1419,30 @@ Without ANGLE-on-Vulkan Chromium exposes only SwiftShader to WebGPU.
 | 12 | Legal: someone hosts the build | Bind to localhost by default; README warning; no publish target | W-S17 |
 | 13 | Safari without Memory64 | Option B build | W-L13 |
 | 14 | `SharedArrayBuffer` needs COOP/COEP; extensions or iframes may break it | Local server sets headers; page checks `crossOriginIsolated` and explains | W-S14 |
+
+**W-S11 rounding findings (2026-10-15).** A private native probe recompiles only the
+five generated translation units containing all five `storeFromGuest` sites, with a
+forced tracing header; it relinks into `out/web-spikes/fpscr-probe/` and never edits
+`generated/default` or native build objects. An 80-second `Middle Name: Danger` run
+reached the ride (capture inspected) and recorded MXCSR RC **0 = nearest-even** and
+**3 = toward-zero**, corresponding to guest modes 0 and 1. Up/down were not observed
+in this run, not proven unused. Artifacts: `out/web-spikes/fpscr-probe/modes.json`,
+`stdout.log`, and ride captures (private, not committed).
+
+Reproduce: `python3 tools/web/tests/build_fpscr_probe.py`, then run
+`tools/headless_run.sh 80 --gpu_plugin=webgpu --webgpu_headless=true --webgpu_adapter=1
+--present_fps_limit=60` under `flock out/native-web-check.lock`, with
+`TRIALS_HD_EXE=$PWD/out/web-spikes/fpscr-probe/trials_hd` and
+`INPUT=$PWD/tests/headless/ride_middle_name_danger.txt`; inspect
+`WEB_NATIVE_FPSCR_MODE` in `out/run/stdout.log`.
+
+The wasm FPSCR shadow is per-thread, retains flush/mode bits, and logs non-nearest
+requests once per mode/thread in debug builds. The PCH maps the 10 generated
+`simde_mm_cvtsd_si64` (`fctid`) uses to explicit floor/ceil/trunc/nearest-even handling
+with safe NaN/overflow behavior. Standalone wasm64 tests cover all four modes and TLS.
+**Other FP arithmetic still uses wasm's nearest-even/gradual-underflow behavior; the
+full browser game's physics replay comparison is not yet performed.** Do not treat
+these header/conversion checks as full physics validation.
 
 ---
 
@@ -1561,7 +1585,7 @@ Every task's "Done when" implicitly includes **`tools/check_native.sh check` pas
 | W-S08 | todo | S | Log `KernelState::RegisterFiber` and `Fiber::Create` calls natively over the four scripts. | — | 14.5 answered ("no fibers" → drop fiber port; "fibers" → add a W-L task) |
 | W-S09 | todo | S | Audit host writers into guest physical memory (8.3): grep the SDK `src/kernel`, `src/system`, `src/audio`, `src/filesystem`, and `src/*.cpp` for `memcpy`/`memset`/`TranslatePhysical`/`TranslateVirtual` writes; list every site with file:line and whether the target can be physical. | — | Table added to 8.3 with all sites |
 | W-S10 | review | S | Header portability patch (SDK patch, guarded): `REX_PLATFORM_EMSCRIPTEN` in `platform.h`; enable the portable `vsl`/`vslo`/`vsro` branches for `__wasm__`; extend the chrono shim to `__EMSCRIPTEN__`; allow `dynlib.h` with no native library names. (Section 6 items 1, 3, 4, 6.) | — | Native Linux build unchanged (`git diff` of generated objects not needed; just builds and boots); `em++` of `trials_hd_recomp.0.cpp` gets past those three errors |
-| W-S11 | claimed pi-gpt 2026-10-15 (takeover) | S | wasm `FPSCRPlatform` (section 6 item 2): shadow register for `getcsr`/`setcsr`, no-op flush; log (debug builds) when a guest rounding mode other than nearest is set. Also log natively which rounding modes the 5 `storeFromGuest` sites set during rides. | W-S10 | Natively: modes listed in 14.6; wasm: header compiles |
+| W-S11 | review | S | wasm `FPSCRPlatform` (section 6 item 2): shadow register for `getcsr`/`setcsr`, no-op flush; log (debug builds) when a guest rounding mode other than nearest is set. Also log natively which rounding modes the 5 `storeFromGuest` sites set during rides. | W-S10 | Natively: modes listed in 14.6; wasm: header compiles |
 | W-S12 | todo | S | Browser WebGPU draw-cost benchmark page: 1,500 draws/frame with per-draw `setBindGroup` (dynamic offsets) and `setPipeline` changes like the renderer (renderer doc 7.5); report ms/frame in Chromium here vs the same program natively with Dawn (`tools/webgpu_smoke` can host the native half). | W-S04 | Table in 9.6 |
 | W-S13 | todo | S | Port `tools/stfs_extract.py` to C++ (`tools/stfs_extract/stfs_extract.cpp`, library + CLI), byte-identical output on the user's package. | — | `cmp -r` of both extractions is empty; CLI added to native CMake as an optional tool |
 | W-S14 | done 2026-10-15 9b5a087 | S | `tools/web/serve.py`: static server on `127.0.0.1:8080` with COOP/COEP/CORP headers, `application/wasm`, brotli/gzip pre-compressed files, no directory listing outside the build folder. | — | `curl -I` shows the headers; a test page reports `crossOriginIsolated === true` |
@@ -1606,6 +1630,13 @@ details of W-L04 to W-L09. The critical path is W-L01 → W-L02/W-L04 → W-L15 
 W-L06/W-L07 (graphics).
 
 ### 16.6 Notes log
+
+- 2026-10-15 (pi-gpt): **W-S11 → review (needs macOS check)**. Native rounding
+  probe built without modifying the normal build; 80-second ride passed and observed
+  nearest-even / toward-zero (risk 14.6 updated). Wasm64 assertions cover all modes,
+  overflow/NaN/ties and thread-local state; debug non-nearest logs observed. Native
+  guard passed (WebGPU 40.3 dB, Vulkan 45.8 dB). General FP arithmetic and full browser
+  physics replay remain explicitly unverified; D14 still requires a Mac build/boot.
 
 - 2026-10-15 (pi-gpt): **W-S10 → review (needs macOS check)**. Portability patch
   preserved/finalized in `bdc023e`/`86088a1`; the real-SDK wasm64 compile passed all
