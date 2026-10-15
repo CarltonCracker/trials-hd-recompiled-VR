@@ -11,6 +11,7 @@ PATH="$PWD/.venv/bin:$PATH" cmake -S tests/gpu_webgpu -B out/webgpu-tests -G Nin
 PATH="$PWD/.venv/bin:$PATH" cmake --build out/webgpu-tests -j2
 out/webgpu-tests/shared_memory_test 0
 out/webgpu-tests/alu_test 0
+out/webgpu-tests/vertex_fetch_test 0
 # Repeat with adapter 1; each executable prints the selected GPU.
 ```
 
@@ -25,6 +26,16 @@ The default SDK paths refer to `thirdparty/rexglue-sdk` and the existing
   with the SDK interpreter. Includes saturation, swizzles/modifiers, previous
   scalar state, predicates, a0, zero/denormal/NaN/infinity edges, and actual
   fragment discards checked against the interpreter's kill result.
+
+- **Vertex fetch:** authored microcode for all 15 vertex formats, signed/unsigned
+  integer/normalized conversion, both signed repeating-fraction modes, and all
+  four endian modes, checked against the SDK interpreter. Independent byte
+  extraction checks guard the oracle's signed and unsigned packed paths. Includes Xenos
+  half edges, zero/maximum strides, signed offsets, per-word fetch bounds,
+  index rounding, constant 95, keep/constant swizzles, exponent adjustment,
+  mini fetches (including address-only full fetches), and direct/pulled u16/u32
+  guest-index helpers with base offsets and limits. The fixture pins a low guest
+  physical address so it does not require a 512 MiB storage binding.
 
 Floating arithmetic uses a 2e-5 relative/absolute tolerance; NaN and infinity
 classification must match. Reserved opcodes are not instructions and are excluded.

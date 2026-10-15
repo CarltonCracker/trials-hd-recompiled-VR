@@ -242,6 +242,20 @@ fn xe_unpack_10_10_10_2_snorm_no_zero(packed: u32) -> vec4f {
   return vec4f(x, y, z, w);
 }
 
+// Vertex halves flush denormals and use exponent 31 for finite values, not inf/NaN.
+fn xe_vertex_half(value: u32) -> f32 {
+  let exponent = (value >> 10u) & 31u;
+  var bits = (value & 0x8000u) << 16u;
+  if (exponent != 0u) {
+    bits |= ((exponent + 112u) << 23u) | ((value & 1023u) << 13u);
+  }
+  return bitcast<f32>(bits);
+}
+
+fn xe_unpack_vertex_half(packed: u32) -> vec2f {
+  return vec2f(xe_vertex_half(packed & 65535u), xe_vertex_half(packed >> 16u));
+}
+
 // 16-bit packed format unpacks.
 fn xe_unpack_16_16_float(packed: u32) -> vec2f {
   return unpack2x16float(packed);

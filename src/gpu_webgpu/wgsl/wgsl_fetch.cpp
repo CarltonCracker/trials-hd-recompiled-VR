@@ -53,11 +53,18 @@ void WgslShaderTranslator::ProcessVertexFetchInstruction(
   // Words of the element, endian-swapped (endianness in bits 0:1 of word 1).
   Line(fmt::format("var {}: vec4u;", words));
   Line(fmt::format("let xe_endian{} = xe_fetch_word({}u) & 3u;", id, fetch_word_0 + 1));
+  Line(fmt::format("let xe_base{0} = xe_fetch_word({1}u) >> 2u;", id, fetch_word_0));
+  Line(fmt::format("let xe_end{0} = xe_base{0} + ((xe_fetch_word({1}u) >> 2u) & 0xFFFFFFu);",
+                  id, fetch_word_0 + 1));
   for (uint32_t i = 0; i < 4; ++i) {
     if (needed_words & (1u << i)) {
+      int32_t offset = instr.attributes.offset + int32_t(i);
+      Line(fmt::format("if (u32(xe_vfetch_address + {0}) >= xe_base{1} && "
+                       "u32(xe_vfetch_address + {0}) < xe_end{1}) {{", offset, id));
       Line(fmt::format(
           "{}.{} = xe_endian_swap(xe_load_shared(xe_vfetch_address + {}), xe_endian{});", words,
-          "xyzw"[i], instr.attributes.offset + int32_t(i), id));
+          "xyzw"[i], offset, id));
+      Line("}");
     }
   }
 
@@ -109,11 +116,10 @@ void WgslShaderTranslator::ProcessVertexFetchInstruction(
       word_of[2] = word_of[3] = 1;
       break;
     case xenos::VertexFormat::k_16_16_FLOAT:
-      // Like the other translators, IEEE half (Xenos half has no inf/NaN).
-      result = fmt::format("vec4f(unpack2x16float({}.x), 0.0, 0.0)", words);
+      result = fmt::format("vec4f(xe_unpack_vertex_half({}.x), 0.0, 0.0)", words);
       break;
     case xenos::VertexFormat::k_16_16_16_16_FLOAT:
-      result = fmt::format("vec4f(unpack2x16float({0}.x), unpack2x16float({0}.y))", words);
+      result = fmt::format("vec4f(xe_unpack_vertex_half({0}.x), xe_unpack_vertex_half({0}.y))", words);
       break;
     case xenos::VertexFormat::k_32:
     case xenos::VertexFormat::k_32_32:
