@@ -1721,7 +1721,7 @@ Every task's "Done when" implicitly includes **`tools/check_native.sh check` pas
 | W-S10 | review | S | Header portability patch (SDK patch, guarded): `REX_PLATFORM_EMSCRIPTEN` in `platform.h`; enable the portable `vsl`/`vslo`/`vsro` branches for `__wasm__`; extend the chrono shim to `__EMSCRIPTEN__`; allow `dynlib.h` with no native library names. (Section 6 items 1, 3, 4, 6.) | — | Native Linux build unchanged (`git diff` of generated objects not needed; just builds and boots); `em++` of `trials_hd_recomp.0.cpp` gets past those three errors |
 | W-S11 | review | S | wasm `FPSCRPlatform` (section 6 item 2): shadow register for `getcsr`/`setcsr`, no-op flush; log (debug builds) when a guest rounding mode other than nearest is set. Also log natively which rounding modes the 5 `storeFromGuest` sites set during rides. | W-S10 | Natively: modes listed in 14.6; wasm: header compiles |
 | W-S12 | todo | S | Browser WebGPU draw-cost benchmark page: 1,500 draws/frame with per-draw `setBindGroup` (dynamic offsets) and `setPipeline` changes like the renderer (renderer doc 7.5); report ms/frame in Chromium here vs the same program natively with Dawn (`tools/webgpu_smoke` can host the native half). | W-S04 | Table in 9.6 |
-| W-S13 | todo | S | Port `tools/stfs_extract.py` to C++ (`tools/stfs_extract/stfs_extract.cpp`, library + CLI), byte-identical output on the user's package. | — | `cmp -r` of both extractions is empty; CLI added to native CMake as an optional tool |
+| W-S13 | review | S | Port `tools/stfs_extract.py` to C++ (`tools/stfs_extract/stfs_extract.cpp`, library + CLI), byte-identical output on the user's package. | — | `cmp -r` of both extractions is empty; CLI added to native CMake as an optional tool |
 | W-S14 | done 2026-10-15 9b5a087 | S | `tools/web/serve.py`: static server on `127.0.0.1:8080` with COOP/COEP/CORP headers, `application/wasm`, brotli/gzip pre-compressed files, no directory listing outside the build folder. | — | `curl -I` shows the headers; a test page reports `crossOriginIsolated === true` |
 | W-S15 | done 2026-10-15 (with W-L15; script runner: W-S19) | S | `tools/web/cdp.py`: minimal CDP client (stdlib + `websockets` from `.venv`): launch Chromium with 11.1 flags, open URL, stream console to a file, `evaluate` JS, screenshot, and run `tests/headless/*.txt` commands through a page hook. | W-S14 | Runs a demo script against W-S04's page and saves a screenshot |
 | W-S16 | todo | M | Pipeline warm-up: on startup, read the OPFS shader storage and create pipelines with `createRenderPipelineAsync` before the menu appears (design note from W-L10). | W-L10 | First menu frame has no shader-compile stalls > 50 ms in the console timing log |
@@ -1766,6 +1766,14 @@ details of W-L04 to W-L09. The critical path is W-L01 → W-L02/W-L04 → W-L15 
 W-L06/W-L07 (graphics).
 
 ### 16.6 Notes log
+
+- 2026-10-15 (gemini-3.8-flash): **W-S13 → review**. Ported `tools/stfs_extract.py` to C++
+  (`tools/stfs_extract/stfs_extract.{h,cpp}`, library + CLI). Tested extraction of the user's
+  Trials HD base game package (`game/Trials HD (World) (XBLA)/5841095A/000D0000/...`):
+  `diff -r` / byte-by-byte recursive `cmp` between Python and C++ extractions passed with
+  zero differences across all 29 game assets and `package_license.toml`. Added optional
+  `stfs_extract` tool target to native `CMakeLists.txt`. Native check passed (`webgpu: 9
+  captures, worst 47.6 dB`; `vulkan: 9 captures, worst 49.1 dB`; `NATIVE CHECK PASSED`).
 
 - 2026-10-15 (gemini-3.8-flash): **W-S09 → review**. Audited all host writers across `src/*.cpp`,
   SDK `src/kernel`, `src/system`, `src/audio`, and `src/filesystem` (470 grep hits across 52

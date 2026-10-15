@@ -191,6 +191,14 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/xex_dump")
     target_link_libraries(xex_dump PRIVATE rex::runtime)
 endif()
 
+# Development tool: Xbox 360 STFS package extractor (W-S13).
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/stfs_extract")
+    add_library(stfs_extract_lib STATIC tools/stfs_extract/stfs_extract.cpp)
+    target_include_directories(stfs_extract_lib PUBLIC tools/stfs_extract)
+    add_executable(stfs_extract EXCLUDE_FROM_ALL tools/stfs_extract/main.cpp)
+    target_link_libraries(stfs_extract PRIVATE stfs_extract_lib)
+endif()
+
 # Standalone check of the WebGPU stack: window, surface, features/limits, and CPU benchmark.
 if(TRIALSHD_WEBGPU)
     find_package(Threads REQUIRED)
