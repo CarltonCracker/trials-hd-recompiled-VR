@@ -1,0 +1,26 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Trials HD web spike: WebGPU pthread triangle</title>
+<style>body { margin: 0; background: black; } canvas { display: block; }</style>
+<canvas id="canvas" width="320" height="240"></canvas>
+<pre id="result" style="color: white">Starting worker-owned WebGPU…</pre>
+<script>
+let complete, fail;
+window.spikeResult = new Promise((resolve, reject) => { complete = resolve; fail = reject; });
+var Module = {
+  canvas: document.querySelector('#canvas'),
+  print(text) {
+    console.log(text);
+    if (text.startsWith('WEBGPU_TRIANGLE_RESULT ')) {
+      const result = {...JSON.parse(text.slice('WEBGPU_TRIANGLE_RESULT '.length)),
+                      userAgent: navigator.userAgent, crossOriginIsolated};
+      document.querySelector('#result').textContent = JSON.stringify(result, null, 2);
+      complete(result);
+    }
+  },
+  printErr(text) { console.error(text); },
+  onAbort(reason) { fail(new Error(String(reason))); },
+};
+if (!crossOriginIsolated) fail(new Error('Use tools/web/serve.py: cross-origin isolation is required'));
+</script>
+{{{ SCRIPT }}}
