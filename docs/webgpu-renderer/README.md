@@ -1876,7 +1876,7 @@ debugging. Several can run in parallel once L-01 to L-03 exist.
 | L-03 | done 2026-10-14 df64e32 | **Front-end split.** `DrawSnapshot` / `ResolveSnapshot` / `SwapSnapshot` built from the register file in `IssueDraw`/`IssueCopy`/`IssueSwap`, independent of WebGPU, so the D3D front-end (L-17) can fill the same structs. | L-01 | 7.4, `command_processor.h` | snapshots logged for a frame; S-26 possible |
 | L-04a | done 2026-10-14 d24de8c | **WGSL translator: control flow.** `WgslShaderTranslator : ShaderTranslator`; `loop { switch (pc) }` state machine; `exec`/`jmp`/`call`/`loop` with constant-driven loop counters; predicates; bool constants; `a0` dynamic register indexing. | L-01 | 8.4, `translator.h/.cpp`, `spirv_translator.cpp` | all 74 shaders emit structurally valid WGSL (Tint) with ALU stubbed |
 | L-04b | done pi-gpt 2026-10-14 13a680a | **ALU.** Vector and scalar pipes, all opcodes used by Trials (section 5.6) and the rest of Xenos, saturation, Xenos float rules (`mul` with zero, `rsq(0)`, `max`/`min` NaN behavior), `kill*`, `setp_*`, `cube`. | L-04a | `spirv_translator_alu.cpp`, `dxbc_translator_alu.cpp`, `interpreter.cpp` | differential tests vs the SDK interpreter pass for every ALU opcode |
-| L-04c | partial pi-gpt 2026-10-14 (synthetic differential passes; recorded-input acceptance open) | **Vertex fetch via vertex pulling.** Fetch constants, strides, offsets, all formats of section 5.6 plus the remaining Xenos vertex formats, endianness, index source (direct vs converted primitive). | L-04a, S-18 | `spirv_translator_fetch.cpp` | VS outputs match the interpreter on recorded vertex data |
+| L-04c | done 2026-10-14 84b419e (recorded-input replay verified on both GPUs) | **Vertex fetch via vertex pulling.** Fetch constants, strides, offsets, all formats of section 5.6 plus the remaining Xenos vertex formats, endianness, index source (direct vs converted primitive). | L-04a, S-18 | `spirv_translator_fetch.cpp` | VS outputs match the interpreter on recorded vertex data |
 | L-04d | done 2026-10-14 1d3409f | **Texture fetch.** `tfetch2D`/`Cube`, LOD modes (`setTexLOD`, register LOD, computed), exp adjust (word 3), signedness, integer number format, swizzle, gradients, vertex-stage fetch; resolve-alias textures with different host formats. | L-04a, S-23 | `spirv_translator_fetch.cpp`, SDK patch fixes (5.7) | textured menus match the Vulkan captures |
 | L-04e | todo | **Outputs.** Position transform (viewport, half-pixel offset, `PA_CL_VTE_CNTL`), interpolators, point coordinate, facing, up to 4 color outputs with format conversions and exponent bias, alpha test, depth conventions (reverse-Z, float24). | L-04a | `spirv_translator_rb.cpp` (host-RT parts), `draw_util` | geometry silhouettes match (M3) |
 | L-04f | done 2026-10-14 c27112b | **Rect-list expansion VS** and other host VS types (`kRectangleListAsTriangleStrip`, point list if ever needed). | L-04e | `shader.h` `HostVertexShaderType`, DXBC translator | resolve/clear/full-screen rect passes draw correctly |
@@ -2247,11 +2247,20 @@ finding: `YYYY-MM-DD <agent> <task ID>: what changed; evidence; what is left`.
     The isolated production executable/plugin rebuild passed. A native AMD
     title/menu smoke run produced a local screenshot; SDK heap-release errors
     remain in its log, so this is not an error-free scene-parity claim. The
-    gdb recorded-input attempt stopped on a guest SIGSEGV before a snapshot;
-    no recorded-input parity evidence was obtained. Only authored data is
-    committed; capture files stay local. Paused at the user's usage limit.
-  - **L-04c remains partial:** these compute-based shader/helper tests do not
-    establish actual draw-stage recorded-input or scene parity, or Metal parity.
+    first gdb recorded-input attempt stopped on a guest SIGSEGV before a
+    snapshot. On the user's continuation request, passing memory-watch faults
+    through to the SDK handler captured a real VS draw at frame 600 / draw 24:
+    **3 vertices**, shader/constant state and **64 KiB** of guest vertex memory.
+    A local-only full-shader replay matches the SDK interpreter on **both GPUs**
+    for its **2 allocated temp registers and written VS exports** (2e-5
+    relative/absolute tolerance; NaN/inf classification matched). Explicit
+    coverage assertions confirm **position mask 0xF and interpolator-0 mask
+    0xF for all three vertices**, on both adapters. This closes the L-04c
+    recorded-input acceptance alongside the authored format/index matrix.
+    Only authored data is committed; captured shader/register/memory files
+    stay local.
+  - Scope: recorded-input evidence covers one non-indexed draw, not whole-game
+    rasterized scene parity, Metal parity, or a full recorded shader corpus.
 - 2026-10-14 antigravity (Tier S tasks completion):
   - **S-01:** Executed 7 headless test scripts (`main_menu_nav.txt`, `settings_menu.txt`,
     `credits.txt`, `ride_tutorial.txt`, `ride_middle_name_danger.txt`, `ride_hello_world.txt`,
