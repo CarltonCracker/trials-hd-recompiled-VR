@@ -397,6 +397,7 @@ add_executable(trials_hd
     src/offline_warning.cpp
     src/package_license.cpp
     src/exit_button.cpp
+    src/splash_screen.cpp
     src/web/null_graphics_system.cpp
     src/web/web_files.cpp
     $<TARGET_OBJECTS:trials_hd_web_sdk>
