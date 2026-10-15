@@ -4,12 +4,21 @@
 import argparse
 import functools
 import http.server
+import io
 import os
 from pathlib import Path
 from urllib.parse import urlsplit
 
 
+ASSETS_PREFIX = "/assets/"
+
+
 class Handler(http.server.SimpleHTTPRequestHandler):
+    # Development (--assets): the user's own extracted game, served read-only
+    # under /assets/ with a generated manifest.txt ("<size> <path>" per line)
+    # that the web build mounts lazily (docs/web-port/README.md 8.6, WM1).
+    assets = None
+
     extensions_map = {
         **http.server.SimpleHTTPRequestHandler.extensions_map,
         ".wasm": "application/wasm",
@@ -28,9 +37,37 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         return None
 
     def contained(self, path):
-        return path.resolve().is_relative_to(Path(self.directory).resolve())
+        root = self.assets if self.is_assets_request() else Path(self.directory)
+        return path.resolve().is_relative_to(root.resolve())
+
+    def is_assets_request(self):
+        return self.assets is not None and urlsplit(self.path).path.startswith(ASSETS_PREFIX)
+
+    def assets_parts(self):
+        # WasmFS's fetch backend asks for /assets//<path>: ignore empty parts.
+        relative = urlsplit(self.path).path[len(ASSETS_PREFIX):]
+        return [part for part in relative.split("/") if part not in ("", ".", "..")]
+
+    def translate_path(self, path):
+        if self.is_assets_request():
+            return str(self.assets.joinpath(*self.assets_parts()))
+        return super().translate_path(path)
+
+    def send_manifest(self):
+        lines = []
+        for file in sorted(self.assets.rglob("*")):
+            if file.is_file() and self.contained(file):
+                lines.append(f"{file.stat().st_size} {file.relative_to(self.assets).as_posix()}\n")
+        body = "".join(lines).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        return io.BytesIO(body)
 
     def send_head(self):
+        if self.is_assets_request() and self.assets_parts() == ["manifest.txt"]:
+            return self.send_manifest()
         path = Path(self.translate_path(self.path))
         if not self.contained(path):
             self.send_error(403, "Path outside build directory")
@@ -96,10 +133,16 @@ def main():
     parser.add_argument("directory", nargs="?", default="out/build/web-wasm64-release/web")
     parser.add_argument("--bind", default="127.0.0.1", help="listen address (default: loopback only)")
     parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--assets", type=Path,
+                        help="development: serve your extracted game folder under /assets/")
     args = parser.parse_args()
     directory = Path(args.directory).resolve()
     if not directory.is_dir():
         parser.error(f"build directory does not exist: {directory}")
+    if args.assets is not None:
+        if not args.assets.is_dir():
+            parser.error(f"assets directory does not exist: {args.assets}")
+        Handler.assets = args.assets.resolve()
     handler = functools.partial(Handler, directory=str(directory))
     with http.server.ThreadingHTTPServer((args.bind, args.port), handler) as server:
         print(f"Serving {directory} at http://{args.bind}:{server.server_port}/", flush=True)

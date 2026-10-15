@@ -119,5 +119,62 @@ class ServerTests(unittest.TestCase):
             (self.root / "test.wasm.gz").write_bytes(gzip.compress(self.wasm))
 
 
+class AssetsTests(unittest.TestCase):
+    """--assets: the user's game folder under /assets/, read-only, with a manifest."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.temp = tempfile.TemporaryDirectory()
+        cls.root = Path(cls.temp.name) / "build"
+        cls.root.mkdir()
+        cls.assets = Path(cls.temp.name) / "game"
+        (cls.assets / "media").mkdir(parents=True)
+        (cls.assets / "default.xex").write_bytes(b"XEX2" + bytes(12))
+        (cls.assets / "media" / "a.bin").write_bytes(b"abc")
+        outside = Path(cls.temp.name) / "private.txt"
+        outside.write_text("private")
+        (cls.assets / "escape").symlink_to(outside)
+        handler = type("AssetsHandler", (QuietHandler,), {"assets": cls.assets.resolve()})
+        cls.server = http.server.ThreadingHTTPServer(
+            ("127.0.0.1", 0), functools.partial(handler, directory=str(cls.root)))
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join()
+        cls.temp.cleanup()
+
+    def request(self, path):
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port)
+        connection.request("GET", path)
+        response = connection.getresponse()
+        result = response.status, dict(response.getheaders()), response.read()
+        connection.close()
+        return result
+
+    def test_manifest_lists_files_inside_only(self):
+        status, headers, body = self.request("/assets/manifest.txt")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Cross-Origin-Embedder-Policy"], "require-corp")
+        self.assertEqual(body.decode(), "16 default.xex\n3 media/a.bin\n")
+
+    def test_fetch_backend_double_slash(self):
+        self.assertEqual(self.request("/assets//manifest.txt")[2].decode(),
+                         "16 default.xex\n3 media/a.bin\n")
+        self.assertEqual(self.request("/assets//media/a.bin")[2], b"abc")
+
+    def test_files_and_containment(self):
+        self.assertEqual(self.request("/assets/media/a.bin")[2], b"abc")
+        for path in ("/assets/escape", "/assets/../build", "/assets/%2e%2e/private.txt",
+                     "/assets/media/"):
+            with self.subTest(path=path):
+                status, _, body = self.request(path)
+                self.assertIn(status, (403, 404))
+                self.assertNotIn(b"private", body)
+
+
 if __name__ == "__main__":
     unittest.main()

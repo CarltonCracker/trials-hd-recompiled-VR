@@ -41,6 +41,11 @@
 #include "package_license.h"
 #include "virtual_pad.h"
 
+#if defined(__EMSCRIPTEN__)
+#include "web/null_graphics_system.h"
+#include "web/web_files.h"
+#endif
+
 #if defined(TRIALSHD_CALL_TRACE)
 #include "diag/call_trace.h"
 #endif
@@ -156,6 +161,19 @@ class TrialsHdApp : public rex::ReXApp {
   // overrides; if it cannot start, the Vulkan one (xenos) is used instead.
   // Audio falls back to a silent driver when no output device can be opened.
   void OnPreSetup(rex::RuntimeConfig& config) override {
+#if defined(__EMSCRIPTEN__)
+    // Web (docs/web-port/README.md 7.9.10): renderers are linked in. Until
+    // the WebGPU renderer is ported (W-L06/W-L07), "null" runs the GPU
+    // command stream without drawing.
+    trials_hd::web::RegisterNullGpuPlugin();
+    if (config.gpu_plugin.empty()) {
+      config.gpu_plugin = "null";
+    }
+    REXLOG_INFO("OnPreSetup: gpu_plugin={}", config.gpu_plugin);
+    config.audio_factory = REX_AUDIO_BACKEND(trials_hd::FallbackAudioSystem);
+    trials_hd::ApplyStartupGraphicsSettings();
+    return;
+#endif
 #if defined(__APPLE__)
     // MoltenVK Metal optimizations for Apple Silicon:
     // Silence verbose warning floods that stall I/O, enable fast math in MSL shaders
@@ -213,6 +231,11 @@ class TrialsHdApp : public rex::ReXApp {
   // Trials HD into an `assets` folder (see README). Without --game_data_root,
   // look next to the executable first, then in the working directory.
   void OnConfigurePaths(rex::PathConfig& paths) override {
+#if defined(__EMSCRIPTEN__)
+    if (paths.game_data_root.empty()) {
+      paths.game_data_root = trials_hd::web::MountServedAssets();
+    }
+#endif
     if (paths.game_data_root.empty()) {
       for (const auto& dir : {rex::filesystem::GetExecutableFolder() / "assets",
                               std::filesystem::current_path() / "assets"}) {
@@ -241,7 +264,9 @@ class TrialsHdApp : public rex::ReXApp {
     rex::ui::UnregisterBind("bind_achievements");
     rex::ui::RegisterBind("bind_achievements", "F7", "Toggle achievements",
                           [this] { ToggleAchievements(); });
+#if !defined(__EMSCRIPTEN__)  // Web input comes from the page (W-L08).
     combo_watcher_ = std::jthread([this](std::stop_token stop) { WatchSettingsCombo(stop); });
+#endif
     (void)drawer;
   }
 
@@ -302,10 +327,12 @@ class TrialsHdApp : public rex::ReXApp {
     trials_hd::diag::StartCallTraceReporter();
 #endif
 
+#if !defined(__EMSCRIPTEN__)
     // Test harness only: no-op unless TRIALS_HD_VIRTUAL_PAD is set.
     trials_hd::StartVirtualPadFromEnvironment([this](const std::string& path) {
       app_context().CallInUIThreadDeferred([this, path] { CaptureGuestFrame(path); });
     });
+#endif
   }
 
   void OnShutdown() override {
@@ -360,6 +387,9 @@ class TrialsHdApp : public rex::ReXApp {
   // every button and key is up. SDL's gamepad getters lock internally and the
   // keyboard state is a plain array, so this is safe off the UI thread.
   void WatchSettingsCombo(std::stop_token stop) {
+#if defined(__EMSCRIPTEN__)
+    (void)stop;
+#else
     bool was_down = false;
     bool ach_close_was_down = false;
     while (!stop.stop_requested()) {
@@ -412,6 +442,7 @@ class TrialsHdApp : public rex::ReXApp {
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(30));
     }
+#endif
   }
 
   void RegisterDefaultAchievements() {

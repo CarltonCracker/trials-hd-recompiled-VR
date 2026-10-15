@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trials HD Recompiled</title>
+<!-- Local use only (docs/web-port/README.md D12): this page loads the user's own
+     recompiled game. Never host or publish a build. -->
+<style>
+  html, body { margin: 0; height: 100%; background: #000; color: #ccc; font: 12px monospace; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #log { position: fixed; left: 0; right: 0; bottom: 0; max-height: 35vh; overflow: auto;
+         margin: 0; padding: 4px 8px; background: rgba(0, 0, 0, 0.6); white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<pre id="log"></pre>
+<script>
+  // Runtime flags come from the page URL: ?log_level=info&web_assets_url=/assets
+  // becomes --log_level=info --web_assets_url=/assets.
+  const runtimeArguments = [];
+  for (const [name, value] of new URLSearchParams(location.search)) {
+    runtimeArguments.push(value === '' ? `--${name}` : `--${name}=${value}`);
+  }
+  const logElement = document.getElementById('log');
+  const logLines = [];
+  function showLog(text) {
+    console.log(text);
+    logLines.push(text);
+    if (logLines.length > 200) {
+      logLines.shift();
+    }
+    logElement.textContent = logLines.join('\n');
+    logElement.scrollTop = logElement.scrollHeight;
+  }
+  // Read by headless checks (tools/web/cdp.py).
+  window.trialsHd = { started: performance.now(), exitCode: null };
+  var Module = {
+    arguments: runtimeArguments,
+    canvas: document.getElementById('canvas'),
+    print: showLog,
+    printErr: showLog,
+    onExit: (code) => {
+      window.trialsHd.exitCode = code;
+      showLog(`trials_hd exited with code ${code}`);
+    },
+  };
+  if (!crossOriginIsolated) {
+    showLog('This page needs cross-origin isolation: serve it with tools/web/serve.py.');
+  }
+</script>
+{{{ SCRIPT }}}
+</body>
+</html>

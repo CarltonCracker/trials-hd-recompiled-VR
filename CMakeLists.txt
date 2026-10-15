@@ -42,6 +42,19 @@ foreach(_patch IN LISTS TRIALSHD_SDK_PATCHES)
     endif()
 endforeach()
 
+# Browser build (docs/web-port/README.md): only with -DTRIALSHD_WEB=ON under
+# Emscripten's toolchain (preset web-wasm64-release). It has its own build
+# description and never reaches the native one below.
+option(TRIALSHD_WEB "Build for the browser (Emscripten, WebAssembly + WebGPU)" OFF)
+if(TRIALSHD_WEB)
+    if(NOT EMSCRIPTEN)
+        message(FATAL_ERROR "TRIALSHD_WEB needs Emscripten's toolchain: "
+                            "source ~/emsdk/emsdk_env.sh && emcmake cmake --preset web-wasm64-release")
+    endif()
+    include(cmake/web/trials_hd_web.cmake)
+    return()
+endif()
+
 include(generated/rexglue.cmake)
 
 # The SDK sets REXGLUE_ROOT inside its own add_subdirectory scope but doesn't

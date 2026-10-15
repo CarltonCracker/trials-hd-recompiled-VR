@@ -11,10 +11,29 @@
 
 #include <memory>
 
+#if defined(__EMSCRIPTEN__)
+#include <rex/audio/audio_system.h>
+#else
 #include <rex/audio/sdl/sdl_audio_system.h>
+#endif
 
 namespace trials_hd {
 
+#if defined(__EMSCRIPTEN__)
+// Web: no SDL audio. Silent output until the AudioWorklet driver (W-L12).
+class FallbackAudioSystem : public rex::audio::AudioSystem {
+ public:
+  explicit FallbackAudioSystem(rex::runtime::FunctionDispatcher* function_dispatcher)
+      : AudioSystem(function_dispatcher) {}
+
+  static std::unique_ptr<rex::audio::AudioSystem> Create(
+      rex::runtime::FunctionDispatcher* function_dispatcher);
+
+  rex::X_STATUS CreateDriver(size_t index, rex::thread::Semaphore* semaphore,
+                             rex::audio::AudioDriver** out_driver) override;
+  void DestroyDriver(rex::audio::AudioDriver* driver) override;
+};
+#else
 class FallbackAudioSystem : public rex::audio::sdl::SDLAudioSystem {
  public:
   using SDLAudioSystem::SDLAudioSystem;
@@ -26,5 +45,6 @@ class FallbackAudioSystem : public rex::audio::sdl::SDLAudioSystem {
                              rex::audio::AudioDriver** out_driver) override;
   void DestroyDriver(rex::audio::AudioDriver* driver) override;
 };
+#endif
 
 }  // namespace trials_hd

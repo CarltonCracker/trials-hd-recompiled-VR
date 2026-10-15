@@ -60,6 +60,12 @@ commit by CMake at configure time; regenerate with tools/export_sdk_patch.sh).
   bookkeeping, dirty-bitmap write tracking delivered to the invalidation
   callbacks (memory_emscripten.cpp, exception_handler_emscripten.cpp and
   REX_PLATFORM_EMSCRIPTEN / REX_ARCH_WASM branches; native code unchanged)
+- web (Emscripten) platform layer (W-L15): POSIX files accept the web, with
+  branches for the clock (CLOCK_MONOTONIC), thread ids/names/affinity and APC
+  wakeups; fiber_emscripten.cpp; web UI loop, window and main(); linked-in GPU
+  plugins (RegisterStaticGpuPlugin); weak kernel stubs so a game's exports
+  override them in a static link; console logging; xxHash/RenderDoc/
+  disruptorplus portability (all guarded; native code unchanged)
 
 EOF
   git -C "$sdk" diff

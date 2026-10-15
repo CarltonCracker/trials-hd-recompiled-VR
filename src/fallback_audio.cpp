@@ -64,10 +64,14 @@ std::unique_ptr<rex::audio::AudioSystem> FallbackAudioSystem::Create(
 
 X_STATUS FallbackAudioSystem::CreateDriver(size_t index, rex::thread::Semaphore* semaphore,
                                            rex::audio::AudioDriver** out_driver) {
+#if defined(__EMSCRIPTEN__)
+  (void)index;
+#else
   if (SDLAudioSystem::CreateDriver(index, semaphore, out_driver) == X_STATUS_SUCCESS) {
     return X_STATUS_SUCCESS;
   }
   REXLOG_WARN("No audio output device available; continuing with silent audio");
+#endif
   *out_driver = new NullAudioDriver(memory_, semaphore);
   return X_STATUS_SUCCESS;
 }
@@ -77,7 +81,9 @@ void FallbackAudioSystem::DestroyDriver(rex::audio::AudioDriver* driver) {
     delete null_driver;
     return;
   }
+#if !defined(__EMSCRIPTEN__)
   SDLAudioSystem::DestroyDriver(driver);
+#endif
 }
 
 }  // namespace trials_hd

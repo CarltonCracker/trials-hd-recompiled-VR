@@ -128,6 +128,27 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo"
       }
+    },
+    {
+      "name": "web-wasm64-release",
+      "displayName": "Web (WebAssembly, Memory64) Release",
+      "description": "Browser build (docs/web-port/README.md 10.1). Run in a shell with emsdk active, after a native build (it compiles generated/default).",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "toolchainFile": "$env{EMSDK}/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "TRIALSHD_WEB": "ON"
+      }
+    },
+    {
+      "name": "web-wasm64-node",
+      "displayName": "Web build for Node.js (development)",
+      "description": "The web build run by Node with direct access to the host file system, for headless boot checks (docs/web-port/README.md 11).",
+      "inherits": "web-wasm64-release",
+      "cacheVariables": {
+        "TRIALSHD_WEB_NODE": "ON"
+      }
     }
   ],
   "buildPresets": [
@@ -166,6 +187,14 @@
     {
       "name": "mac-amd64-relwithdebinfo",
       "configurePreset": "mac-amd64-relwithdebinfo"
+    },
+    {
+      "name": "web-wasm64-release",
+      "configurePreset": "web-wasm64-release"
+    },
+    {
+      "name": "web-wasm64-node",
+      "configurePreset": "web-wasm64-node"
     }
   ]
 }

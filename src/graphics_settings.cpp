@@ -65,20 +65,29 @@ bool GetBool(std::string_view name) {
   return rex::cvar::GetFlagByName(name) == "true";
 }
 
+// Web: the page owns the canvas size and fullscreen state (W-L08), and SDL
+// video is not used, so the display queries below are native only.
 SDL_Window* FindGameWindow() {
+#if defined(__EMSCRIPTEN__)
+  return nullptr;
+#else
   int count = 0;
   SDL_Window** windows = SDL_GetWindows(&count);
   SDL_Window* window = (windows && count > 0) ? windows[0] : nullptr;
   SDL_free(windows);
   return window;
+#endif
 }
 
 // Distinct resolutions the window's display supports, largest first, plus
 // common 16:9 sizes that fit on it (useful in windowed mode).
 std::vector<std::pair<int, int>> AvailableResolutions(SDL_Window* window) {
   std::set<std::pair<int, int>, std::greater<>> sizes;
-  SDL_DisplayID display = window ? SDL_GetDisplayForWindow(window) : SDL_GetPrimaryDisplay();
   int desktop_w = 0, desktop_h = 0;
+#if defined(__EMSCRIPTEN__)
+  (void)window;
+#else
+  SDL_DisplayID display = window ? SDL_GetDisplayForWindow(window) : SDL_GetPrimaryDisplay();
   if (const SDL_DisplayMode* desktop = SDL_GetDesktopDisplayMode(display)) {
     desktop_w = desktop->w;
     desktop_h = desktop->h;
@@ -90,6 +99,7 @@ std::vector<std::pair<int, int>> AvailableResolutions(SDL_Window* window) {
     }
     SDL_free(modes);
   }
+#endif
   for (auto [w, h] : {std::pair{1280, 720}, {1600, 900}, {1920, 1080}, {2560, 1440},
                       {3840, 2160}}) {
     if (!desktop_w || (w <= desktop_w && h <= desktop_h)) {
@@ -186,6 +196,7 @@ void ApplyDisplayMode() {
   if (g_startup_render_scale.empty()) {
     g_startup_render_scale = rex::cvar::GetFlagByName("draw_resolution_scale_x");
   }
+#if !defined(__EMSCRIPTEN__)
   SDL_Window* window = FindGameWindow();
   if (!window) {
     return;
@@ -208,6 +219,7 @@ void ApplyDisplayMode() {
     SDL_SetWindowSize(window, w, h);
   }
   g_refresh_rate.store(refresh_rate);
+#endif
 }
 
 float VsyncRefreshRate() {
@@ -246,6 +258,7 @@ void GraphicsSettingsDialog::FeedGamepadNavigation(ImGuiIO& io) {
   }
   io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
   bool down[kNavButtons.size()] = {};
+#if !defined(__EMSCRIPTEN__)  // Web gamepads come from the page (W-L08).
   int count = 0;
   if (SDL_JoystickID* ids = SDL_GetGamepads(&count)) {
     for (int i = 0; i < count; ++i) {
@@ -265,6 +278,7 @@ void GraphicsSettingsDialog::FeedGamepadNavigation(ImGuiIO& io) {
     }
     SDL_free(ids);
   }
+#endif
   // B with no combo popup open closes the dialog; inside a popup ImGui uses it
   // to close the popup.
   const bool b_pressed = down[5] && !gamepad_was_down_[5];
@@ -450,10 +464,12 @@ void GraphicsSettingsDialog::OnDraw(ImGuiIO& io) {
   SDL_Window* window = FindGameWindow();
   const int cur_w = REXCVAR_GET(display_width), cur_h = REXCVAR_GET(display_height);
   std::string desktop_label = "Desktop";
+#if !defined(__EMSCRIPTEN__)
   if (const SDL_DisplayMode* desktop = SDL_GetDesktopDisplayMode(
           window ? SDL_GetDisplayForWindow(window) : SDL_GetPrimaryDisplay())) {
     desktop_label = fmt::format("Desktop ({}x{})", desktop->w, desktop->h);
   }
+#endif
   const std::string cur_label =
       (cur_w > 0 && cur_h > 0) ? fmt::format("{}x{}", cur_w, cur_h) : desktop_label;
   label("Resolution");

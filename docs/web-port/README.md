@@ -671,6 +671,44 @@ unchanged). App-side web code lives in `src/web/`; the SDK's UI/input/audio web
 backends in `thirdparty/rexglue-sdk/src/{ui,input,audio}/web/` (new directories, built only
 with `EMSCRIPTEN`).
 
+**As built (W-L15, 2026-10-15).** The web build does not go through the SDK's CMake (whose
+platform setup assumes Windows/Linux/macOS: Vulkan, SDL, Tracy, a shared `rexruntime`):
+`cmake/web/trials_hd_web.cmake` compiles the SDK, the generated code and the app from
+explicit source lists, as `src/gpu_webgpu/CMakeLists.txt` already does for the SDK's GPU
+sources. Per file:
+
+- Reused as-is (Emscripten is POSIX enough; their "POSIX-only" `static_assert`s now accept
+  `REX_PLATFORM_EMSCRIPTEN`): `atomic_posix`, `clock_posix`, `dbg_posix`, `dynlib_posix`
+  (`dlopen` fails at run time), `filesystem_posix`, `mapped_memory_posix` (Emscripten's
+  `mmap` of files copies), `math_gcc`, `platform/console_posix`, `platform/env_posix`,
+  `seh_posix` (nothing faults), `socket_posix` (offline: calls fail), `system_posix`.
+- `#elif REX_PLATFORM_EMSCRIPTEN` branches: `clock_posix.cpp` (**`CLOCK_MONOTONIC`**:
+  Emscripten has no `CLOCK_MONOTONIC_RAW`, the call fails, and with asserts compiled out the
+  guest time base stood still - the game "hung" after loading, waiting on time),
+  `threading_posix.cpp` (`gettid()`, affinity all-CPUs/no-op, `emscripten_set_thread_name`,
+  no APC wakeup signal - the alertable wait is already notified -, cross-thread
+  `Suspend` refused with an error: workers cannot be interrupted).
+- New: `memory_emscripten.cpp`, `exception_handler_emscripten.cpp` (W-L04),
+  `fiber_emscripten.cpp` (every guest thread converts itself to a fiber, which works;
+  `CreateFiber`/`SwitchToFiber` are fatal until W-S08 shows Trials HD needs them).
+- `timer_create` is not used: the SDK's timers already run on its `TimerQueue` thread.
+- UI: `ui/web/windowed_app_main_web.cpp` (`main()`), `windowed_app_context_web.cpp` (UI
+  loop = condition variable + queued functions), `window_web.cpp` (a `Window` standing for
+  the canvas, no surface yet; W-L08 adds size/focus/input). `rex_app.cpp` defaults audio
+  to `NopAudioSystem` on the web (no SDL audio); `input_system.cpp` skips the SDL driver.
+- Static linking: natively the app's `__imp__XamShowAchievementsUI` interposes the SDK
+  stub in the shared `rexruntime`; statically both are strong. `REX_STUB*` macros mark the
+  SDK stubs weak on the web (`REX_STUB_OVERRIDABLE`, empty natively).
+- Third party: `rex/hash.h` includes `<arm_neon.h>` before xxHash on wasm (xxHash includes
+  it inside `extern "C"`, where Emscripten's C++ parts fail); RenderDoc is absent (like
+  macOS); disruptorplus caches `hardware_concurrency()` on the web (its spin-wait queried it
+  per wait: `os.cpus()` under Node, 21 s of a 40 s run); FFmpeg is the SDK's subset as
+  portable C with a generated `config.h` (`cmake/web/ffmpeg.cmake`).
+- GPU plugins are linked in and registered by name (`RegisterStaticGpuPlugin`, 7.9.10);
+  `LoadGpuPlugin` looks names up. Until the renderer is ported, the app registers "null"
+  (`src/web/null_graphics_system.cpp`): the command processor executes the ring buffer
+  (registers, fences, interrupts, swaps) and draws nothing.
+
 #### 7.9.2 Memory model
 
 **Linear-memory window** (one `aligned_alloc(65536, 0xB0000000)` at startup, never freed):
@@ -1320,6 +1358,28 @@ shader storage at startup with `createRenderPipelineAsync`.
   not used), FFmpeg (custom wasm configure), fmt, spdlog, imgui, toml++, xxhash, libmspack,
   utfcpp, CLI11.
 
+**As built (W-L15, 2026-10-15).** `CMakeLists.txt` has `option(TRIALSHD_WEB OFF)`; with it
+on (and only under Emscripten's toolchain, else `FATAL_ERROR`) it includes
+`cmake/web/trials_hd_web.cmake` and `return()`s before the native description, so a native
+configure never reads the web files. Presets: `web-wasm64-release` (browser page in
+`out/build/web-wasm64-release/web/`) and `web-wasm64-node` (the same program for Node.js
+with the host file system: boot checks without a browser). Targets: `trials_hd_web_sdk`
+(OBJECT: like the native shared library, every object is linked, including ones that only
+self-register cvars and kernel exports), `trials_hd_web_recomp` (OBJECT, the generated
+code with its PCH), `trials_hd_web_imgui` (OBJECT, one ImGui context),
+`trials_hd_web_thirdparty` and `trials_hd_web_ffmpeg` (STATIC), and `trials_hd`.
+
+Flags in use: compile `-sMEMORY64=1 -pthread -msimd128 -fwasm-exceptions
+-fno-strict-aliasing -ffp-contract=off -fno-char8_t -O2`; link `-sPROXY_TO_PTHREAD
+-sPTHREAD_POOL_SIZE=48 -sINITIAL_MEMORY=3328mb -sMAXIMUM_MEMORY=8gb -sALLOW_MEMORY_GROWTH=1
+-sSTACK_SIZE=8mb -sDEFAULT_PTHREAD_STACK_SIZE=4mb -sEXIT_RUNTIME=1 --profiling-funcs`, plus
+`-sWASMFS -sENVIRONMENT=web,worker --shell-file web/shell.html` (browser) or
+`-sENVIRONMENT=node -sNODERAWFS=1` (Node; WasmFS's NODERAWFS did not see host paths in
+Emscripten 6.0.12, so the Node build keeps the legacy file system). Not yet:
+`--use-port=emdawnwebgpu`, `-sJSPI`, `-sOFFSCREENCANVAS_SUPPORT` (W-L06/W-L07), audio
+worklet (W-L12). A full build is ~500 objects; the 107 generated files dominate (about
+8 minutes at `-j8` here). `trials_hd.wasm` is 77 MB with function names.
+
 ### 10.3 Build cost
 
 Generated code: 75 s with 14 jobs (section 6). Expect several minutes for the runtime and
@@ -1364,6 +1424,30 @@ Without ANGLE-on-Vulkan Chromium exposes only SwiftShader to WebGPU.
 - FPS: the guest FPS log line (`--log_guest_fps`) goes to the console; `cdp.py` collects
   it. `tests/check_fps_log.py` works unchanged on the collected log.
 
+**Boot checks (W-L15).**
+
+```sh
+source ~/emsdk/emsdk_env.sh
+# Node, host file system, your assets/ (stdout and log in out/web-run/):
+tools/web/run_node.sh 90
+# Browser: serve the page and your game folder (loopback only), then headless Chromium:
+python3 tools/web/serve.py out/build/web-wasm64-release/web --assets assets &
+.venv/bin/python tools/web/cdp.py 'http://127.0.0.1:8080/?web_assets_url=/assets' \
+    --seconds 120 --until '600 guest swaps' --console out/web-run/console.log
+```
+
+`serve.py --assets` serves the folder under `/assets/` with a generated `manifest.txt`; the
+page passes its URL query as runtime flags, and `--web_assets_url=/assets` makes the app
+mount it read-only at `/assets` through WasmFS's fetch backend (each file downloads on first
+read; development only - the real data path is W-L10's OPFS import). `cdp.py` (W-S15)
+captures the console of the page and of every worker (the game's pthreads), stops on a
+pattern, and can evaluate an expression and take a screenshot. With the "null" GPU plugin
+the log reports `web: first guest swap` and then every 600 swaps with the rate.
+
+Profiling: the module keeps function names, so `node --cpu-prof --cpu-prof-dir=DIR -r
+out/web-run/exit_on_sigint.js out/build/web-wasm64-node/trials_hd.js ...` writes one
+profile per thread with guest functions named `__imp__sub_<address>`.
+
 ### 11.3 Debugging
 
 - Debug builds with `-g` and `-gseparate-dwarf`; Chrome's C/C++ DevTools extension maps
@@ -1378,7 +1462,7 @@ Without ANGLE-on-Vulkan Chromium exposes only SwiftShader to WebGPU.
 | ID | Status | Milestone | Check |
 | --- | --- | --- | --- |
 | WM0 | todo | Spikes answered: limits, JSPI in pthreads, Memory64 cost, MMIO completeness, fibers | W-S01–W-S08 done, section 14 questions 1–5 answered |
-| WM1 | todo | Runtime boots headless in the browser to the first guest frame (no graphics: GPU plugin stubbed) | Console shows the guest reaching the main menu's first swap |
+| WM1 | done 2026-10-15 (W-L15; null GPU, Chromium 154) | Runtime boots headless in the browser to the first guest frame (no graphics: GPU plugin stubbed) | Console shows the guest reaching the main menu's first swap |
 | WM2 | todo | Menus render through the browser's WebGPU | `main_menu_nav` golden captures within 40 dB of native |
 | WM3 | todo | Game data import and persistence | Fresh profile → pick package → plays; reload → no re-import |
 | WM4 | todo | Rides render; input from keyboard and gamepad | `ride_middle_name_danger` completes; `check_fps_log.py 60` passes in Chromium |
@@ -1589,10 +1673,11 @@ Every task's "Done when" implicitly includes **`tools/check_native.sh check` pas
 | W-S12 | todo | S | Browser WebGPU draw-cost benchmark page: 1,500 draws/frame with per-draw `setBindGroup` (dynamic offsets) and `setPipeline` changes like the renderer (renderer doc 7.5); report ms/frame in Chromium here vs the same program natively with Dawn (`tools/webgpu_smoke` can host the native half). | W-S04 | Table in 9.6 |
 | W-S13 | todo | S | Port `tools/stfs_extract.py` to C++ (`tools/stfs_extract/stfs_extract.cpp`, library + CLI), byte-identical output on the user's package. | — | `cmp -r` of both extractions is empty; CLI added to native CMake as an optional tool |
 | W-S14 | done 2026-10-15 9b5a087 | S | `tools/web/serve.py`: static server on `127.0.0.1:8080` with COOP/COEP/CORP headers, `application/wasm`, brotli/gzip pre-compressed files, no directory listing outside the build folder. | — | `curl -I` shows the headers; a test page reports `crossOriginIsolated === true` |
-| W-S15 | todo | S | `tools/web/cdp.py`: minimal CDP client (stdlib + `websockets` from `.venv`): launch Chromium with 11.1 flags, open URL, stream console to a file, `evaluate` JS, screenshot, and run `tests/headless/*.txt` commands through a page hook. | W-S14 | Runs a demo script against W-S04's page and saves a screenshot |
+| W-S15 | done 2026-10-15 (with W-L15; script runner: W-S19) | S | `tools/web/cdp.py`: minimal CDP client (stdlib + `websockets` from `.venv`): launch Chromium with 11.1 flags, open URL, stream console to a file, `evaluate` JS, screenshot, and run `tests/headless/*.txt` commands through a page hook. | W-S14 | Runs a demo script against W-S04's page and saves a screenshot |
 | W-S16 | todo | M | Pipeline warm-up: on startup, read the OPFS shader storage and create pipelines with `createRenderPipelineAsync` before the menu appears (design note from W-L10). | W-L10 | First menu frame has no shader-compile stalls > 50 ms in the console timing log |
 | W-S17 | todo | S | Web section for the README (dev): build steps (10.1), the localhost-only rule (D12), browser requirements, import steps. No public hosting instructions. | WM2 | README section reviewed by a large model |
 | W-S18 | todo | S | Main-thread JS input module `web/input.js`: keyboard (`KeyboardEvent.code` → SDL scancode table), pointer for ImGui, Gamepad API polling (standard mapping) into the SAB layout from W-L08's design note. | W-L08 | Unit page shows live values from a real or synthetic gamepad (`navigator.getGamepads` stub) |
+| W-S19 | todo | S | `tools/web/cdp.py`: run `tests/headless/*.txt` scripts (`wait`, `pad`, `axis`, `tap`, `capture`) through W-L08's input block and an exported capture entry (11.2), like `tools/xsend.py` natively. | W-L08, W-S15 | `main_menu_nav.txt` runs in Chromium and saves its captures |
 
 ### 16.4 Large-model tasks (L)
 
@@ -1612,7 +1697,8 @@ Every task's "Done when" implicitly includes **`tools/check_native.sh check` pas
 | W-L12 | todo | **Audio**: FFmpeg for wasm (XMA only), web audio driver with an AudioWorklet and SAB ring, AudioContext unlock on first gesture (8.5). | W-L01 | 8.5, SDK `src/audio/` | WM5 |
 | W-L13 | todo | **Option B (wasm32 remapped window)** if W-L03 or Safari requires it: heap range limits in the SDK, segment table macro, 32-bit pointer audit. | W-L03 | 7.1 | Same golden checks as WM2/WM4 in a wasm32 build |
 | W-L14 | todo | **Review gate** for small-model work: review each `review` task within a day; check native builds still pass. | — | 16.1 | Ongoing |
-| W-L15 | claimed claude-opus-5.5 2026-10-15 | **Web build system** (10.1, 10.2): `web-wasm64-release` preset, `TRIALSHD_WEB` (OFF by default, `FATAL_ERROR` without Emscripten, 7.8), static WebGPU renderer library, third-party subset, shell HTML, link flags; boots to WM1 with the GPU plugin stubbed. Also: kernel/threading web layer (timers thread, affinity no-ops, exception handler and `dlopen` compiled out, fibers per W-S08, sockets stubbed). | W-L01, W-L02, W-L04, W-S10, W-S11 | 3.5, 8.2, 8.4, 10 | WM1 |
+| W-L15 | review 2026-10-15 (needs macOS check) | **Web build system** (10.1, 10.2): `web-wasm64-release` preset, `TRIALSHD_WEB` (OFF by default, `FATAL_ERROR` without Emscripten, 7.8), static WebGPU renderer library, third-party subset, shell HTML, link flags; boots to WM1 with the GPU plugin stubbed. Also: kernel/threading web layer (timers thread, affinity no-ops, exception handler and `dlopen` compiled out, fibers per W-S08, sockets stubbed). | W-L01, W-L02, W-L04, W-S10, W-S11 | 3.5, 8.2, 8.4, 10 | WM1 |
+| W-L16 | todo | **Fast exact `fma` on wasm.** Wasm has no fused multiply-add; `std::fma` is musl's software routine, ~30% of the game's job-thread time in the W-L15 Node profile (`fma` + `normalize` under `sub_826697D0` and friends). 6,183 of the 6,440 generated `std::fma` calls are single-precision (`fmadds` family: `double(float(std::fma(a, b, c)))`). When `a` and `b` are float-representable, `a*b` is exact in double (48 of 53 bits), so `a*b + c` (with `-ffp-contract=off`) is bit-identical to `fma(a, b, c)`: checked 2026-10-15 over 198,959,703 random cases including NaN/Inf/subnormals and near-cancellation, 0 mismatches. Emit the single-precision forms through a macro (`REX_FMA_S`) that is `std::fma` natively (identity, as W-L02's macros) and a guarded fast path on the web; keep `std::fma` for the rest. | W-L02, W-L15 | 3.3, W-L02's identity-macro process | Native generated-code diff reviewed (macro names only) and golden scenes pass; web: same output in a W-L04-style unit test over the generated forms; profile share of `fma` < 5% |
 
 ### 16.5 Order and parallelism
 
@@ -1630,6 +1716,32 @@ details of W-L04 to W-L09. The critical path is W-L01 → W-L02/W-L04 → W-L15 
 W-L06/W-L07 (graphics).
 
 ### 16.6 Notes log
+
+- 2026-10-15 (claude-opus-5.5): **W-L15 → `review` (needs macOS check); WM1 reached in
+  Chromium.** The web build (`cmake/web/`, presets `web-wasm64-release` and
+  `web-wasm64-node`; 7.9.1 and 10.2 as built) links the SDK, all 107 generated files,
+  FFmpeg and the app into one wasm64 module (79 MB with function names). With the "null"
+  GPU plugin, headless Chromium 154 on the RX 6600 loads
+  `trials_hd.html?web_assets_url=/assets`, mounts the served game (30 files, 205.7 MiB,
+  fetched on first read), logs `web: first guest swap` one second after the mount, and then
+  runs the main menu at a steady 60 guest swaps per second (600 every 10 s, 72 draws per
+  frame), like the Node build (`tools/web/run_node.sh`). The first "hang" after loading was
+  the guest time base standing still: Emscripten has no `CLOCK_MONOTONIC_RAW` (fixed in
+  `clock_posix.cpp`). Other findings: `hardware_concurrency()` is `os.cpus()` under Node
+  (disruptorplus asked per wait); SDK kernel stubs are weak on the web so the app's
+  exports override them in a static link; wasm has no `fma` instruction (new **W-L16**,
+  exact fast path checked on 199 M cases); with `fps_unlock` the 1 ms vblank keeps one
+  thread busy running the guest interrupt callback. Native: `flock
+  out/native-web-check.lock tools/check_native.sh check out/native_baseline_claude` (the
+  baseline's PCH line updated to pi-gpt's committed W-L02 template): `webgpu: 9 captures`,
+  `worst 38.8 dB`; `vulkan: 9 captures`, `worst 40.5 dB`; `NATIVE CHECK PASSED`. Edits after
+  that run are web-only branches (console logging in `logging.cpp`) or restore the pinned
+  file (the W-L04 `if(EMSCRIPTEN)` list in the SDK's `src/core/CMakeLists.txt`, unused
+  now that the web build has its own lists). **W-S15 done** with it (`cdp.py`: console of
+  the page and of every worker, `--until`, `--eval`, `--screenshot`; on W-S04's page the
+  screenshot has the triangle, (160,120) = (255,51,0)); its `tests/headless` runner is
+  new W-S19 (needs W-L08). Next on the critical path: W-L06/W-L07 (renderer, WM2), W-L08
+  (input), W-L10 (OPFS import), W-L12 (audio).
 
 - 2026-10-15 (pi-gpt): **W-S11 → review (needs macOS check)**. Native rounding
   probe built without modifying the normal build; 80-second ride passed and observed
