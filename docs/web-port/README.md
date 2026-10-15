@@ -65,7 +65,7 @@ Decisions (each is justified in section 7; change them only with a Notes-log ent
 | --- | --- | --- |
 | D1 | **wasm64 (Memory64) first**, wasm32 kept as a measured fallback | The guest needs a 3 GiB window plus ~1 GiB host heap (4.4); wasm32 caps at 4 GiB total. The SDK assumes 64-bit host pointers everywhere. Shared Memory64 + threads already works in Chromium (5.6). |
 | D2 | **Guest window of 2.75 GiB, aliases folded by a 256-entry table** (`addr >> 24`): physical views, `0x7F…` and `0x9…` map onto their native targets (7.9.2) | Wasm has no page aliasing; the codegen already routes every access through `REX_PHYS_HOST_OFFSET` (3.3); one load + add per access. |
-| D3 | **GPU-visible write tracking from codegen**, not page protection: physical-range stores set a bit in a 16 KiB dirty bitmap | No `mprotect`/`SIGSEGV` in wasm. The physical-range branch exists anyway for D2. |
+| D3 | **GPU-visible write tracking from codegen**, not page protection: physical-range stores set a bit in a 16 KiB dirty bitmap | No `mprotect`/`SIGSEGV` in wasm. Stores check the folded host physical range; loads only translate. |
 | D4 | **Real pthreads** for guest threads (36 host threads measured), `PROXY_TO_PTHREAD`, browser main thread kept free | Guest code blocks constantly; `Atomics.wait` is forbidden on the main thread. |
 | D5 | **One GPU worker owns every WebGPU object**: the command-processor `XHostThread` gets the `OffscreenCanvas` and also paints the presenter and ImGui (new paint mode, 7.9.7) | WebGPU objects belong to the thread that created them; the command processor must stay an `XHostThread` because it runs guest interrupt callbacks. |
 | D6 | **The GPU worker yields to its event loop at swaps and waits** through one `YieldToEventLoop()` (JSPI; Asyncify limited to the GPU worker's stack as fallback; 7.9.5) | Browser WebGPU only delivers `mapAsync`/device callbacks and presents the canvas when the worker returns to its event loop. |
@@ -435,6 +435,20 @@ em++ [-sMEMORY64=1] -O2 -std=gnu++23 -msimd128 -pthread -matomics -mbulk-memory 
 The code is 1.28–1.33× the x86 size, below the reference port's 47 MiB. Relocatable
 objects pad indices to 5-byte LEBs, so the linked size will be somewhat smaller.
 
+**Real-header regression checks (takeover, 2026-10-15):**
+`source ~/emsdk/emsdk_env.sh && tools/web/tests/run_sdk_headers.sh` compiles and runs
+standalone wasm64 assertions with Emscripten's Node 24 and pthreads, using the actual
+SDK headers. Passed: fold constants; scalar/vector/CAS/zero stores and dirty bits
+(including zero size, nonphysical pointers, cross-page writes and end clamping);
+float-vs-byte CR masks; all four FPSCR rounding modes, ties-to-even, NaN/overflow;
+thread-local FPSCR shadow; VMX bit shifts across the 64-bit boundary and byte shifts.
+Debug non-nearest-mode diagnostics were observed. The tests contain no game code.
+
+`source ~/emsdk/emsdk_env.sh && python3 tools/web/compile_generated.py -j 8` is the
+separate full-game compile check: real headers, no Linux platform spoof, no scratch
+include copy, and no regeneration/writes to `generated/default`. Objects go only to
+`out/web-spikes/recomp-objects/` and must never be published.
+
 ---
 
 ## 7. Architecture
@@ -601,7 +615,7 @@ reviewed as a native change too):
 | Task | Shared code touched | Extra native proof |
 | --- | --- | --- |
 | W-S10, W-S11 | SDK headers (`platform.h`, `fpscr.h`, `intrinsics.h`, `chrono.h`) | Only new `__EMSCRIPTEN__`/`__wasm__` branches; `check_native.sh check` passes with an **unchanged** generated-code fingerprint |
-| W-L02 | Codegen (`setFromMask` rename; web memory macros) | The rename is the only native difference: regenerate, confirm the diff of `generated/default` is just the method names, run golden scenes, then re-record the baseline. Web macros are emitted inside `#if defined(__EMSCRIPTEN__)` in the PCH header only |
+| W-L02 | Codegen identity write macros; wasm mask dispatch and memory macros | Native mask overloads stay unchanged. Verify raw-write macros expand to the original expressions; new address/load/store definitions are in the PCH's `__EMSCRIPTEN__` block. Check native golden scenes and review generated differences before re-recording the baseline |
 | W-L04, W-L05 | SDK memory, shared memory, primitive processor, renderer texture cache | Web implementation in `memory_emscripten.cpp` / `#if` branches; native watch path unchanged |
 | W-L06, W-L07, W-L09 | Renderer (`src/gpu_webgpu/`) | `#if __EMSCRIPTEN__` only; the split mirror (W-L09) is opt-in natively (`--webgpu_split_mirror`, default off); native FPS within 3% of the numbers in renderer doc 16.6 |
 | W-L15 | CMake, SDK build | Native configure output and targets unchanged; `TRIALSHD_WEB` guarded |
@@ -692,13 +706,17 @@ Codegen (W-L02) emits, for the web only:
 ```cpp
 #if defined(__EMSCRIPTEN__)
 #include <rex/memory/web_guest.h>
+#undef REX_PHYS_HOST_OFFSET
 #define REX_PHYS_HOST_OFFSET(addr) (::rex::memory::web::kFold[(u32)(addr) >> 24])
+#undef REX_RAW_ADDR
+#define REX_RAW_ADDR(x) (base + ((int64_t)(u32)(x) + REX_PHYS_HOST_OFFSET(x)))
 #endif
 ```
 
-so `REX_RAW_ADDR`, `REX_LOAD_*` and `REX_STORE_*` keep their native text. The `base`
-argument of every recompiled function is the window start (as `virtual_membase_` is
-natively).
+The sum is formed as an integer **before** adding `base`, avoiding an out-of-object
+intermediate pointer for high aliases. Web scalar loads use this raw-address macro;
+stores use the tracking helpers. Native macro definitions stay unchanged. The `base`
+argument is the window start (as `virtual_membase_` is natively).
 
 **`Memory` changes (W-L04, as built 2026-10-15):**
 
@@ -777,13 +795,16 @@ clear the bit and upload old data before the write lands). Forms in the generate
 
 | Form | Count | Web emission (W-L02) |
 | --- | --- | --- |
-| `REX_STORE_U8/16/32/64(x, y)` | (part of 448,775 accesses) | `rex_web_store_uN(REX_RAW_ADDR(x), y)`: inline store + `MarkHostWrite` |
+| `REX_STORE_U8/16/32/64(x, y)` | (part of 448,775 accesses) | `Store8/16/32/64(REX_RAW_ADDR(x), y)`: inline store + `MarkHostWrite` |
 | `REX_MM_STORE_*` | 28 | non-MMIO branch as above |
-| `simde_mm_store_si128((simde__m128i*)REX_RAW_ADDR(ea), v)` (`stvx`, `stvlx`/`stvrx` paths) | ≈ 5,700 | `rex_web_store128(REX_RAW_ADDR(ea), v)` |
+| `stvx`/`stvx128` raw 128-bit stores | 5,672 | `REX_STORE_V128` → `Store128` → `MarkHostWrite` |
 | `__sync_bool_compare_and_swap(...REX_RAW_ADDR(ea)...)` (`stwcx.`, `stdcx.`) | 285 | CAS, then mark when it succeeded |
 | `memset((void*)REX_RAW_ADDR(ea), 0, 32/128)` (`dcbz`, `dcbz128`) | 86 | memset + mark |
 
-W-L02 must grep the codegen builders for any other raw write and add it here.
+W-L02 builder audit: all remaining `REX_RAW_ADDR` uses are loads (`lwarx`/`ldarx`
+reservation loads and `lvx`/`lvlx`/`lvrx`). `stvlx`/`stvrx` are byte loops using
+`REX_STORE_U8`, so scalar tracking covers them. No other raw guest writer remains in
+`src/codegen/builders/`; raw-pointer stores/CAS/cache-zero go through these wrappers.
 
 **Host writers** call `MarkGuestWrite` after writing guest memory (list from W-S09): file
 reads into guest buffers, `src/crt_hooks.cpp` `memcpy`/`memset` hooks, XMA output, kernel
@@ -1618,6 +1639,17 @@ W-L06/W-L07 (graphics).
   failure is the `trials_hd_pch.h` fingerprint, caused by pi-gpt's uncommitted W-L02
   template edit (`REX_RAW_ADDR` integer fold inside `#if defined(__EMSCRIPTEN__)`), not
   by W-L04. W-L05 and W-L15 can build on these interfaces now.
+
+- 2026-10-15 (pi-gpt): full real-header wasm64 compile passed all 107 files in
+  284.7 s / 8 jobs (concurrent native work), after the `dynlib.h` gate fix. Header
+  regressions also pass. Final W-L02 safety fix folds integer offsets before adding
+  the base pointer, including scalar loads; the native generator is being rebuilt
+  and explicitly invoked with `--ignore-stamp` (not `--force`, validation retained).
+  Expected generated change is only the web PCH block; native prefix/other files
+  are asserted unchanged. SDK patch update is scoped to the owned PCH-template
+  block (so W-L04 work is not captured), and applies to a clean pinned SDK index.
+  Current-tree whole reverse-check differs only because W-L04 appended runtime
+  declarations to `web_guest.h`; its in-progress work is preserved.
 
 - 2026-10-15 (claude-opus-5.5): claimed **W-L04** (web runtime memory: window, heaps,
   `MarkGuestWrite`, `DeliverPhysicalWrites`, dirty bitmap). New files

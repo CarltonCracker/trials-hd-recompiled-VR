@@ -830,10 +830,10 @@ index 4edde2b..022c961 100644
    };
  
 diff --git a/resources/templates/codegen/pch_h.inja b/resources/templates/codegen/pch_h.inja
-index 68274d2..eef5a11 100644
+index 68274d2..df2e325 100644
 --- a/resources/templates/codegen/pch_h.inja
 +++ b/resources/templates/codegen/pch_h.inja
-@@ -333,3 +333,84 @@ inline std::atomic<i32>& ppc_global_lock_count_() {
+@@ -333,3 +333,96 @@ inline std::atomic<i32>& ppc_global_lock_count_() {
      assert(old_count_ >= 1 && "LeaveGlobalLock called without matching EnterGlobalLock"); \
      rex::thread::global_critical_region::mutex().unlock();                                \
    } while (0)
@@ -864,6 +864,18 @@ index 68274d2..eef5a11 100644
 +
 +#undef REX_PHYS_HOST_OFFSET
 +#define REX_PHYS_HOST_OFFSET(addr) (::rex::memory::web::kFold[(u32)(addr) >> 24])
++
++// Fold integer offsets first: base + a high guest alias would leave the window.
++#undef REX_RAW_ADDR
++#define REX_RAW_ADDR(x) (base + ((int64_t)(u32)(x) + REX_PHYS_HOST_OFFSET(x)))
++#undef REX_LOAD_U8
++#undef REX_LOAD_U16
++#undef REX_LOAD_U32
++#undef REX_LOAD_U64
++#define REX_LOAD_U8(x) (*(volatile u8*)REX_RAW_ADDR(x))
++#define REX_LOAD_U16(x) __builtin_bswap16(*(volatile u16*)REX_RAW_ADDR(x))
++#define REX_LOAD_U32(x) __builtin_bswap32(*(volatile u32*)REX_RAW_ADDR(x))
++#define REX_LOAD_U64(x) __builtin_bswap64(*(volatile u64*)REX_RAW_ADDR(x))
 +
 +#undef REX_STORE_U8
 +#undef REX_STORE_U16
