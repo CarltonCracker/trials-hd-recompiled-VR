@@ -456,6 +456,12 @@ Gamepad/keyboard ──main thread──▶ SAB input block ──▶ input driv
   `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy:
   require-corp` (needed for `SharedArrayBuffer`), the `application/wasm` type and
   compression.
+- `tools/web/serve.py` is implemented (W-S14): `python3 tools/web/serve.py <build-folder>`
+  defaults to loopback port 8080, sends COOP/COEP/CORP on every response, serves
+  `.wasm` as `application/wasm`, and negotiates existing `.br`/`.gz` siblings. Directory
+  listings and symlinks escaping the build folder are denied. Root serves `index.html`
+  or `trials_hd.html`. Checks: `python3 tools/web/test_serve.py` (7 tests); Chromium 154
+  with a served test page reports `crossOriginIsolated=true` (2026-10-15).
 - The page asks for the user's game package on first run (section 8.6).
 - **Nothing is uploaded or hosted.** Document this in the web README section, and make
   `tools/web/serve.py` bind to `127.0.0.1` by default.
