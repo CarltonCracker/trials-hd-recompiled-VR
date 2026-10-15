@@ -3,6 +3,7 @@
 #include "webgpu_backend.h"
 
 #include <algorithm>
+#include <bit>
 #include <array>
 #include <cmath>
 #include <cstring>
@@ -24,6 +25,7 @@
 #include "pipeline_state.h"
 #include "primitive_converter.h"
 #include "render_target_cache.h"
+#include "resolve_engine.h"
 #include "texture_cache.h"
 #include "webgpu_presenter.h"
 #include "webgpu_provider.h"
@@ -127,6 +129,7 @@ WebGpuBackend::~WebGpuBackend() {
   draw_bind_group_ = nullptr;
   shared_memory_bind_group_ = nullptr;
   State().texture_bind_groups.clear();
+  resolve_engine_.reset();
   texture_cache_.reset();
   render_target_cache_.reset();
   pipeline_cache_.reset();
@@ -191,13 +194,16 @@ bool WebGpuBackend::Initialize(memory::Memory& memory, const RegisterFile& regis
   if (!pipeline_cache_->Initialize()) {
     return false;
   }
-  texture_cache_ = std::make_unique<TextureCache>(provider_, memory, *shared_memory_);
+  texture_cache_ = std::make_unique<TextureCache>(provider_, memory, *shared_memory_, *frame_recorder_);
   if (!texture_cache_->Initialize()) {
     return false;
   }
   render_target_cache_ = std::make_unique<RenderTargetCache>(
-      provider_, uint32_t(std::clamp(REXCVAR_GET(draw_resolution_scale_x), 1, 3)),
+      provider_, *frame_recorder_, uint32_t(std::clamp(REXCVAR_GET(draw_resolution_scale_x), 1, 3)),
       uint32_t(std::clamp(REXCVAR_GET(draw_resolution_scale_y), 1, 3)));
+  resolve_engine_ = std::make_unique<ResolveEngine>(provider_, memory, *frame_recorder_,
+      *render_target_cache_, *texture_cache_);
+  if (!resolve_engine_->Initialize()) { return false; }
 
   // Group 0: the uniform ring with one window per binding (7.6.5).
   static constexpr std::array<std::pair<uint32_t, uint64_t>, 5> kUniformWindows = {{
@@ -928,12 +934,19 @@ bool WebGpuBackend::Resolve(const ResolveSnapshot& resolve) {
   uint32_t scale_x = render_target_cache_->scale_x();
   uint32_t scale_y = render_target_cache_->scale_y();
 
-  // Copy: remember the source region for the frontbuffer (L-09 replaces this
-  // with real resolve destinations in the texture cache).
-  if (info.rb_copy_control.copy_command != xenos::CopyCommand::kNull && !info.IsCopyingDepth() &&
-      info.height_div_8) {
-    RenderTarget* source = render_target_cache_->FindLastUsed(info.color_original_base, false);
-    if (source) {
+  bool copy = info.rb_copy_control.copy_command != xenos::CopyCommand::kNull && info.height_div_8;
+  RenderTarget* copy_source =
+      copy ? render_target_cache_->GetForResolve(*resolve.regs, info, info.IsCopyingDepth())
+           : nullptr;
+  // Resolve into a separate texture before clears or later draws modify the RT.
+  if (copy_source) {
+    resolve_engine_->Copy(info, *copy_source);
+  }
+
+  // Keep the frontbuffer region for the existing presentation path.
+  if (copy_source && !info.IsCopyingDepth()) {
+    RenderTarget* source = copy_source;
+    {
       const draw_util::ResolveEdramInfo& edram = info.color_edram_info;
       uint32_t samples_x = edram.msaa_samples == xenos::MsaaSamples::k4X ? 2 : 1;
       uint32_t samples_y = edram.msaa_samples == xenos::MsaaSamples::k1X ? 1 : 2;
@@ -963,14 +976,44 @@ bool WebGpuBackend::Resolve(const ResolveSnapshot& resolve) {
     RenderPassTargets clear_targets;
     std::array<float, 4> color_value = {};
     RenderTarget* color_target =
-        clear_color ? render_target_cache_->FindLastUsed(info.color_original_base, false) : nullptr;
+        clear_color ? render_target_cache_->GetForResolve(*resolve.regs, info, false) : nullptr;
     RenderTarget* depth_target =
-        clear_depth ? render_target_cache_->FindLastUsed(info.depth_original_base, true) : nullptr;
+        clear_depth ? render_target_cache_->GetForResolve(*resolve.regs, info, true) : nullptr;
     frame_recorder_->EndRenderPass();
     if (color_target) {
+      // The clear value is packed in the EDRAM format (same layout as
+      // shaders/transfer.wgsl unpack).
       uint32_t value = info.rb_color_clear;
-      for (uint32_t i = 0; i < 4; ++i) {
-        color_value[i] = float((value >> (8 * i)) & 0xFF) / 255.0f;
+      switch (xenos::ColorRenderTargetFormat(color_target->key.format)) {
+        case xenos::ColorRenderTargetFormat::k_2_10_10_10:
+        case xenos::ColorRenderTargetFormat::k_2_10_10_10_AS_10_10_10_10:
+          for (uint32_t i = 0; i < 3; ++i) {
+            color_value[i] = float((value >> (10 * i)) & 0x3FF) / 1023.0f;
+          }
+          color_value[3] = float(value >> 30) / 3.0f;
+          break;
+        case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT:
+        case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT_AS_16_16_16_16:
+          for (uint32_t i = 0; i < 3; ++i) {
+            color_value[i] = xenos::Float7e3To32((value >> (10 * i)) & 0x3FF);
+          }
+          color_value[3] = float(value >> 30) / 3.0f;
+          break;
+        case xenos::ColorRenderTargetFormat::k_16_16:
+          for (uint32_t i = 0; i < 2; ++i) {
+            color_value[i] = float(int16_t(value >> (16 * i))) * (32.0f / 32767.0f) *
+                             color_target->format_output_scale;
+          }
+          break;
+        case xenos::ColorRenderTargetFormat::k_32_FLOAT:
+          color_value[0] = std::bit_cast<float>(value);
+          break;
+        default:
+          // shortcut: k_16_16_FLOAT and 64bpp clears decoded as 8888 (unused by Trials).
+          for (uint32_t i = 0; i < 4; ++i) {
+            color_value[i] = float((value >> (8 * i)) & 0xFF) / 255.0f;
+          }
+          break;
       }
       wgpu::RenderPassColorAttachment attachment;
       attachment.view = color_target->view;

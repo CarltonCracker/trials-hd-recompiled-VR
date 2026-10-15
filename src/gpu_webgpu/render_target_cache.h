@@ -1,7 +1,9 @@
 // rexgpu-webgpu - render-target cache (section 8.7): host textures keyed by
-// the guest EDRAM location, pitch, format and sample count. No EDRAM
-// emulation: a render target is a texture, and overlapping EDRAM ranges with
-// different formats are separate textures (aliasing is logged, not copied).
+// the guest EDRAM location, pitch, format and sample count. The cache tracks
+// which target last owned each EDRAM tile; a target taking over tiles from
+// another (the game reinterprets 1x targets as 4x MSAA for downsampling, depth
+// as color, and so on) gets the old contents through a guest-layout EDRAM
+// buffer (shaders/transfer.wgsl).
 
 #pragma once
 
@@ -13,6 +15,7 @@
 #include <webgpu/webgpu_cpp.h>
 
 #include <rex/graphics/register_file.h>
+#include <rex/graphics/util/draw.h>
 #include <rex/graphics/xenos.h>
 
 namespace rex::ui::webgpu {
@@ -20,6 +23,8 @@ class WebGpuProvider;
 }  // namespace rex::ui::webgpu
 
 namespace rex::graphics::webgpu {
+
+class FrameRecorder;
 
 union RenderTargetKey {
   uint64_t value = 0;
@@ -36,11 +41,13 @@ struct RenderTarget {
   RenderTargetKey key;
   wgpu::Texture texture;
   wgpu::TextureView view;
+  wgpu::TextureView depth_only_view;
   wgpu::TextureFormat host_format = wgpu::TextureFormat::Undefined;
   uint32_t sample_count = 1;
   // Host pixels (scaled).
   uint32_t width = 0;
   uint32_t height = 0;
+  uint32_t pitch_tiles = 1;
   // Multiplier for the pixel shader output (format range scale; the exponent
   // bias is per draw).
   float format_output_scale = 1.0f;
@@ -59,7 +66,8 @@ class RenderTargetCache {
     uint32_t height = 0;
   };
 
-  RenderTargetCache(ui::webgpu::WebGpuProvider& provider, uint32_t scale_x, uint32_t scale_y);
+  RenderTargetCache(ui::webgpu::WebGpuProvider& provider, FrameRecorder& frame_recorder,
+                    uint32_t scale_x, uint32_t scale_y);
   ~RenderTargetCache();
 
   uint32_t scale_x() const { return scale_x_; }
@@ -77,19 +85,33 @@ class RenderTargetCache {
   wgpu::TextureFormat GetDepthHostFormat(xenos::DepthRenderTargetFormat format) const;
   static bool HostDepthFormatHasStencil(wgpu::TextureFormat format);
 
-  // The most recently used target at an EDRAM base (for resolves), or null.
-  RenderTarget* FindLastUsed(uint32_t base_tiles, bool is_depth) const;
+  // The target a resolve reads or clears (the resolve's own base, pitch,
+  // format and sample count), holding the current contents of its tiles.
+  RenderTarget* GetForResolve(const RegisterFile& regs, const draw_util::ResolveInfo& info,
+                              bool is_depth);
 
  private:
   RenderTarget* GetOrCreate(RenderTargetKey key);
+  // Takes ownership of the target's tiles down to `rows` guest pixel rows,
+  // transferring tiles owned by other targets (except those in `bound`).
+  void Acquire(RenderTarget* target, uint32_t rows, const Binding* bound);
+  void Transfer(RenderTarget* source, RenderTarget* dest, uint32_t tile_first,
+                uint32_t tile_count);
+  bool InitializeTransfer();
 
   ui::webgpu::WebGpuProvider& provider_;
+  FrameRecorder& frame_recorder_;
   uint32_t scale_x_;
   uint32_t scale_y_;
   std::unordered_map<uint64_t, std::unique_ptr<RenderTarget>> targets_;
-  // Last target used at each EDRAM base, color and depth separately.
-  std::unordered_map<uint32_t, RenderTarget*> last_color_at_base_;
-  std::unordered_map<uint32_t, RenderTarget*> last_depth_at_base_;
+  // Last target that wrote each EDRAM tile.
+  std::array<RenderTarget*, xenos::kEdramTileCount> owners_ = {};
+  // Guest-layout EDRAM (32 bits per sample, scaled) for transfers.
+  wgpu::Buffer edram_;
+  wgpu::ShaderModule transfer_module_;
+  // Store: [color, color 4x, depth, depth 4x]. Load: by host format and samples.
+  std::array<wgpu::ComputePipeline, 4> store_pipelines_;
+  std::unordered_map<uint64_t, wgpu::RenderPipeline> load_pipelines_;
 };
 
 }  // namespace rex::graphics::webgpu

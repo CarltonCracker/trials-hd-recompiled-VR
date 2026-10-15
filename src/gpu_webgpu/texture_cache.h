@@ -19,6 +19,7 @@
 
 #include <rex/graphics/pipeline/shader/shader.h>
 #include <rex/graphics/xenos.h>
+#include <rex/thread/mutex.h>
 
 #include "sampler_cache.h"
 
@@ -32,11 +33,12 @@ class WebGpuProvider;
 namespace rex::graphics::webgpu {
 
 class WebGpuSharedMemory;
+class FrameRecorder;
 
 class TextureCache {
  public:
   TextureCache(ui::webgpu::WebGpuProvider& provider, memory::Memory& memory,
-               WebGpuSharedMemory& shared_memory);
+               WebGpuSharedMemory& shared_memory, FrameRecorder& frame_recorder);
   ~TextureCache();
 
   bool Initialize();
@@ -52,7 +54,9 @@ class TextureCache {
 
   // A host texture standing in for the guest memory at a resolve destination
   // (physical address). Replaces any previous alias at the address.
-  void SetResolveAlias(uint32_t address, wgpu::Texture texture, uint32_t width, uint32_t height);
+  wgpu::Texture GetOrCreateResolveAlias(uint32_t address, wgpu::TextureFormat format,
+      uint32_t width, uint32_t height, uint32_t guest_start, uint32_t guest_length,
+      uint32_t scale_x, uint32_t scale_y);
   // Resolve aliases are dropped when the CPU writes the memory again.
 
   size_t texture_count() const { return textures_.size(); }
@@ -104,8 +108,18 @@ class TextureCache {
     wgpu::TextureView view;
     uint32_t width = 0;
     uint32_t height = 0;
+    wgpu::Texture sampled_texture;
+    wgpu::TextureView sampled_view;
+    uint32_t sampled_width = 0, sampled_height = 0;
+    uint32_t scale_x = 1, scale_y = 1;
+    bool sampled_dirty = true;
+    uint32_t guest_start = 0;
+    uint32_t guest_length = 0;
+    bool dirty = false;
   };
 
+  static void AliasWatchCallback(const std::unique_lock<std::recursive_mutex>& global_lock,
+      void* context, uint32_t first, uint32_t last, bool invalidated_by_gpu);
   bool LoadTexture(Texture& texture);
   static void WatchCallback(const std::unique_lock<std::recursive_mutex>& global_lock,
                             void* context, void* data, uint64_t argument, bool invalidated_by_gpu);
@@ -113,8 +127,11 @@ class TextureCache {
   ui::webgpu::WebGpuProvider& provider_;
   memory::Memory& memory_;
   WebGpuSharedMemory& shared_memory_;
+  FrameRecorder& frame_recorder_;
   std::unordered_map<Key, std::unique_ptr<Texture>, KeyHash> textures_;
   std::unordered_map<uint32_t, ResolveAlias> resolve_aliases_;
+  rex::thread::global_critical_region alias_mutex_;
+  void* alias_watch_ = nullptr;
   SamplerCache sampler_cache_;
   wgpu::TextureView black_2d_;
   wgpu::TextureView black_cube_;

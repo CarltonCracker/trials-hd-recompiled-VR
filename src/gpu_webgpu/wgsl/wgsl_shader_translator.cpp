@@ -191,9 +191,20 @@ fn xe_texture_postprocess(value: vec4f, fetch: u32) -> vec4f {
   // 8-bit-per-component formats are stored unorm on the host.
   let is_8bpc = format == 2u || format == 6u || format == 8u || format == 9u || format == 10u ||
                 format == 14u;
+  let fixed_components = select(select(0u, 1u, format == 24u),
+                                select(2u, 4u, format == 26u), format == 25u || format == 26u);
+  let integer = (word_3 & 1u) != 0u;
   var v = value;
   for (var i = 0u; i < 4u; i++) {
     let sign = (word_0 >> (2u + 2u * i)) & 3u;
+    if (i < fixed_components) {
+      if (sign == 1u) {
+        v[i] = select(v[i], v[i] - 65536.0, v[i] >= 32768.0);
+        if (!integer) { v[i] = max(v[i] / 32767.0, -1.0); }
+      } else if (!integer) {
+        v[i] /= 65535.0;
+      }
+    }
     if (sign == 1u && is_8bpc) {
       let n = round(v[i] * 255.0);
       v[i] = max(select(n, n - 256.0, n >= 128.0) / 127.0, -1.0);

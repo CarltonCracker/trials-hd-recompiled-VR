@@ -1211,6 +1211,18 @@ only WGSL.
   `elide_rt_transfers` drops most of them for Trials. **Measure** how many remain
   (probe `RenderTargetCache` transfer code with gdb, as in `probe/`) before implementing:
   if none matter visually, skip aliasing support and log when it would have happened.
+  **Measured and implemented (2026-10-14):** they matter. Trials draws the scene at
+  1280x672 1x and resolves the same tiles as 640x336 4x MSAA (a free 2x2 downsample);
+  the light pass uses the 1x depth buffer as 4x MSAA half-resolution depth; the
+  luminance chain and bloom do the same. Without transfers the HDR light buffer kept
+  accumulating stale data and the frame went white. `RenderTargetCache` now records the
+  last owner of each of the 2048 tiles. When a draw (rows bounded by its scissor) or a
+  resolve (`GetForResolve`, keyed by the resolve's own pitch, format and MSAA) takes
+  tiles from another target, `shaders/transfer.wgsl` stores the old target's samples to
+  a 10 MiB (× scale²) guest-layout EDRAM buffer (`XeEdramOffsetInts` addressing, depth
+  half-tile swap) and loads them into the new target with a per-sample fragment pass.
+  Not transferred yet: stencil (WebGPU has no stencil export; needs 8 bit-plane passes)
+  and 64bpp formats (unused by Trials). Tests: `tests/gpu_webgpu/transfer_test.cpp`.
 - **Render passes:** a pass lives while the bound RT set is unchanged; load = `Load`
   (or `Clear` when the game's clear was detected), store = `Store`. Trials switches RTs
   about 20 times per frame, so roughly 20–30 passes per frame.
@@ -1249,6 +1261,13 @@ Port the resolve math (tiling, endian, format packing) from the XeSL sources in
 `thirdparty/rexglue-sdk/src/graphics/shaders/xesl/` for case 3 only. **Pin note:** those
 sources must stay at Xenia `0b2ffa31` (see `resolve_shader` notes in
 `src/graphics/shaders/xesl/README.md`).
+
+**Implemented (2026-10-14):** `ResolveEngine` copies into resolve aliases (2), clears
+go to the resolve's own target (1), and resolves of at most `readback_resolve_max_bytes`
+are also written to guest memory (3): the alias region is copied to a per-extent map
+buffer, mapped after its submission and written (32bpp packing, `GetTiledOffset2D`,
+endian swap) at a later resolve of the same extent, like the Vulkan "fast" mode, so the
+GPU is never waited for. The luminance values arrive one or two frames late.
 
 ### 8.9 Texture cache
 
@@ -1570,7 +1589,7 @@ Each milestone ends with a headless run on Linux and a short note in this docume
 | M0 | done 2026-10-14 | Dawn builds (prefix build, pinned); `tools/webgpu_smoke` restored and extended: SDL3 window on X11 **and** Wayland, triangle, resize, VSync on/off, adapter list, and a synthetic 1,500-draw frame to measure Dawn's CPU cost per draw (7.5) | smoke runs on the RX 6600 and RTX 2070; µs/draw recorded in 7.5; features and limits in 9.1 |
 | M1 | done 2026-10-14 c2c132d | `rexgpu-webgpu` plugin skeleton: provider, presenter (clear color + letterbox), ImGui drawer, command processor that accepts everything and draws nothing. Game boots and runs with `--gpu_plugin=webgpu`; F1 settings menu works | menus navigable blind; headless run completes |
 | M2 | todo | `tools/xenos2wgsl`: all 74 cached shaders translate and pass Tint validation; interpreter comparison for vertex shaders | 74/74 valid |
-| M3 | todo | First geometry: guest memory ranges, vertex pulling, constants, RT cache for `k_8_8_8_8` + depth, triangle lists/strips, frontbuffer resolve → present. Untextured silhouettes of the menu and track | silhouettes match Vulkan captures |
+| M3 | done 2026-10-14 (riding scene lit and textured; see notes log) | First geometry: guest memory ranges, vertex pulling, constants, RT cache for `k_8_8_8_8` + depth, triangle lists/strips, frontbuffer resolve → present. Untextured silhouettes of the menu and track | silhouettes match Vulkan captures |
 | M4 | todo | Textures: BC1/BC3/8888/k_8/cube loads, samplers, swizzles, signedness, exp adjust | menus pixel-close to Vulkan |
 | M5 | todo | All RT formats of section 5.3, 4x MSAA, float depth + stencil, rect/quad/fan conversion, clears, GPU-consumed resolves with conversions (shadow `k_16_16`, depth `k_24_8_FLOAT`, 7e3 chain, bloom) | riding scene close to Vulkan except particles |
 | M6 | todo | memexport compute particles, occlusion queries, async luminance readback, gamma ramp | golden scenes pass thresholds |
@@ -1884,12 +1903,12 @@ debugging. Several can run in parallel once L-01 to L-03 exist.
 | L-05 | todo (partial, claude-opus-5.5 2026-10-14: see notes log) | **`tools/xenos2wgsl` and the differential test harness**: translate every cached shader, validate with Tint, run VS bodies as compute and compare against the SDK `ShaderInterpreter` on recorded inputs (inputs stay local). | L-04a, S-02 | `interpreter.cpp` | `xenos2wgsl --validate --diff` passes 74/74 |
 | L-06 | done pi-gpt 2026-10-14 86e8eaa | **Guest memory mirror.** Desktop `WebGpuSharedMemory : SharedMemory` with a 512 MiB buffer and SDK page watches (7.6.3 supersedes the older per-range design); ordered dirty uploads and memexport/resolve destination handling. Streaming classification remains measurement-led (S-34). | L-03 | 8.3, `shared_memory.{h,cpp}`, `mmio_handler.cpp` | correct data in M3 with < 0.3 ms per frame CPU in this code |
 | L-07 | todo (partial, claude-opus-5.5 2026-10-14: see notes log) | **Pipeline cache and binding model.** Keys, bind group layouts, dynamic offsets, async creation, pipeline pre-creation list, WGSL cache, Dawn blob cache. | L-01, L-04a | 8.5, `vulkan/pipeline_cache.cpp` | no hitch after the first run; pipeline count logged |
-| L-08 | todo (partial, claude-opus-5.5 2026-10-14: see notes log) | **Render-target cache.** Keys, sizing (draw extent estimator), formats with feature fallbacks, 4x MSAA, `depth32float-stencil8`, scaling 1x/2x/3x (and non-integer if feasible), clear detection, aliasing detection and the minimal transfer path S-04 shows to be necessary. | L-03, S-23 | 8.7, `pipeline/render_target/cache.cpp`, `vulkan/render_target_cache.cpp` | all RT configs of 5.3 render; aliasing events logged |
-| L-09 | claimed claude-opus-5.5 2026-10-14 | **Resolve engine.** Classification (clear, GPU-consumed, CPU-visible, frontbuffer), conversions of section 5.7, resolve-to-texture aliases in the texture cache, MSAA sample selection, CPU-visible writes through the readback manager. | L-08, L-10 | 8.8, `util/draw.cpp` (`ResolveInfo`), XeSL resolve sources | shadows, fog, bloom and exposure match the Vulkan build |
-| L-10 | claimed claude-opus-5.5 2026-10-14 | **Texture cache.** Keys, layout math reuse, upload plus untile dispatch (S-19 shaders), BC direct, cube maps, invalidation from dirty ranges and resolves, eviction. | L-06, S-19, S-23 | 8.9, `pipeline/texture/cache.cpp`, `vulkan/texture_cache.cpp` | textures correct in all golden scenes; texture-load GPU time < 0.2 ms per frame in gameplay |
+| L-08 | todo (partial, claude-opus-5.5 2026-10-14: EDRAM ownership transfers done; stencil/64bpp transfers, height estimation open; see notes log) | **Render-target cache.** Keys, sizing (draw extent estimator), formats with feature fallbacks, 4x MSAA, `depth32float-stencil8`, scaling 1x/2x/3x (and non-integer if feasible), clear detection, aliasing detection and the minimal transfer path S-04 shows to be necessary. | L-03, S-23 | 8.7, `pipeline/render_target/cache.cpp`, `vulkan/render_target_cache.cpp` | all RT configs of 5.3 render; aliasing events logged |
+| L-09 | todo (partial, pi-gpt + claude-opus-5.5 2026-10-14: aliases, per-format clears, CPU readback done; parity check vs Vulkan open; see notes log) | **Resolve engine.** Classification (clear, GPU-consumed, CPU-visible, frontbuffer), conversions of section 5.7, resolve-to-texture aliases in the texture cache, MSAA sample selection, CPU-visible writes through the readback manager. | L-08, L-10 | 8.8, `util/draw.cpp` (`ResolveInfo`), XeSL resolve sources | shadows, fog, bloom and exposure match the Vulkan build |
+| L-10 | todo (partial: resolve aliases integrated 2026-10-14; eviction and the rest open) | **Texture cache.** Keys, layout math reuse, upload plus untile dispatch (S-19 shaders), BC direct, cube maps, invalidation from dirty ranges and resolves, eviction. | L-06, S-19, S-23 | 8.9, `pipeline/texture/cache.cpp`, `vulkan/texture_cache.cpp` | textures correct in all golden scenes; texture-load GPU time < 0.2 ms per frame in gameplay |
 | L-11 | todo (partial, claude-opus-5.5 2026-10-14: see notes log) | **Primitive handling.** Integrate `PrimitiveProcessor` (fans, quads, BE indices), index caching, dummy-draw detection (after S-05). | L-03, S-22 | 8.6, `primitive_processor.{h,cpp}` | all primitive types of 5.2 draw |
 | L-12 | todo (partial, claude-opus-5.5 2026-10-14: see notes log) | **Frame recorder.** Encoder per frame, lazy render passes, compute interleaving, upload rings, deferred destruction, threaded submission, error scopes. | L-02 | 8.12 | stable multi-minute runs; no validation errors |
-| L-13 | todo | **Queries, fences, readbacks.** Occlusion query results (after RE of how Trials uses them), async luminance readback, sync modes for testing. | L-09, L-12 | 8.10, `ExecutePacketType3_EVENT_WRITE_ZPD` | exposure behaves like the Vulkan build; no stalls |
+| L-13 | todo (partial 2026-10-14: async luminance readback done in `ResolveEngine`) | **Queries, fences, readbacks.** Occlusion query results (after RE of how Trials uses them), async luminance readback, sync modes for testing. | L-09, L-12 | 8.10, `ExecutePacketType3_EVENT_WRITE_ZPD` | exposure behaves like the Vulkan build; no stalls |
 | L-14 | todo | **Presenter completion.** Gamma ramp (S-20), FPS pacing and FPS-unlock interplay, present modes, resize, fullscreen, headless capture parity with the Vulkan presenter. | L-02, S-20 | 8.11 | `tests/check_fps_log.py` passes at 60, 120 and uncapped |
 | L-15 | todo | **Parity loop (M6).** Run the golden scenes, find the worst diff, trace it to a draw with S-26 dumps and RenderDoc, fix, repeat. Owns the per-scene thresholds. | L-04*, L-08–L-13, S-32 | 11 | all golden scenes pass |
 | L-16 | todo | **Performance to 240 FPS (M7).** Profile CPU and GPU against the 7.5 budget; remove per-draw allocations and locks; bind-group caching; Dawn toggles; shadow-map resolution setting; dummy-draw skip. | L-15, S-15, S-28 | 7.5 | 7.5 budget table filled with measured numbers; ≥ 2× today's 1440p FPS |
@@ -2301,6 +2320,14 @@ finding: `YYYY-MM-DD <agent> <task ID>: what changed; evidence; what is left`.
   - L-04e remains claimed/in progress: broader viewport-register coverage,
     rasterized reverse-Z/float24, gamma RT output and actual point coordinates
     remain open.
+- 2026-10-14 pi-gpt priority change (user): prioritize visible in-game 3D, not
+  further exhaustive output tests. Claude's handoff above released its claims.
+  Taking L-09's GPU resolve-to-texture path and the necessary L-10 alias hooks,
+  reusing the untracked resolve-engine draft. Current backend never calls it;
+  riding was HUD-only because intermediate scene resolves were not sampled.
+  Scope: ordered resolve copies/aliases, build integration, focused tests and a
+  real riding capture. CPU readback, complete resolve parity and cache eviction
+  are not implied by getting the scene visible.
 - 2026-10-14 antigravity (Tier S tasks completion):
   - **S-01:** Executed 7 headless test scripts (`main_menu_nav.txt`, `settings_menu.txt`,
     `credits.txt`, `ride_tutorial.txt`, `ride_middle_name_danger.txt`, `ride_hello_world.txt`,
@@ -2462,8 +2489,19 @@ finding: `YYYY-MM-DD <agent> <task ID>: what changed; evidence; what is left`.
     prior to resolve and dispatching map readbacks post-submission. Verified in live headless execution; logs formatted profiling
     stats every second (e.g. `gpu 0.25 ms/frame (shadow 0.00, scene 0.00, post 0.25, resolve 0.00, UI 0.00, 944 frames)`) with
     0 Dawn validation errors.
-
-
-
-
-
+- 2026-10-14 claude-opus-5.5 M3 / L-08 / L-09 (user: "get something 3D rendering on
+  the screen"): continued pi-gpt's uncommitted resolve-engine/alias work (committed with
+  this entry). Riding was white: (1) no CPU readback, so the game's auto exposure read
+  garbage luminance; (2) no EDRAM aliasing, so 1x→4x reinterpretations (downsample, light
+  pass depth, bloom, luminance chain) read stale host targets and the light buffer
+  accumulated across frames. Added async resolve readback (8.8) and tile-ownership
+  transfers through a guest-layout EDRAM buffer (8.7); resolve clears decode the clear
+  value per format. Evidence (RX 6600, 1280x720, *Middle Name: Danger* via
+  `out/webgpu-3d/ride.txt`): riding frame lit, textured and fogged like the Vulkan
+  capture, track preview in the track list renders, no WebGPU errors, **~60 FPS** with
+  1 submission/frame (a synchronous readback first cost 20 FPS). `transfer_test`
+  (11 format round trips, 1x/4x color/depth coverage across the EDRAM wrap) and
+  `resolve_test`/`output_test` pass on both GPUs. Open: memexport particles (L-04g;
+  the explosion is missing and a few dark horizontal smears appear near fog/particles),
+  stencil and 64bpp transfers, scissor-based RT row bounds (no `DrawExtentEstimator`
+  yet), golden-scene PSNR against Vulkan not run.

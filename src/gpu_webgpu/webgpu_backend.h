@@ -28,6 +28,7 @@ class FrameRecorder;
 class GpuProfiler;
 class PipelineCache;
 class RenderTargetCache;
+class ResolveEngine;
 class TextureCache;
 class WebGpuPrimitiveProcessor;
 class WebGpuSharedMemory;
@@ -77,6 +78,7 @@ class WebGpuBackend {
   std::unique_ptr<PipelineCache> pipeline_cache_;
   std::unique_ptr<RenderTargetCache> render_target_cache_;
   std::unique_ptr<TextureCache> texture_cache_;
+  std::unique_ptr<ResolveEngine> resolve_engine_;
   wgpu::BindGroup draw_bind_group_;
   wgpu::BindGroup shared_memory_bind_group_;
   uint32_t skipped_draws_ = 0;

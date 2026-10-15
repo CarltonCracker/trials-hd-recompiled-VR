@@ -15,6 +15,7 @@
 #include <rex/memory.h>
 #include <rex/system/xmemory.h>
 
+#include "frame_recorder.h"
 #include "guest_memory_mirror.h"
 #include "webgpu_provider.h"
 
@@ -102,8 +103,8 @@ HostFormat GetHostFormat(xenos::TextureFormat format, bool bc_supported) {
   }
 }
 
-void ConvertBlock(Conversion conversion, xenos::TextureFormat format, bool is_signed,
-                  bool is_integer, uint32_t components, const uint8_t* source,
+void ConvertBlock(Conversion conversion, xenos::TextureFormat format,
+                  uint32_t components, const uint8_t* source,
                   uint32_t source_bytes, uint8_t* dest) {
   switch (conversion) {
     case Conversion::kCopy:
@@ -137,19 +138,8 @@ void ConvertBlock(Conversion conversion, xenos::TextureFormat format, bool is_si
       for (uint32_t i = 0; i < components; ++i) {
         uint16_t raw;
         std::memcpy(&raw, source + 2 * i, 2);
-        float value;
-        if (is_signed) {
-          value = float(int16_t(raw));
-          if (!is_integer) {
-            value = std::max(value / 32767.0f, -1.0f);
-          }
-        } else {
-          value = float(raw);
-          if (!is_integer) {
-            value /= 65535.0f;
-          }
-        }
-        out[i] = value;
+        // Keep the bits until fetch-time signedness and normalization are known.
+        out[i] = float(raw);
       }
     } break;
     case Conversion::kDepth24: {
@@ -169,11 +159,14 @@ void ConvertBlock(Conversion conversion, xenos::TextureFormat format, bool is_si
 }  // namespace
 
 TextureCache::TextureCache(ui::webgpu::WebGpuProvider& provider, memory::Memory& memory,
-                           WebGpuSharedMemory& shared_memory)
-    : provider_(provider), memory_(memory), shared_memory_(shared_memory), sampler_cache_(provider) {}
+                           WebGpuSharedMemory& shared_memory, FrameRecorder& frame_recorder)
+    : provider_(provider), memory_(memory), shared_memory_(shared_memory),
+      frame_recorder_(frame_recorder), sampler_cache_(provider) {}
 
 TextureCache::~TextureCache() {
   std::lock_guard lock(provider_.device_mutex());
+  auto alias_lock = alias_mutex_.Acquire();
+  if (alias_watch_) { shared_memory_.UnregisterGlobalWatch(alias_watch_); }
   textures_.clear();
   resolve_aliases_.clear();
   sampler_cache_.Clear();
@@ -202,7 +195,9 @@ bool TextureCache::Initialize() {
     view_desc.dimension = cube ? wgpu::TextureViewDimension::Cube : wgpu::TextureViewDimension::e2D;
     (cube ? black_cube_ : black_2d_) = texture.CreateView(&view_desc);
   }
-  return black_2d_ && black_cube_;
+  if (!black_2d_ || !black_cube_) { return false; }
+  alias_watch_ = shared_memory_.RegisterGlobalWatch(AliasWatchCallback, this);
+  return true;
 }
 
 void TextureCache::WatchCallback(const std::unique_lock<std::recursive_mutex>& global_lock,
@@ -214,13 +209,52 @@ void TextureCache::WatchCallback(const std::unique_lock<std::recursive_mutex>& g
   texture->dirty.store(true, std::memory_order_release);
 }
 
-void TextureCache::SetResolveAlias(uint32_t address, wgpu::Texture texture, uint32_t width,
-                                   uint32_t height) {
-  ResolveAlias& alias = resolve_aliases_[address & 0x1FFFFFFF];
-  alias.texture = std::move(texture);
-  alias.view = alias.texture.CreateView();
-  alias.width = width;
-  alias.height = height;
+void TextureCache::AliasWatchCallback(const std::unique_lock<std::recursive_mutex>&,
+    void* context, uint32_t first, uint32_t last, bool) {
+  // Guest-thread callback: only invalidate metadata, never call WebGPU here.
+  auto& cache = *static_cast<TextureCache*>(context);
+  for (auto& [address, alias] : cache.resolve_aliases_) {
+    if (first < uint64_t(alias.guest_start) + alias.guest_length && last >= alias.guest_start) {
+      alias.dirty = true;
+    }
+  }
+}
+
+wgpu::Texture TextureCache::GetOrCreateResolveAlias(uint32_t address, wgpu::TextureFormat format,
+    uint32_t width, uint32_t height, uint32_t guest_start, uint32_t guest_length,
+    uint32_t scale_x, uint32_t scale_y) {
+  wgpu::Limits limits;
+  provider_.device().GetLimits(&limits);
+  if (!width || !height || width > limits.maxTextureDimension2D || height > limits.maxTextureDimension2D ||
+      !guest_length || uint64_t(guest_start) + guest_length > (512ull << 20)) { return {}; }
+  auto alias_lock = alias_mutex_.Acquire();
+  // Protect guest pages so subsequent CPU writes invalidate the GPU-only alias.
+  if (!shared_memory_.RequestRange(guest_start, guest_length)) { return {}; }
+  address &= 0x1FFFFFFF;
+  for (auto& [other_address, other] : resolve_aliases_) {
+    if (other_address != address && guest_start < uint64_t(other.guest_start) + other.guest_length &&
+        other.guest_start < uint64_t(guest_start) + guest_length) { other.dirty = true; }
+  }
+  ResolveAlias& alias = resolve_aliases_[address];
+  if (!alias.texture || alias.width != width || alias.height != height || alias.texture.GetFormat() != format) {
+    wgpu::TextureDescriptor desc;
+    desc.label = "guest resolve alias"; desc.size = {width, height, 1}; desc.format = format;
+    desc.usage = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding |
+        wgpu::TextureUsage::CopySrc;
+    alias.texture = provider_.device().CreateTexture(&desc);
+    if (!alias.texture) { return {}; }
+    alias.view = alias.texture.CreateView(); alias.width = width; alias.height = height;
+    alias.sampled_texture = nullptr; alias.sampled_view = nullptr;
+    alias.guest_length = 0;
+  }
+  uint32_t end = guest_start + guest_length;
+  if (alias.guest_length) {
+    end = std::max(end, alias.guest_start + alias.guest_length);
+    guest_start = std::min(guest_start, alias.guest_start);
+  }
+  alias.guest_start = guest_start; alias.guest_length = end - guest_start; alias.dirty = false;
+  alias.scale_x = scale_x; alias.scale_y = scale_y; alias.sampled_dirty = true;
+  return alias.texture;
 }
 
 wgpu::TextureView TextureCache::GetView(const xenos::xe_gpu_texture_fetch_t& fetch, bool is_cube) {
@@ -228,16 +262,42 @@ wgpu::TextureView TextureCache::GetView(const xenos::xe_gpu_texture_fetch_t& fet
   if (fetch.type != xenos::FetchConstantType::kTexture) {
     return placeholder;
   }
-  if (!is_cube) {
-    auto alias = resolve_aliases_.find((fetch.base_address << 12) & 0x1FFFFFFF);
-    if (alias != resolve_aliases_.end()) {
-      return alias->second.view;
-    }
-  }
   uint32_t width_minus_1, height_minus_1, depth_minus_1, base_page, mip_page, mip_min, mip_max;
   texture_util::GetSubresourcesFromFetchConstant(fetch, &width_minus_1, &height_minus_1,
                                                  &depth_minus_1, &base_page, &mip_page, &mip_min,
                                                  &mip_max);
+  if (!is_cube) {
+    auto alias_lock = alias_mutex_.Acquire();
+    auto found = resolve_aliases_.find((fetch.base_address << 12) & 0x1FFFFFFF);
+    if (found != resolve_aliases_.end() && !found->second.dirty) {
+      ResolveAlias& alias = found->second;
+      uint32_t width = (width_minus_1 + 1) * alias.scale_x;
+      uint32_t height = (height_minus_1 + 1) * alias.scale_y;
+      if (width == alias.width && height == alias.height) { return alias.view; }
+      if (width > provider_.limits().maxTextureDimension2D ||
+          height > provider_.limits().maxTextureDimension2D) { return placeholder; }
+      if (!alias.sampled_texture || alias.sampled_width != width || alias.sampled_height != height) {
+        wgpu::TextureDescriptor desc;
+        desc.label = "resolve fetch extent"; desc.size = {width, height, 1};
+        desc.format = alias.texture.GetFormat();
+        desc.usage = wgpu::TextureUsage::CopyDst | wgpu::TextureUsage::TextureBinding;
+        alias.sampled_texture = provider_.device().CreateTexture(&desc);
+        if (!alias.sampled_texture) { return placeholder; }
+        alias.sampled_view = alias.sampled_texture.CreateView();
+        alias.sampled_width = width; alias.sampled_height = height; alias.sampled_dirty = true;
+      }
+      if (alias.sampled_dirty) {
+        // Resolve pitches/heights are padded; normalized fetches use the declared extent.
+        frame_recorder_.EndRenderPass();
+        wgpu::TexelCopyTextureInfo from; from.texture = alias.texture;
+        wgpu::TexelCopyTextureInfo to; to.texture = alias.sampled_texture;
+        wgpu::Extent3D extent{std::min(width, alias.width), std::min(height, alias.height), 1};
+        frame_recorder_.encoder().CopyTextureToTexture(&from, &to, &extent);
+        alias.sampled_dirty = false;
+      }
+      return alias.sampled_view;
+    }
+  }
   if (!base_page && !mip_page) {
     return placeholder;
   }
@@ -395,7 +455,7 @@ bool TextureCache::LoadTexture(Texture& texture) {
           }
           texture_conversion::CopySwapBlock(xenos::Endian(key.endianness), swapped.data(),
                                             guest + address, bytes_per_block);
-          ConvertBlock(host.conversion, format, key.is_signed, key.is_integer, host.components,
+          ConvertBlock(host.conversion, format, host.components,
                        swapped.data(), bytes_per_block,
                        level_data.data() + size_t(y) * host_row_bytes +
                            size_t(x) * host.host_bytes_per_block);

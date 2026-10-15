@@ -47,6 +47,72 @@ bool AlphaPass(unsigned function, float alpha, float reference) {
   }
 }
 
+void CheckFixed16Fetch(GpuTest& gpu, std::string source) {
+  source += R"(
+@group(1) @binding(1) var<storage, read> test_raw: array<vec4f>;
+@group(1) @binding(2) var<storage, read_write> test_decoded: array<vec4f>;
+@compute @workgroup_size(16) fn test_fixed16(@builtin(global_invocation_id) id: vec3u) {
+  test_decoded[id.x] = xe_texture_postprocess(test_raw[id.x], id.x / 4u);
+})";
+  auto module = gpu.Module(source);
+  wgpu::ComputePipelineDescriptor pd; pd.compute.module = module; pd.compute.entryPoint = "test_fixed16";
+  auto pipeline = gpu.device.CreateComputePipeline(&pd);
+  std::array<Vec, 16> raw{};
+  auto input = gpu.Buffer(sizeof(raw), wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst);
+  auto output = gpu.Buffer(sizeof(raw), wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc);
+  std::array<uint32_t, 192> fetch{};
+  auto uniform = gpu.Buffer(sizeof(fetch), wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst);
+  wgpu::BindGroupEntry entry; entry.binding = 4; entry.buffer = uniform; entry.size = sizeof(fetch);
+  wgpu::BindGroupDescriptor bd; bd.layout = pipeline.GetBindGroupLayout(0); bd.entryCount = 1; bd.entries = &entry;
+  auto constants = gpu.device.CreateBindGroup(&bd);
+  std::array<wgpu::BindGroupEntry, 2> storage;
+  storage[0].binding = 1; storage[0].buffer = input; storage[0].size = sizeof(raw);
+  storage[1].binding = 2; storage[1].buffer = output; storage[1].size = sizeof(raw);
+  bd.layout = pipeline.GetBindGroupLayout(1); bd.entryCount = storage.size(); bd.entries = storage.data();
+  auto values = gpu.device.CreateBindGroup(&bd);
+  constexpr float edges[] = {0, 32767, 32768, 65535};
+  for (unsigned format = 0; format < 3; ++format) {
+    unsigned components = 1u << format;
+    for (unsigned i = 0; i < raw.size(); ++i) {
+      for (unsigned c = 0; c < 4; ++c) { raw[i][c] = c < components ? edges[(i + c) % 4] : (c == 3 ? 1 : 0); }
+    }
+    gpu.device.GetQueue().WriteBuffer(input, 0, raw.data(), sizeof(raw));
+    for (unsigned integer = 0; integer < 2; ++integer) {
+      for (int exponent : {-2, 0, 3}) {
+        for (unsigned sign = 0; sign < 4; ++sign) {
+          fetch[sign * 6] = sign * 0x154u;
+          fetch[sign * 6 + 1] = 24 + format;
+          fetch[sign * 6 + 3] = integer | (0x688u << 1) | ((uint32_t(exponent) & 63) << 13);
+        }
+        gpu.device.GetQueue().WriteBuffer(uniform, 0, fetch.data(), sizeof(fetch));
+        auto encoder = gpu.device.CreateCommandEncoder(); auto pass = encoder.BeginComputePass();
+        pass.SetPipeline(pipeline); pass.SetBindGroup(0, constants); pass.SetBindGroup(1, values);
+        pass.DispatchWorkgroups(1); pass.End(); auto command = encoder.Finish();
+        gpu.device.GetQueue().Submit(1, &command); auto bytes = gpu.Read(output, sizeof(raw));
+        for (unsigned i = 0; i < raw.size(); ++i) {
+          unsigned sign = i / 4;
+          for (unsigned c = 0; c < 4; ++c) {
+            float expected = raw[i][c];
+            if (c < components) {
+              if (sign == 1 && expected >= 32768) { expected -= 65536; }
+              if (!integer) { expected = sign == 1 ? std::max(expected / 32767, -1.0f) : expected / 65535; }
+            }
+            if (sign == 2) { expected = expected * 2 - 1; }
+            expected = std::ldexp(expected, exponent);
+            float actual; std::memcpy(&actual, bytes.data() + i * sizeof(Vec) + c * 4, 4);
+            if (!Equal(actual, expected)) {
+              std::fprintf(stderr, "fixed16 format%u integer%u exponent%d sign%u input%u c%u GPU%.9g CPU%.9g\n",
+                  format, integer, exponent, sign, i, c, actual, expected);
+              GPU_CHECK(false);
+            }
+          }
+        }
+      }
+    }
+  }
+  std::puts("PASS: 288 fixed16 fetch vectors: signed/unsigned/biased, integer/fraction, exponent and missing components");
+}
+
 void CheckPositions(GpuTest& gpu) {
   std::array<uint32_t, 6> code = {1u | (1u << 12),
       uint32_t(ucode::ControlFlowOpcode::kExecEnd) << 12, 0u,
@@ -59,6 +125,7 @@ void CheckPositions(GpuTest& gpu) {
   GPU_CHECK(translator.TranslateAnalyzedShader(*translation));
   GPU_CHECK(translation->errors().empty());
   std::string source = translation->GetTranslatedBinaryString();
+  CheckFixed16Fetch(gpu, source);
   source += R"(
 @group(1) @binding(1) var<storage, read> test_positions: array<vec4f>;
 @group(1) @binding(2) var<storage, read_write> test_transformed: array<vec4f>;

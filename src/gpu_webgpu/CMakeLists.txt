@@ -42,6 +42,8 @@ set(REXGPU_WEBGPU_WGSL
     shaders/immediate.wgsl
     wgsl/wgsl_prelude.wgsl
     shaders/blit.wgsl
+    shaders/resolve.wgsl
+    shaders/transfer.wgsl
 )
 set(_wgsl_headers)
 foreach(_wgsl IN LISTS REXGPU_WEBGPU_WGSL)
@@ -86,6 +88,7 @@ target_sources(rexgpu-webgpu PRIVATE
     pipeline_state.cpp
     primitive_converter.cpp
     render_target_cache.cpp
+    resolve_engine.cpp
     sampler_cache.cpp
     texture_cache.cpp
 )
