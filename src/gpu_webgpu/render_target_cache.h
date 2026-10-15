@@ -43,6 +43,8 @@ struct RenderTarget {
   wgpu::TextureView view;
   wgpu::TextureView depth_only_view;
   wgpu::TextureView stencil_only_view;  // Null without stencil.
+  // EDRAM transfer store bind group (created on first use).
+  wgpu::BindGroup transfer_store_group;
   wgpu::TextureFormat host_format = wgpu::TextureFormat::Undefined;
   uint32_t sample_count = 1;
   // Host pixels (scaled).
@@ -119,6 +121,8 @@ class RenderTargetCache {
   // Store: [color, color 4x, depth, depth 4x]. Load: by host format, samples
   // and stencil bit pass.
   std::array<wgpu::ComputePipeline, 4> store_pipelines_;
+  std::array<wgpu::BindGroupLayout, 4> store_bind_group_layouts_;
+  wgpu::BindGroup load_bind_group_;
   std::unordered_map<uint64_t, wgpu::RenderPipeline> load_pipelines_;
   wgpu::BindGroupLayout load_bind_group_layout_;
   wgpu::PipelineLayout load_pipeline_layout_;

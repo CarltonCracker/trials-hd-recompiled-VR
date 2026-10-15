@@ -80,6 +80,8 @@ class ResolveEngine {
   wgpu::BindGroupLayout layouts_[4];
   wgpu::PipelineLayout pipeline_layouts_[4];
   std::unordered_map<uint64_t, wgpu::RenderPipeline> pipelines_;
+  // By source view; a cached group keeps its view alive, so keys stay unique.
+  std::unordered_map<WGPUTextureView, wgpu::BindGroup> bind_groups_;
   // By guest extent (start << 32 | length).
   std::unordered_map<uint64_t, Readback> readbacks_;
 };

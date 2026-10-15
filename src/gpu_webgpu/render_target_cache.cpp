@@ -280,9 +280,39 @@ bool RenderTargetCache::InitializeTransfer() {
   transfer_module_ = device.CreateShaderModule(&module_desc);
   static constexpr const char* kStoreEntryPoints[] = {"cs_store_color", "cs_store_color_ms",
                                                       "cs_store_depth", "cs_store_depth_ms"};
+  // Explicit layouts with a dynamic uniform offset, so a target's store bind
+  // group is created once.
   for (uint32_t i = 0; i < 4; ++i) {
+    bool depth = i >= 2, multisampled = i & 1;
+    std::array<wgpu::BindGroupLayoutEntry, 4> entries;
+    entries[0].binding = 0;
+    entries[0].visibility = wgpu::ShaderStage::Compute;
+    entries[0].buffer.type = wgpu::BufferBindingType::Uniform;
+    entries[0].buffer.hasDynamicOffset = true;
+    entries[0].buffer.minBindingSize = sizeof(TransferConstants);
+    entries[1].binding = 1;
+    entries[1].visibility = wgpu::ShaderStage::Compute;
+    entries[1].buffer.type = wgpu::BufferBindingType::Storage;
+    entries[2].binding = 3 + i;
+    entries[2].visibility = wgpu::ShaderStage::Compute;
+    entries[2].texture.sampleType =
+        depth ? wgpu::TextureSampleType::Depth : wgpu::TextureSampleType::UnfilterableFloat;
+    entries[2].texture.multisampled = multisampled;
+    entries[3].binding = 7 + (multisampled ? 1 : 0);
+    entries[3].visibility = wgpu::ShaderStage::Compute;
+    entries[3].texture.sampleType = wgpu::TextureSampleType::Uint;
+    entries[3].texture.multisampled = multisampled;
+    wgpu::BindGroupLayoutDescriptor layout_desc;
+    layout_desc.label = kStoreEntryPoints[i];
+    layout_desc.entryCount = depth ? 4 : 3;
+    layout_desc.entries = entries.data();
+    store_bind_group_layouts_[i] = device.CreateBindGroupLayout(&layout_desc);
+    wgpu::PipelineLayoutDescriptor pipeline_layout_desc;
+    pipeline_layout_desc.bindGroupLayoutCount = 1;
+    pipeline_layout_desc.bindGroupLayouts = &store_bind_group_layouts_[i];
     wgpu::ComputePipelineDescriptor desc;
     desc.label = kStoreEntryPoints[i];
+    desc.layout = device.CreatePipelineLayout(&pipeline_layout_desc);
     desc.compute.module = transfer_module_;
     desc.compute.entryPoint = kStoreEntryPoints[i];
     store_pipelines_[i] = device.CreateComputePipeline(&desc);
@@ -293,6 +323,8 @@ bool RenderTargetCache::InitializeTransfer() {
   load_entries[0].binding = 0;
   load_entries[0].visibility = wgpu::ShaderStage::Fragment;
   load_entries[0].buffer.type = wgpu::BufferBindingType::Uniform;
+  load_entries[0].buffer.hasDynamicOffset = true;
+  load_entries[0].buffer.minBindingSize = sizeof(TransferConstants);
   load_entries[1].binding = 2;
   load_entries[1].visibility = wgpu::ShaderStage::Fragment;
   load_entries[1].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
@@ -305,6 +337,17 @@ bool RenderTargetCache::InitializeTransfer() {
   load_pipeline_layout_desc.bindGroupLayoutCount = 1;
   load_pipeline_layout_desc.bindGroupLayouts = &load_bind_group_layout_;
   load_pipeline_layout_ = device.CreatePipelineLayout(&load_pipeline_layout_desc);
+  std::array<wgpu::BindGroupEntry, 2> load_group_entries;
+  load_group_entries[0].binding = 0;
+  load_group_entries[0].buffer = frame_recorder_.uniform_ring();
+  load_group_entries[0].size = sizeof(TransferConstants);
+  load_group_entries[1].binding = 2;
+  load_group_entries[1].buffer = edram_;
+  wgpu::BindGroupDescriptor load_group_desc;
+  load_group_desc.layout = load_bind_group_layout_;
+  load_group_desc.entryCount = load_group_entries.size();
+  load_group_desc.entries = load_group_entries.data();
+  load_bind_group_ = device.CreateBindGroup(&load_group_desc);
   return bool(edram_);
 }
 
@@ -355,30 +398,31 @@ void RenderTargetCache::Transfer(RenderTarget* source, RenderTarget* dest, uint3
   uint32_t store_offset = frame_recorder_.UploadUniforms(&store_constants, sizeof(store_constants));
   uint32_t store_index = (source->key.is_depth ? 2 : 0) + (source->sample_count > 1 ? 1 : 0);
   const wgpu::ComputePipeline& store_pipeline = store_pipelines_[store_index];
-  std::array<wgpu::BindGroupEntry, 4> store_entries;
-  store_entries[0].binding = 0;
-  store_entries[0].buffer = frame_recorder_.uniform_ring();
-  store_entries[0].offset = store_offset;
-  store_entries[0].size = sizeof(TransferConstants);
-  store_entries[1].binding = 1;
-  store_entries[1].buffer = edram_;
-  store_entries[2].binding = 3 + store_index;
-  store_entries[2].textureView = source->key.is_depth ? source->depth_only_view : source->view;
-  // shortcut: a depth target without stencil would need its own store entry
-  // point; all host depth formats here have stencil.
-  store_entries[3].binding = 7 + (source->sample_count > 1 ? 1 : 0);
-  store_entries[3].textureView = source->stencil_only_view;
-  wgpu::BindGroupDescriptor store_group_desc;
-  store_group_desc.layout = store_pipeline.GetBindGroupLayout(0);
-  store_group_desc.entryCount = source->key.is_depth ? 4 : 3;
-  store_group_desc.entries = store_entries.data();
-  wgpu::BindGroup store_group = device.CreateBindGroup(&store_group_desc);
+  if (!source->transfer_store_group) {
+    std::array<wgpu::BindGroupEntry, 4> store_entries;
+    store_entries[0].binding = 0;
+    store_entries[0].buffer = frame_recorder_.uniform_ring();
+    store_entries[0].size = sizeof(TransferConstants);
+    store_entries[1].binding = 1;
+    store_entries[1].buffer = edram_;
+    store_entries[2].binding = 3 + store_index;
+    store_entries[2].textureView = source->key.is_depth ? source->depth_only_view : source->view;
+    // shortcut: a depth target without stencil would need its own store entry
+    // point; all host depth formats here have stencil.
+    store_entries[3].binding = 7 + (source->sample_count > 1 ? 1 : 0);
+    store_entries[3].textureView = source->stencil_only_view;
+    wgpu::BindGroupDescriptor store_group_desc;
+    store_group_desc.layout = store_bind_group_layouts_[store_index];
+    store_group_desc.entryCount = source->key.is_depth ? 4 : 3;
+    store_group_desc.entries = store_entries.data();
+    source->transfer_store_group = device.CreateBindGroup(&store_group_desc);
+  }
   {
     wgpu::ComputePassDescriptor pass_desc;
     pass_desc.label = "EDRAM transfer store";
     wgpu::ComputePassEncoder pass = frame_recorder_.encoder().BeginComputePass(&pass_desc);
     pass.SetPipeline(store_pipeline);
-    pass.SetBindGroup(0, store_group);
+    pass.SetBindGroup(0, source->transfer_store_group, 1, &store_offset);
     pass.DispatchWorkgroups((store_constants.width + 7) / 8,
                             (store_constants.row_end - store_constants.row_first + 7) / 8);
     pass.End();
@@ -443,18 +487,6 @@ void RenderTargetCache::Transfer(RenderTarget* source, RenderTarget* dest, uint3
   };
   const wgpu::RenderPipeline& load_pipeline = get_load_pipeline(8);
   uint32_t load_offset = frame_recorder_.UploadUniforms(&load_constants, sizeof(load_constants));
-  std::array<wgpu::BindGroupEntry, 2> load_entries;
-  load_entries[0].binding = 0;
-  load_entries[0].buffer = frame_recorder_.uniform_ring();
-  load_entries[0].offset = load_offset;
-  load_entries[0].size = sizeof(TransferConstants);
-  load_entries[1].binding = 2;
-  load_entries[1].buffer = edram_;
-  wgpu::BindGroupDescriptor load_group_desc;
-  load_group_desc.layout = load_bind_group_layout_;
-  load_group_desc.entryCount = load_entries.size();
-  load_group_desc.entries = load_entries.data();
-  wgpu::BindGroup load_group = device.CreateBindGroup(&load_group_desc);
 
   wgpu::RenderPassColorAttachment color_attachment;
   wgpu::RenderPassDepthStencilAttachment depth_attachment;
@@ -481,7 +513,7 @@ void RenderTargetCache::Transfer(RenderTarget* source, RenderTarget* dest, uint3
   dest->initialized = true;
   wgpu::RenderPassEncoder pass = frame_recorder_.encoder().BeginRenderPass(&pass_desc);
   pass.SetPipeline(load_pipeline);
-  pass.SetBindGroup(0, load_group);
+  pass.SetBindGroup(0, load_bind_group_, 1, &load_offset);
   pass.SetScissorRect(0, load_constants.row_first, load_constants.width,
                       load_constants.row_end - load_constants.row_first);
   pass.Draw(3);

@@ -120,6 +120,8 @@ bool ResolveEngine::Initialize() {
     entries[1].binding = 4;
     entries[1].visibility = wgpu::ShaderStage::Fragment;
     entries[1].buffer.type = wgpu::BufferBindingType::Uniform;
+    entries[1].buffer.hasDynamicOffset = true;
+    entries[1].buffer.minBindingSize = sizeof(ResolveConstants);
     wgpu::BindGroupLayoutDescriptor desc;
     desc.label = "resolve";
     desc.entryCount = entries.size();
@@ -239,18 +241,22 @@ bool ResolveEngine::Copy(const draw_util::ResolveInfo& info, RenderTarget& sourc
                                     : (multisample ? SourceType::kColorMultisample
                                                    : SourceType::kColor);
   wgpu::RenderPipeline pipeline = GetPipeline(source_type, dest_format.format);
-  std::array<wgpu::BindGroupEntry, 2> entries;
-  entries[0].binding = uint32_t(source_type);
-  entries[0].textureView = is_depth ? source->depth_only_view : source->view;
-  entries[1].binding = 4;
-  entries[1].buffer = frame_recorder_.uniform_ring();
-  entries[1].offset = constants_offset;
-  entries[1].size = sizeof(ResolveConstants);
-  wgpu::BindGroupDescriptor bind_group_desc;
-  bind_group_desc.layout = layouts_[uint32_t(source_type)];
-  bind_group_desc.entryCount = entries.size();
-  bind_group_desc.entries = entries.data();
-  wgpu::BindGroup bind_group = provider_.device().CreateBindGroup(&bind_group_desc);
+  // One bind group per source view (the constants use a dynamic offset).
+  const wgpu::TextureView& source_view = is_depth ? source->depth_only_view : source->view;
+  wgpu::BindGroup& bind_group = bind_groups_[source_view.Get()];
+  if (!bind_group) {
+    std::array<wgpu::BindGroupEntry, 2> entries;
+    entries[0].binding = uint32_t(source_type);
+    entries[0].textureView = source_view;
+    entries[1].binding = 4;
+    entries[1].buffer = frame_recorder_.uniform_ring();
+    entries[1].size = sizeof(ResolveConstants);
+    wgpu::BindGroupDescriptor bind_group_desc;
+    bind_group_desc.layout = layouts_[uint32_t(source_type)];
+    bind_group_desc.entryCount = entries.size();
+    bind_group_desc.entries = entries.data();
+    bind_group = provider_.device().CreateBindGroup(&bind_group_desc);
+  }
 
   frame_recorder_.EndRenderPass();
   wgpu::RenderPassColorAttachment attachment;
@@ -263,7 +269,7 @@ bool ResolveEngine::Copy(const draw_util::ResolveInfo& info, RenderTarget& sourc
   pass_desc.colorAttachments = &attachment;
   wgpu::RenderPassEncoder pass = frame_recorder_.encoder().BeginRenderPass(&pass_desc);
   pass.SetPipeline(pipeline);
-  pass.SetBindGroup(0, bind_group);
+  pass.SetBindGroup(0, bind_group, 1, &constants_offset);
   pass.SetViewport(float(dest_x), float(dest_y), float(width), float(height), 0.0f, 1.0f);
   pass.SetScissorRect(dest_x, dest_y, width, height);
   pass.Draw(3);
