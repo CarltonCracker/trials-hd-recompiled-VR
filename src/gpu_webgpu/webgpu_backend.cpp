@@ -111,11 +111,32 @@ struct BlitResources {
 
 }  // namespace
 
+struct UniformCache {
+  uint64_t submission = UINT64_MAX;
+  uint32_t offset = 0;
+  std::vector<uint8_t> data;
+};
+
+// Render pass state last set (valid while pass_serial matches).
+struct PassState {
+  uint64_t pass_serial = UINT64_MAX;
+  WGPURenderPipeline pipeline = nullptr;
+  std::array<uint32_t, 5> offsets = {};
+  WGPUBindGroup texture_bind_group = nullptr;
+  std::array<float, 6> viewport = {};
+  std::array<uint32_t, 4> scissor = {};
+  uint32_t stencil_reference = UINT32_MAX;
+  std::array<float, 4> blend_constant = {};
+};
+
 struct WebGpuBackendState {
   std::unordered_map<uint32_t, ResolvedRegion> resolved_regions;
   BlitResources blit;
-  // Texture bind groups of the current frame by (layout, views, samplers).
+  // Texture bind groups by (layout, views, samplers).
   std::unordered_map<uint64_t, wgpu::BindGroup> texture_bind_groups;
+  // Per group 0 binding: the last upload, reused while it is in the ring.
+  std::array<UniformCache, 5> uniforms;
+  PassState pass;
 };
 
 static WebGpuBackendState& State();
@@ -488,6 +509,20 @@ bool IsStripTopology(wgpu::PrimitiveTopology topology) {
          topology == wgpu::PrimitiveTopology::TriangleStrip;
 }
 
+// Uploads uniform data, reusing the previous upload of the same binding if it
+// is identical and still in the current submission's ring.
+uint32_t UploadUniformsCached(FrameRecorder& recorder, UniformCache& cache, const void* data,
+                              uint32_t size) {
+  if (cache.submission == recorder.submission_count() && cache.data.size() == size &&
+      !std::memcmp(cache.data.data(), data, size)) {
+    return cache.offset;
+  }
+  cache.offset = recorder.UploadUniforms(data, size);
+  cache.submission = recorder.submission_count();
+  cache.data.assign(static_cast<const uint8_t*>(data), static_cast<const uint8_t*>(data) + size);
+  return cache.offset;
+}
+
 // Copies the float constants a shader reads, packed as the translator expects.
 uint32_t PackFloatConstants(const RegisterFile& regs, const Shader& shader, uint32_t base,
                             std::array<float, 1024>& out) {
@@ -824,22 +859,27 @@ bool WebGpuBackend::Draw(const DrawSnapshot& draw) {
 
   // Uniform uploads (space reserved above, so no submission here).
   std::array<uint32_t, 5> offsets;
-  offsets[0] = frame_recorder_->UploadUniforms(&system, sizeof(system));
+  auto& uniforms = State().uniforms;
+  offsets[0] = UploadUniformsCached(*frame_recorder_, uniforms[0], &system, sizeof(system));
   std::array<float, 1024> constants;
   uint32_t vertex_constant_count =
       PackFloatConstants(regs, *vertex_shader, regs.Get<reg::SQ_VS_CONST>().base, constants);
-  offsets[1] = frame_recorder_->UploadUniforms(constants.data(), vertex_constant_count * 16);
+  offsets[1] = UploadUniformsCached(*frame_recorder_, uniforms[1], constants.data(),
+                                    vertex_constant_count * 16);
   if (pixel_shader) {
     uint32_t pixel_constant_count =
         PackFloatConstants(regs, *pixel_shader, regs.Get<reg::SQ_PS_CONST>().base, constants);
-    offsets[2] = frame_recorder_->UploadUniforms(constants.data(), pixel_constant_count * 16);
+    offsets[2] = UploadUniformsCached(*frame_recorder_, uniforms[2], constants.data(),
+                                      pixel_constant_count * 16);
   } else {
     offsets[2] = offsets[1];
   }
-  offsets[3] = frame_recorder_->UploadUniforms(
-      &regs.values[XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031], 40 * sizeof(uint32_t));
-  offsets[4] = frame_recorder_->UploadUniforms(&regs.values[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0],
-                                               192 * sizeof(uint32_t));
+  offsets[3] = UploadUniformsCached(*frame_recorder_, uniforms[3],
+                                    &regs.values[XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031],
+                                    40 * sizeof(uint32_t));
+  offsets[4] = UploadUniformsCached(*frame_recorder_, uniforms[4],
+                                    &regs.values[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0],
+                                    192 * sizeof(uint32_t));
 
   // Render pass.
   RenderPassTargets pass_targets;
@@ -885,21 +925,54 @@ bool WebGpuBackend::Draw(const DrawSnapshot& draw) {
   }
   const wgpu::RenderPassEncoder& pass = frame_recorder_->BeginRenderPass(
       pass_targets, pass_label, has_timestamps ? &timestamp_writes : nullptr);
-  pass.SetPipeline(pipeline);
-  pass.SetBindGroup(0, draw_bind_group_, offsets.size(), offsets.data());
-  pass.SetBindGroup(1, shared_memory_bind_group_);
-  pass.SetBindGroup(2, texture_bind_group);
-  pass.SetViewport(float(viewport_x), float(viewport_y), float(viewport_width),
-                   float(viewport_height), viewport.z_min, viewport.z_max);
-  pass.SetScissorRect(scissor_x, scissor_y, scissor_width, scissor_height);
-  if (targets.depth) {
-    pass.SetStencilReference(regs.Get<reg::RB_STENCILREFMASK>().stencilref);
+  // Only state that changed since the last draw of this pass.
+  PassState& state = State().pass;
+  bool fresh_pass = state.pass_serial != frame_recorder_->pass_serial();
+  if (fresh_pass) {
+    state = {};
+    state.pass_serial = frame_recorder_->pass_serial();
+    pass.SetBindGroup(1, shared_memory_bind_group_);
   }
-  wgpu::Color blend_constant = {regs.Get<float>(XE_GPU_REG_RB_BLEND_RED),
-                                regs.Get<float>(XE_GPU_REG_RB_BLEND_GREEN),
-                                regs.Get<float>(XE_GPU_REG_RB_BLEND_BLUE),
-                                regs.Get<float>(XE_GPU_REG_RB_BLEND_ALPHA)};
-  pass.SetBlendConstant(&blend_constant);
+  if (fresh_pass || state.pipeline != pipeline.Get()) {
+    pass.SetPipeline(pipeline);
+    state.pipeline = pipeline.Get();
+  }
+  if (fresh_pass || state.offsets != offsets) {
+    pass.SetBindGroup(0, draw_bind_group_, offsets.size(), offsets.data());
+    state.offsets = offsets;
+  }
+  if (fresh_pass || state.texture_bind_group != texture_bind_group.Get()) {
+    pass.SetBindGroup(2, texture_bind_group);
+    state.texture_bind_group = texture_bind_group.Get();
+  }
+  std::array<float, 6> viewport_state = {float(viewport_x), float(viewport_y),
+                                         float(viewport_width), float(viewport_height),
+                                         viewport.z_min, viewport.z_max};
+  if (fresh_pass || state.viewport != viewport_state) {
+    pass.SetViewport(viewport_state[0], viewport_state[1], viewport_state[2], viewport_state[3],
+                     viewport_state[4], viewport_state[5]);
+    state.viewport = viewport_state;
+  }
+  std::array<uint32_t, 4> scissor_state = {scissor_x, scissor_y, scissor_width, scissor_height};
+  if (fresh_pass || state.scissor != scissor_state) {
+    pass.SetScissorRect(scissor_x, scissor_y, scissor_width, scissor_height);
+    state.scissor = scissor_state;
+  }
+  if (targets.depth) {
+    uint32_t stencil_reference = regs.Get<reg::RB_STENCILREFMASK>().stencilref;
+    if (state.stencil_reference != stencil_reference) {
+      pass.SetStencilReference(stencil_reference);
+      state.stencil_reference = stencil_reference;
+    }
+  }
+  std::array<float, 4> blend_state = {
+      regs.Get<float>(XE_GPU_REG_RB_BLEND_RED), regs.Get<float>(XE_GPU_REG_RB_BLEND_GREEN),
+      regs.Get<float>(XE_GPU_REG_RB_BLEND_BLUE), regs.Get<float>(XE_GPU_REG_RB_BLEND_ALPHA)};
+  if (fresh_pass || state.blend_constant != blend_state) {
+    wgpu::Color blend_constant = {blend_state[0], blend_state[1], blend_state[2], blend_state[3]};
+    pass.SetBlendConstant(&blend_constant);
+    state.blend_constant = blend_state;
+  }
 
   uint32_t count = primitive.host_draw_vertex_count;
   if (debug_labels) {
