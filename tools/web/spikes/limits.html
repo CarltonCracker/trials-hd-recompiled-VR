@@ -1,0 +1,39 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Trials HD web spike: WebGPU limits</title>
+<pre id="result">Requesting a WebGPU adapter…</pre>
+<script>
+window.spikeResult = (async () => {
+  if (!navigator.gpu) throw new Error('WebGPU unavailable: use a secure context and the documented Chromium flags');
+  const adapter = await navigator.gpu.requestAdapter({powerPreference: 'high-performance'});
+  if (!adapter) throw new Error('No WebGPU adapter available');
+  const info = {};
+  const limits = {};
+  for (const key in adapter.info) {
+    if (typeof adapter.info[key] !== 'function') info[key] = adapter.info[key];
+  }
+  for (const key in adapter.limits) {
+    if (typeof adapter.limits[key] === 'number') limits[key] = adapter.limits[key];
+  }
+  if (!Object.keys(limits).length) throw new Error('Adapter limits could not be enumerated');
+  const features = [...adapter.features].sort();
+  const wanted = [
+    'texture-compression-bc', 'depth32float-stencil8', 'texture-formats-tier1',
+    'rg11b10ufloat-renderable', 'timestamp-query', 'depth-clip-control',
+    'float32-filterable', 'unorm16-texture-formats',
+  ];
+  const result = {
+    userAgent: navigator.userAgent, crossOriginIsolated, info, limits, features,
+    wanted: Object.fromEntries(wanted.map(name => [name, features.includes(name)])),
+    singleMirrorSupported: limits.maxBufferSize >= 512 * 1024 * 1024 &&
+                           limits.maxStorageBufferBindingSize >= 512 * 1024 * 1024,
+  };
+  document.querySelector('#result').textContent = JSON.stringify(result, null, 2);
+  console.log('WEBGPU_LIMITS ' + JSON.stringify(result));
+  return result;
+})().catch(error => {
+  document.querySelector('#result').textContent = error.stack;
+  console.error(error.stack);
+  throw error;
+});
+</script>

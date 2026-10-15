@@ -1028,10 +1028,34 @@ download. `--log_file` and cvar flags come from the URL query (`?log_level=info&
 - `texture-compression-bc`: desktop yes; Android and some Apple GPUs need BC→RGBA8 decode in
   the texture-load shader (section 13).
 - **Limits:** the guest-memory mirror is **one 512 MiB storage buffer**. Browser defaults
-  are `maxBufferSize` 256 MiB and `maxStorageBufferBindingSize` 128 MiB; adapters usually
-  offer more on desktop, but **unverified** for Chromium 154 on the RX 6600 (W-S01). If
-  below 512 MiB, split the mirror into 4 × 128 MiB buffers bound as separate storage
-  bindings and pick the binding by `address >> 27` in WGSL (W-L09).
+  are `maxBufferSize` 256 MiB and `maxStorageBufferBindingSize` 128 MiB, but **measured
+  2026-10-15 (W-S01)** Chromium 154 / RX 6600 (AMD RDNA-2, non-fallback adapter, RADV
+  flags from 11.1) exposes **4,294,967,292 bytes (4 GiB − 4) for both limits**. Request
+  at least 536,870,912 for both in `requiredLimits`; the single mirror is supported on
+  this target. Other adapters still need a limit check and a clear unsupported message
+  if below 512 MiB (or the conditional W-L09 split mirror).
+
+W-S01's eight wanted features, queried from `adapter.features` in that same run:
+
+| Feature | Chromium 154 / RX 6600 |
+| --- | --- |
+| `texture-compression-bc` | yes |
+| `depth32float-stencil8` | yes |
+| `texture-formats-tier1` | yes |
+| `rg11b10ufloat-renderable` | yes |
+| `timestamp-query` | yes |
+| `depth-clip-control` | yes |
+| `float32-filterable` | yes |
+| Dawn-only `Unorm16TextureFormats` (`unorm16-texture-formats`) | no; use tier1 |
+
+Reproduce: serve `tools/web/spikes/` with `tools/web/serve.py`, launch Chromium as in
+11.1 on `http://127.0.0.1:8080/limits.html`, then
+`.venv/bin/python tools/web/spikes/record.py http://127.0.0.1:9222 out/limits.json`.
+Install the recorder's dependency with `.venv/bin/python -m pip install -r
+ tools/web/requirements.txt`. The page prints every numeric adapter limit, all features
+and adapter info; CDP saves both the result JSON and `.console.log` sibling. Raw run
+artifacts are in `out/web-spikes/limits.*` (not committed). This answers question 14.1;
+Firefox and Safari limits remain unverified.
 
 ### 9.3 Surface and presentation
 
@@ -1203,7 +1227,7 @@ Without ANGLE-on-Vulkan Chromium exposes only SwiftShader to WebGPU.
 
 | # | Question / risk | How to answer | Task |
 | --- | --- | --- | --- |
-| 1 | Does Chromium on the RX 6600 give `maxStorageBufferBindingSize` and `maxBufferSize` ≥ 512 MiB? | Print `adapter.limits` in the page | W-S01 |
+| 1 | Does Chromium on the RX 6600 give `maxStorageBufferBindingSize` and `maxBufferSize` ≥ 512 MiB? | **Yes:** both 4 GiB − 4 (Chromium 154, 2026-10-15); section 9.2 | W-S01 |
 | 2 | Does JSPI work on pthreads with emdawnwebgpu, and can a suspended GPU worker present its `OffscreenCanvas`? | Minimal test page | W-S05 |
 | 3 | Memory64 bounds-check cost on the guest threads | Microbenchmark plus the full game, native vs wasm32 vs wasm64 | W-L03 |
 | 4 | Are the 28 `REX_MM_*` sites the only MMIO accesses? | Native run with the MMIO fault path fatal | W-S07 |
