@@ -1821,6 +1821,23 @@ W-L06/W-L07 (graphics).
 
 ### 16.6 Notes log
 
+- 2026-10-15 (pi-gpt): W-L16 scope is four single-precision FMA emitter forms only.
+  Native `REX_FMA_S` expands to the original `std::fma`; double forms stay unchanged.
+  Web `FmaSingle` uses multiply/add only when both multiplicands round-trip through
+  float exactly and all three operands are finite (48-bit exact product in 53-bit
+  double); otherwise it calls `std::fma`. Contraction is disabled in the helper and
+  already disabled by the web build. Native/wasm bit tests (including all generated
+  sign/rounding forms, exceptional values and fallback cancellation) and a pinned
+  pre-change Node CPU profile are running. No renderer/app files touched.
+  Baseline profiling completed: after a 10 s warmup, software `fma` and descendants
+  use 8,146 / 24,578 active wasm leaf samples = **33.14%** (futex waits excluded);
+  busiest job worker is 65.89%. `tools/web/tests/fma_profile.py` includes a synthetic
+  parser self-check and records all worker rows; artifacts are `out/fma-before/`.
+  The initial runner checked stdout only, but this pinned build logs to `game.log`;
+  boot and profile data were revalidated from that log without rerunning/altering data.
+  Upcoming native regeneration changes 6,183 call spellings only, with identity
+  expansion; other agents should expect reviewed generated-fingerprint churn.
+
 - 2026-10-15 (pi-gpt): **W-L02 → review (needs macOS check)**; transferred SDK
   work is implemented and Linux/wasm verified. Final native regeneration reviewed:
   only `trials_hd_pch.h`'s web block changed; its native prefix and every other
