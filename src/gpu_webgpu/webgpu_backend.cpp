@@ -1251,9 +1251,11 @@ bool WebGpuBackend::Resolve(const ResolveSnapshot& resolve) {
     RenderPassTargets clear_targets;
     std::array<float, 4> color_value = {};
     RenderTarget* color_target =
-        clear_color ? render_target_cache_->GetForResolve(*resolve.regs, info, false) : nullptr;
+        clear_color ? render_target_cache_->GetForResolve(*resolve.regs, info, false, true)
+                    : nullptr;
     RenderTarget* depth_target =
-        clear_depth ? render_target_cache_->GetForResolve(*resolve.regs, info, true) : nullptr;
+        clear_depth ? render_target_cache_->GetForResolve(*resolve.regs, info, true, true)
+                    : nullptr;
     frame_recorder_->EndRenderPass();
     if (color_target) {
       // The clear value is packed in the EDRAM format (same layout as

@@ -109,8 +109,10 @@ class RenderTargetCache {
 
   // The target a resolve reads or clears (the resolve's own base, pitch,
   // format and sample count), holding the current contents of its tiles.
+  // `for_clear`: the target is cleared as a whole right after, so its old
+  // contents are not transferred in.
   RenderTarget* GetForResolve(const RegisterFile& regs, const draw_util::ResolveInfo& info,
-                              bool is_depth);
+                              bool is_depth, bool for_clear = false);
 
  private:
   RenderTarget* GetOrCreate(RenderTargetKey key);

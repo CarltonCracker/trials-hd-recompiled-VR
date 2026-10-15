@@ -207,7 +207,7 @@ bool RenderTargetCache::Update(const RegisterFile& regs, uint32_t color_targets_
 
 RenderTarget* RenderTargetCache::GetForResolve(const RegisterFile& regs,
                                                const draw_util::ResolveInfo& info,
-                                               bool is_depth) {
+                                               bool is_depth, bool for_clear) {
   auto surface_info = regs.Get<reg::RB_SURFACE_INFO>();
   if (!surface_info.surface_pitch) {
     return nullptr;
@@ -226,7 +226,10 @@ RenderTarget* RenderTargetCache::GetForResolve(const RegisterFile& regs,
   uint32_t rows = (delta / std::max(uint32_t(edram.pitch_tiles), uint32_t(1)) + 1) *
                       xenos::kEdramTileHeightSamples / samples_y +
                   info.coordinate_info.edram_offset_y_div_8 * 8 + info.height_div_8 * 8;
-  Acquire(target, rows, nullptr);
+  Overwrite whole;
+  whole.mask = ~uint32_t(0);
+  whole.x1 = whole.y1 = INT32_MAX;
+  Acquire(target, rows, nullptr, for_clear ? &whole : nullptr);
   return target;
 }
 
