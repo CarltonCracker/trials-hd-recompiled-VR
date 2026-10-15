@@ -63,6 +63,7 @@ set(TRIALSHD_SOURCES
     src/offline_warning.cpp
     src/package_license.cpp
     src/virtual_pad.cpp
+    src/exit_button.cpp
 )
 
 if(WIN32)

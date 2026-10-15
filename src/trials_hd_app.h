@@ -67,6 +67,20 @@ class TrialsHdApp : public rex::ReXApp {
         PPCImageConfig));
   }
 
+  void Quit() {
+    REXLOG_INFO("TrialsHdApp::Quit: requesting application exit");
+    app_context().CallInUIThreadDeferred([this] {
+      if (window()) {
+        window()->RequestClose();
+      }
+      if (runtime() && runtime()->kernel_state()) {
+        runtime()->kernel_state()->TerminateTitle();
+      }
+      rex::FlushLogging();
+      std::_Exit(0);
+    });
+  }
+
   void ShowAchievements() {
     app_context().CallInUIThreadDeferred([this] {
       OpenAchievements();
