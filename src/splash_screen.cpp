@@ -15,13 +15,42 @@ REXCVAR_DEFINE_BOOL(show_arcade_splash, false, "Display",
 REX_EXTERN(__imp__sub_82186030);
 REX_EXTERN(sub_82181268);
 REX_EXTERN(sub_82183720);
+REX_EXTERN(__imp__sub_82660F50);
+REX_EXTERN(sub_82660760);
+
+static bool g_fast_boot_triggered = false;
+
+extern "C" REX_FUNC(sub_82660F50) {
+  uint32_t obj = ctx.r3.u32;
+  uint32_t state = rex::memory::load_and_swap<uint32_t>(base + obj + 224);
+
+  if (!REXCVAR_GET(show_arcade_splash) && g_fast_boot_triggered) {
+    // If we already transitioned to main menu on tick 1, ignore subsequent ticks
+    ctx.r3.u64 = 0;
+    return;
+  }
+
+  __imp__sub_82660F50(ctx, base);
+
+  if (!REXCVAR_GET(show_arcade_splash) && state == 0 && !g_fast_boot_triggered) {
+    g_fast_boot_triggered = true;
+    REXLOG_INFO("Fast-boot: skipping 2-second splash pause, loading main menu immediately");
+    PPCContext sub_ctx = ctx;
+    sub_ctx.r3.u64 = obj - 128; // StartupScreen pointer
+    sub_82660760(sub_ctx, base);
+    rex::memory::store_and_swap<uint32_t>(base + obj + 224, 2);
+  }
+}
 
 extern "C" REX_FUNC(sub_82186030) {
   uint32_t r6_addr = ctx.r6.u32;
+
   __imp__sub_82186030(ctx, base);
   uint32_t scene_obj = r6_addr ? rex::memory::load_and_swap<uint32_t>(base + r6_addr) : 0;
 
   if (!REXCVAR_GET(show_arcade_splash) && scene_obj != 0) {
+    g_fast_boot_triggered = false;
+
     // Look up "Live Arcade Logo" child in the startup scene.
     // 2 KB below SP is safely beyond any child stack frames.
     static const char16_t kLogoName[] = u"Live Arcade Logo";
@@ -40,7 +69,6 @@ extern "C" REX_FUNC(sub_82186030) {
     sub_82181268(sub_ctx, base);
 
     uint32_t child_obj = rex::memory::load_and_swap<uint32_t>(base + out_child_addr);
-    REXLOG_INFO("XuiElementGetChildById result: child=0x{:08X}", child_obj);
     if (child_obj != 0) {
       REXLOG_INFO("Hiding Xbox Live Arcade splash logo on boot");
       sub_ctx = ctx;
@@ -51,3 +79,5 @@ extern "C" REX_FUNC(sub_82186030) {
     }
   }
 }
+
+
