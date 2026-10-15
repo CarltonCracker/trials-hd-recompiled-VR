@@ -111,9 +111,11 @@ const wgpu::RenderPassEncoder& FrameRecorder::BeginRenderPass(
   }
   wgpu::RenderPassDepthStencilAttachment depth;
   wgpu::RenderPassDescriptor desc;
-  std::string pass_label =
-      label.empty() ? fmt::format("guest pass #{}", pass_serial_) : std::string(label);
-  desc.label = pass_label.c_str();
+  // Labels only when the caller made one (webgpu_debug_labels).
+  std::string pass_label(label);
+  if (!label.empty()) {
+    desc.label = pass_label.c_str();
+  }
   desc.colorAttachmentCount = color_count;
   desc.colorAttachments = colors.data();
   if (targets.depth_stencil) {
@@ -130,8 +132,10 @@ const wgpu::RenderPassEncoder& FrameRecorder::BeginRenderPass(
   }
   desc.timestampWrites = timestamp_writes;
   pass_ = encoder().BeginRenderPass(&desc);
-  pass_.PushDebugGroup(pass_label.c_str());
-  has_debug_group_ = true;
+  if (!label.empty()) {
+    pass_.PushDebugGroup(pass_label.c_str());
+    has_debug_group_ = true;
+  }
   pass_targets_ = targets;
   ++pass_serial_;
   return pass_;

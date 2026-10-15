@@ -48,6 +48,9 @@ struct RenderTarget {
   uint32_t width = 0;
   uint32_t height = 0;
   uint32_t pitch_tiles = 1;
+  // Tiles from the base this target owned as of ownership epoch owned_epoch.
+  uint64_t owned_epoch = UINT64_MAX;
+  uint32_t owned_tiles = 0;
   // Multiplier for the pixel shader output (format range scale; the exponent
   // bias is per draw).
   float format_output_scale = 1.0f;
@@ -76,8 +79,9 @@ class RenderTargetCache {
   // Render targets for the draw: the color targets the pixel shader writes
   // (color_targets_used) and depth/stencil if enabled. False if nothing
   // would be drawn (no targets).
+  // `rows`: guest pixel rows the draw can write (DrawExtentEstimator).
   bool Update(const RegisterFile& regs, uint32_t color_targets_used, bool depth_stencil_used,
-              Binding& binding_out);
+              uint32_t rows, Binding& binding_out);
 
   // Host format for a guest color/depth format (with feature fallbacks).
   wgpu::TextureFormat GetColorHostFormat(xenos::ColorRenderTargetFormat format,
@@ -106,6 +110,8 @@ class RenderTargetCache {
   std::unordered_map<uint64_t, std::unique_ptr<RenderTarget>> targets_;
   // Last target that wrote each EDRAM tile.
   std::array<RenderTarget*, xenos::kEdramTileCount> owners_ = {};
+  // Incremented whenever a tile changes owner.
+  uint64_t ownership_epoch_ = 0;
   // Guest-layout EDRAM (32 bits per sample, scaled) for transfers.
   wgpu::Buffer edram_;
   wgpu::ShaderModule transfer_module_;

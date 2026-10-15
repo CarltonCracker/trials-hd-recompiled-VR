@@ -35,6 +35,8 @@
 REXCVAR_DEFINE_INT32(webgpu_trace_frame, -1, "GPU/WebGPU",
                      "Log every draw, resolve and swap the backend receives in this guest frame "
                      "(-1 = off)");
+REXCVAR_DEFINE_BOOL(webgpu_debug_labels, false, "GPU/WebGPU",
+                    "Label passes and draws for graphics debuggers (costs CPU per draw)");
 REXCVAR_DEFINE_INT32(webgpu_dump_frame, -1, "GPU/WebGPU",
                      "First guest frame to dump per-draw probe records to webgpu_dump_file "
                      "(-1 = off)");
@@ -198,6 +200,7 @@ bool WebGpuBackend::Initialize(memory::Memory& memory, const RegisterFile& regis
   if (!texture_cache_->Initialize()) {
     return false;
   }
+  draw_extent_estimator_ = std::make_unique<DrawExtentEstimator>(register_file, memory);
   render_target_cache_ = std::make_unique<RenderTargetCache>(
       provider_, *frame_recorder_, uint32_t(std::clamp(REXCVAR_GET(draw_resolution_scale_x), 1, 3)),
       uint32_t(std::clamp(REXCVAR_GET(draw_resolution_scale_y), 1, 3)));
@@ -645,7 +648,9 @@ bool WebGpuBackend::Draw(const DrawSnapshot& draw) {
   reg::RB_DEPTHCONTROL depth_control = draw_util::GetNormalizedDepthControl(regs);
   bool depth_used = depth_control.z_enable || depth_control.stencil_enable;
   RenderTargetCache::Binding targets;
-  if (!render_target_cache_->Update(regs, color_targets_used, depth_used, targets)) {
+  // EDRAM has no height: rows the draw can touch, for tile ownership.
+  uint32_t draw_rows = draw_extent_estimator_->EstimateMaxY(true, *vertex_shader);
+  if (!render_target_cache_->Update(regs, color_targets_used, depth_used, draw_rows, targets)) {
     return true;
   }
 
@@ -841,16 +846,20 @@ bool WebGpuBackend::Draw(const DrawSnapshot& draw) {
       target->initialized = true;
     }
   }
-  std::string rt_keys;
-  for (uint32_t i = 0; i < 4; ++i) {
-    if (targets.color[i]) {
-      fmt::format_to(std::back_inserter(rt_keys), " c{}:0x{:08X}", i, targets.color[i]->key.value);
+  bool debug_labels = REXCVAR_GET(webgpu_debug_labels);
+  std::string pass_label;
+  if (debug_labels) {
+    pass_label = fmt::format("guest pass #{}", frame_recorder_->pass_serial());
+    for (uint32_t i = 0; i < 4; ++i) {
+      if (targets.color[i]) {
+        fmt::format_to(std::back_inserter(pass_label), " c{}:0x{:08X}", i,
+                       targets.color[i]->key.value);
+      }
+    }
+    if (targets.depth) {
+      fmt::format_to(std::back_inserter(pass_label), " d:0x{:08X}", targets.depth->key.value);
     }
   }
-  if (targets.depth) {
-    fmt::format_to(std::back_inserter(rt_keys), " d:0x{:08X}", targets.depth->key.value);
-  }
-  std::string pass_label = fmt::format("guest pass #{}{}", frame_recorder_->pass_serial(), rt_keys);
   PassCategory category = ClassifyPass(targets, regs, primitive.host_vertex_shader_type);
   bool new_pass = !frame_recorder_->in_render_pass() ||
                   !frame_recorder_->current_targets().SameAttachments(pass_targets);
@@ -878,14 +887,16 @@ bool WebGpuBackend::Draw(const DrawSnapshot& draw) {
   pass.SetBlendConstant(&blend_constant);
 
   uint32_t count = primitive.host_draw_vertex_count;
-  std::string draw_marker = fmt::format(
-      "draw #{} (VS:{:016X} PS:{:016X} {} {} verts)",
-      draw.draw_index,
-      vertex_shader ? vertex_shader->ucode_data_hash() : 0,
-      pixel_shader ? pixel_shader->ucode_data_hash() : 0,
-      PrimitiveTypeName(draw.primitive_type),
-      count);
-  pass.InsertDebugMarker(draw_marker.c_str());
+  if (debug_labels) {
+    std::string draw_marker = fmt::format(
+        "draw #{} (VS:{:016X} PS:{:016X} {} {} verts)",
+        draw.draw_index,
+        vertex_shader ? vertex_shader->ucode_data_hash() : 0,
+        pixel_shader ? pixel_shader->ucode_data_hash() : 0,
+        PrimitiveTypeName(draw.primitive_type),
+        count);
+    pass.InsertDebugMarker(draw_marker.c_str());
+  }
 
   uint32_t index_size = index_format == wgpu::IndexFormat::Uint16 ? 2 : 4;
   switch (primitive.index_buffer_type) {
@@ -1082,8 +1093,11 @@ void WebGpuBackend::Swap(const SwapSnapshot& swap) {
       gpu_profiler_->OnFrameSubmitted();
     }
     primitive_processor_->EndFrame();
-    // Bind groups keep their views alive; start over every frame.
-    State().texture_bind_groups.clear();
+    // Cached bind groups keep their views and samplers alive, so their
+    // pointers (the key) are not reused while cached; just bound the size.
+    if (State().texture_bind_groups.size() > 4096) {
+      State().texture_bind_groups.clear();
+    }
     auto it = State().resolved_regions.find(swap.frontbuffer_ptr & 0x1FFFFFFF);
     if (it == State().resolved_regions.end()) {
       it = State().resolved_regions.find(swap.frontbuffer_ptr);

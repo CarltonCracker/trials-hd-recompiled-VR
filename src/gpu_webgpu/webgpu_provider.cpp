@@ -19,8 +19,9 @@ REXCVAR_DEFINE_INT32(webgpu_adapter, -1, "GPU/WebGPU",
                      "Index of the WebGPU adapter to use, as listed in the log at startup "
                      "(-1 = the first discrete GPU, else the first adapter)")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
-REXCVAR_DEFINE_BOOL(webgpu_validation, true, "GPU/WebGPU",
-                    "Validate WebGPU commands in Dawn (off: the skip_validation toggle, faster)")
+REXCVAR_DEFINE_BOOL(webgpu_validation, false, "GPU/WebGPU",
+                    "Validate WebGPU commands in Dawn (debugging; off uses the faster "
+                    "skip_validation toggle)")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(webgpu_backend_validation, false, "GPU/WebGPU",
                     "Enable the Vulkan or Metal validation layers under Dawn (debugging)")

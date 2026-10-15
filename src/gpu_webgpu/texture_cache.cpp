@@ -10,6 +10,7 @@
 #include <rex/graphics/pipeline/texture/conversion.h>
 #include <rex/graphics/pipeline/texture/info.h>
 #include <rex/graphics/pipeline/texture/util.h>
+#include <rex/hash.h>
 #include <rex/logging.h>
 #include <rex/math.h>
 #include <rex/memory.h>
@@ -412,11 +413,27 @@ bool TextureCache::LoadTexture(Texture& texture) {
     texture.watched = true;
   }
 
+  // CPU writes near a texture invalidate it too (the SDK widens each write
+  // fault to its 256 KB block), so reload only if the guest data changed.
+  const uint8_t* guest = memory_.TranslatePhysical<const uint8_t*>(0);
+  uint64_t content_hash = 0;
+  if (key.base_page) {
+    content_hash = XXH3_64bits(guest + base_address, layout.base.level_data_extent_bytes);
+  }
+  if (key.mip_page && layout.mips_total_extent_bytes) {
+    content_hash = XXH3_64bits_withSeed(guest + mip_address, layout.mips_total_extent_bytes,
+                                        content_hash);
+  }
+  if (texture.loaded && texture.content_hash == content_hash) {
+    return true;
+  }
+  texture.loaded = true;
+  texture.content_hash = content_hash;
+
   uint32_t bytes_per_block = info->bytes_per_block();
   uint32_t bytes_per_block_log2 = rex::log2_floor(bytes_per_block);
   std::vector<uint8_t> swapped(bytes_per_block);
   std::vector<uint8_t> level_data;
-  const uint8_t* guest = memory_.TranslatePhysical<const uint8_t*>(0);
   for (uint32_t level = 0; level < level_count; ++level) {
     uint32_t level_width = std::max(width >> level, uint32_t(1));
     uint32_t level_height = std::max(height >> level, uint32_t(1));

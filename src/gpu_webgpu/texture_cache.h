@@ -100,6 +100,9 @@ class TextureCache {
     wgpu::TextureView view_cube;
     std::atomic<bool> dirty{true};
     bool watched = false;
+    // Guest data hash of the last load.
+    bool loaded = false;
+    uint64_t content_hash = 0;
     uint32_t data_start = 0;
     uint32_t data_length = 0;
   };

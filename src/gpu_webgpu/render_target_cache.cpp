@@ -130,7 +130,7 @@ RenderTarget* RenderTargetCache::GetOrCreate(RenderTargetKey key) {
 }
 
 bool RenderTargetCache::Update(const RegisterFile& regs, uint32_t color_targets_used,
-                               bool depth_stencil_used, Binding& binding_out) {
+                               bool depth_stencil_used, uint32_t rows, Binding& binding_out) {
   binding_out = {};
   auto surface_info = regs.Get<reg::RB_SURFACE_INFO>();
   uint32_t pitch = surface_info.surface_pitch;
@@ -179,10 +179,6 @@ bool RenderTargetCache::Update(const RegisterFile& regs, uint32_t color_targets_
   binding_out.width = width;
   binding_out.height = height;
 
-  // The scissor bounds the rows the draw can write (EDRAM has no height).
-  draw_util::Scissor scissor;
-  draw_util::GetScissor(regs, scissor);
-  uint32_t rows = scissor.offset[1] + scissor.extent[1];
   for (RenderTarget* target : binding_out.color) {
     if (target) {
       Acquire(target, rows, &binding_out);
@@ -224,6 +220,10 @@ void RenderTargetCache::Acquire(RenderTarget* target, uint32_t rows, const Bindi
   uint32_t tile_rows = (rows * samples_y + xenos::kEdramTileHeightSamples - 1) /
                        xenos::kEdramTileHeightSamples;
   uint32_t tile_count = std::min(tile_rows * target->pitch_tiles, xenos::kEdramTileCount);
+  if (target->owned_epoch == ownership_epoch_ && tile_count <= target->owned_tiles) {
+    return;  // Nothing changed owner since this target took these tiles.
+  }
+  bool changed = false;
   auto is_bound = [bound](const RenderTarget* other) {
     return bound && (other == bound->depth ||
                      std::find(bound->color.begin(), bound->color.end(), other) !=
@@ -237,6 +237,7 @@ void RenderTargetCache::Acquire(RenderTarget* target, uint32_t rows, const Bindi
     if (i < tile_count) {
       RenderTarget*& slot = owners_[(target->key.base_tiles + i) % xenos::kEdramTileCount];
       owner = slot != target && !is_bound(slot) ? slot : nullptr;
+      changed |= slot != target;
       slot = target;
     }
     if (owner == run_owner) {
@@ -248,6 +249,11 @@ void RenderTargetCache::Acquire(RenderTarget* target, uint32_t rows, const Bindi
     run_owner = owner;
     run_first = i;
   }
+  if (changed) {
+    ++ownership_epoch_;
+  }
+  target->owned_epoch = ownership_epoch_;
+  target->owned_tiles = tile_count;
 }
 
 bool RenderTargetCache::InitializeTransfer() {

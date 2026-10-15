@@ -8,6 +8,8 @@
 #include <cstdio>
 #include <memory>
 
+#include <rex/graphics/util/draw_extent_estimator.h>
+
 #include <webgpu/webgpu_cpp.h>
 
 #include "draw_snapshot.h"
@@ -79,6 +81,7 @@ class WebGpuBackend {
   std::unique_ptr<RenderTargetCache> render_target_cache_;
   std::unique_ptr<TextureCache> texture_cache_;
   std::unique_ptr<ResolveEngine> resolve_engine_;
+  std::unique_ptr<DrawExtentEstimator> draw_extent_estimator_;
   wgpu::BindGroup draw_bind_group_;
   wgpu::BindGroup shared_memory_bind_group_;
   uint32_t skipped_draws_ = 0;
