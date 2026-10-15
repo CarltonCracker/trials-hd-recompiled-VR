@@ -15,7 +15,7 @@ REX_EXTERN(__imp__sub_8265BA38);
 REX_EXTERN(__imp__sub_8265C648);
 REX_EXTERN(__imp__sub_82124A38);
 
-// MainMenu::OnInit - change "Return to Game Library" button to "Exit Game".
+// MainMenu::OnInit - change "Return to Game Library" button to "EXIT GAME".
 extern "C" REX_FUNC(sub_8265BA38) {
   uint32_t menu = ctx.r3.u32;
   __imp__sub_8265BA38(ctx, base);
@@ -23,7 +23,7 @@ extern "C" REX_FUNC(sub_8265BA38) {
   uint32_t return_button = rex::memory::load_and_swap<uint32_t>(base + menu + 72);
   if (return_button != 0) {
 
-    // Replace all occurrences of L"RETURN TO GAME LIBRARY" in guest memory with L"Exit Game"
+    // Replace all occurrences of L"RETURN TO GAME LIBRARY" in guest memory with L"EXIT GAME"
     static const char16_t kTarget[] = u"RETURN TO GAME LIBRARY";
     uint8_t target_bytes[(std::size(kTarget) - 1) * 2];
     for (size_t i = 0; i < std::size(kTarget) - 1; ++i) {
@@ -32,7 +32,7 @@ extern "C" REX_FUNC(sub_8265BA38) {
     }
     std::string_view target_sv(reinterpret_cast<const char*>(target_bytes), sizeof(target_bytes));
 
-    static const char16_t kRepl[] = u"Exit Game";
+    static const char16_t kRepl[] = u"EXIT GAME";
     uint8_t repl_bytes[sizeof(kRepl)];
     for (size_t i = 0; i < std::size(kRepl); ++i) {
       repl_bytes[i * 2] = (kRepl[i] >> 8) & 0xFF;
@@ -45,7 +45,7 @@ extern "C" REX_FUNC(sub_8265BA38) {
       size_t pos = 0;
       while ((pos = mem_sv.find(target_sv, pos)) != std::string_view::npos) {
         uint32_t match_addr = search_base + static_cast<uint32_t>(pos);
-        REXLOG_INFO("Replacing RETURN TO GAME LIBRARY with Exit Game at guest 0x{:08X}", match_addr);
+        REXLOG_INFO("Replacing RETURN TO GAME LIBRARY with EXIT GAME at guest 0x{:08X}", match_addr);
         std::memcpy(base + match_addr, repl_bytes, sizeof(repl_bytes));
         pos += target_sv.size();
       }
