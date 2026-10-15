@@ -1347,7 +1347,7 @@ Every task's "Done when" implicitly includes **`tools/check_native.sh check` pas
 
 | ID | Status | Tier | Task | Depends | Done when |
 | --- | --- | --- | --- | --- | --- |
-| W-S01 | todo | S | Test page `tools/web/spikes/limits.html`: request the adapter, print `adapter.info`, all `adapter.limits` and `adapter.features`; run it in headless Chromium (11.1) with a 10-line CDP script that saves the console output. Record the values the renderer needs (9.2) in section 9.2. | — | Section 9.2 lists Chromium 154 / RX 6600 values for `maxBufferSize`, `maxStorageBufferBindingSize`, the 8 wanted features; question 14.1 answered |
+| W-S01 | claimed pi-gpt 2026-10-15 | S | Test page `tools/web/spikes/limits.html`: request the adapter, print `adapter.info`, all `adapter.limits` and `adapter.features`; run it in headless Chromium (11.1) with a 10-line CDP script that saves the console output. Record the values the renderer needs (9.2) in section 9.2. | — | Section 9.2 lists Chromium 154 / RX 6600 values for `maxBufferSize`, `maxStorageBufferBindingSize`, the 8 wanted features; question 14.1 answered |
 | W-S02 | todo | S | Feature-detect page `tools/web/spikes/wasm_features.html` using `WebAssembly.validate` on tiny modules: shared memory64, threads, simd128, relaxed SIMD, exception handling (exnref), JSPI (`WebAssembly.Suspending`), plus `crossOriginIsolated`. Run in Chromium here; write the matrix into 5.1. Add the result columns for Firefox and Safari as `unverified` until someone runs it there. | — | 5.1 table updated with "verified in Chromium 154" values |
 | W-S03 | todo | S | Emscripten "hello pthreads + Memory64" page: `em++ --target=wasm64 -pthread -sPROXY_TO_PTHREAD -sPTHREAD_POOL_SIZE=48 -sINITIAL_MEMORY=3800mb -sMAXIMUM_MEMORY=8gb`; spawn 40 threads that each touch 16 MiB at addresses spread over 3 GiB and join; print timings. | — | Runs in Chromium; startup time and RSS (from `chrome://memory-internals` or `/proc` of the renderer process) recorded in 4.5 |
 | W-S04 | todo | S | emdawnwebgpu "triangle in an OffscreenCanvas on a pthread" spike: main transfers the canvas, a pthread creates the device, draws a triangle per `requestAnimationFrame` in the worker. | W-S03 | Screenshot via CDP shows the triangle; notes on any proxying needed |
@@ -1360,7 +1360,7 @@ Every task's "Done when" implicitly includes **`tools/check_native.sh check` pas
 | W-S11 | todo | S | wasm `FPSCRPlatform` (section 6 item 2): shadow register for `getcsr`/`setcsr`, no-op flush; log (debug builds) when a guest rounding mode other than nearest is set. Also log natively which rounding modes the 5 `storeFromGuest` sites set during rides. | W-S10 | Natively: modes listed in 14.6; wasm: header compiles |
 | W-S12 | todo | S | Browser WebGPU draw-cost benchmark page: 1,500 draws/frame with per-draw `setBindGroup` (dynamic offsets) and `setPipeline` changes like the renderer (renderer doc 7.5); report ms/frame in Chromium here vs the same program natively with Dawn (`tools/webgpu_smoke` can host the native half). | W-S04 | Table in 9.6 |
 | W-S13 | todo | S | Port `tools/stfs_extract.py` to C++ (`tools/stfs_extract/stfs_extract.cpp`, library + CLI), byte-identical output on the user's package. | — | `cmp -r` of both extractions is empty; CLI added to native CMake as an optional tool |
-| W-S14 | claimed pi-gpt 2026-10-15 | S | `tools/web/serve.py`: static server on `127.0.0.1:8080` with COOP/COEP/CORP headers, `application/wasm`, brotli/gzip pre-compressed files, no directory listing outside the build folder. | — | `curl -I` shows the headers; a test page reports `crossOriginIsolated === true` |
+| W-S14 | done 2026-10-15 9b5a087 | S | `tools/web/serve.py`: static server on `127.0.0.1:8080` with COOP/COEP/CORP headers, `application/wasm`, brotli/gzip pre-compressed files, no directory listing outside the build folder. | — | `curl -I` shows the headers; a test page reports `crossOriginIsolated === true` |
 | W-S15 | todo | S | `tools/web/cdp.py`: minimal CDP client (stdlib + `websockets` from `.venv`): launch Chromium with 11.1 flags, open URL, stream console to a file, `evaluate` JS, screenshot, and run `tests/headless/*.txt` commands through a page hook. | W-S14 | Runs a demo script against W-S04's page and saves a screenshot |
 | W-S16 | todo | M | Pipeline warm-up: on startup, read the OPFS shader storage and create pipelines with `createRenderPipelineAsync` before the menu appears (design note from W-L10). | W-L10 | First menu frame has no shader-compile stalls > 50 ms in the console timing log |
 | W-S17 | todo | S | Web section for the README (dev): build steps (10.1), the localhost-only rule (D12), browser requirements, import steps. No public hosting instructions. | WM2 | README section reviewed by a large model |
@@ -1402,6 +1402,14 @@ details of W-L04 to W-L09. The critical path is W-L01 → W-L02/W-L04 → W-L15 
 W-L06/W-L07 (graphics).
 
 ### 16.6 Notes log
+
+- 2026-10-15 (pi-gpt): **W-S14 done**, commit `9b5a087`. Seven server tests pass;
+  `curl -I` verifies WASM MIME + COOP/COEP/CORP; Chromium 154 reports
+  `crossOriginIsolated=true`. `flock out/native-web-check.lock tools/check_native.sh
+  check out/native_baseline_pi`: `webgpu: 9 captures`, `worst 44.4 dB vs baseline`;
+  `vulkan: 9 captures`, `worst 43.6 dB vs baseline`; `NATIVE CHECK PASSED`.
+  Claimed W-S01 next (adapter limits/features); W-S15 waits until the triangle spike
+  exists for its acceptance check. Native baseline for this web-only task is unchanged.
 
 - 2026-10-15 (pi-gpt): claimed W-S14 (localhost server); next work will be W-S15
   and browser spikes if unclaimed. Staying in `tools/web/` and this document to avoid
