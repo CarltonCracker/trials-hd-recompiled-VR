@@ -1560,7 +1560,7 @@ Every task's "Done when" implicitly includes **`tools/check_native.sh check` pas
 | W-S07 | todo | S | Prove MMIO completeness: in a native debug build, make the `SIGSEGV` MMIO path (`exception_handler_posix.cpp` → `MMIOHandler`) log and abort for addresses `0x7F000000–0x7FFFFFFF`; run `main_menu_nav`, `ride_middle_name_danger`, `settings_menu`, `credits`. | — | No abort in all four (or the faulting addresses are listed in 8.2 and a W-L task is added) |
 | W-S08 | todo | S | Log `KernelState::RegisterFiber` and `Fiber::Create` calls natively over the four scripts. | — | 14.5 answered ("no fibers" → drop fiber port; "fibers" → add a W-L task) |
 | W-S09 | todo | S | Audit host writers into guest physical memory (8.3): grep the SDK `src/kernel`, `src/system`, `src/audio`, `src/filesystem`, and `src/*.cpp` for `memcpy`/`memset`/`TranslatePhysical`/`TranslateVirtual` writes; list every site with file:line and whether the target can be physical. | — | Table added to 8.3 with all sites |
-| W-S10 | claimed pi-gpt 2026-10-15 (takeover) | S | Header portability patch (SDK patch, guarded): `REX_PLATFORM_EMSCRIPTEN` in `platform.h`; enable the portable `vsl`/`vslo`/`vsro` branches for `__wasm__`; extend the chrono shim to `__EMSCRIPTEN__`; allow `dynlib.h` with no native library names. (Section 6 items 1, 3, 4, 6.) | — | Native Linux build unchanged (`git diff` of generated objects not needed; just builds and boots); `em++` of `trials_hd_recomp.0.cpp` gets past those three errors |
+| W-S10 | review | S | Header portability patch (SDK patch, guarded): `REX_PLATFORM_EMSCRIPTEN` in `platform.h`; enable the portable `vsl`/`vslo`/`vsro` branches for `__wasm__`; extend the chrono shim to `__EMSCRIPTEN__`; allow `dynlib.h` with no native library names. (Section 6 items 1, 3, 4, 6.) | — | Native Linux build unchanged (`git diff` of generated objects not needed; just builds and boots); `em++` of `trials_hd_recomp.0.cpp` gets past those three errors |
 | W-S11 | claimed pi-gpt 2026-10-15 (takeover) | S | wasm `FPSCRPlatform` (section 6 item 2): shadow register for `getcsr`/`setcsr`, no-op flush; log (debug builds) when a guest rounding mode other than nearest is set. Also log natively which rounding modes the 5 `storeFromGuest` sites set during rides. | W-S10 | Natively: modes listed in 14.6; wasm: header compiles |
 | W-S12 | todo | S | Browser WebGPU draw-cost benchmark page: 1,500 draws/frame with per-draw `setBindGroup` (dynamic offsets) and `setPipeline` changes like the renderer (renderer doc 7.5); report ms/frame in Chromium here vs the same program natively with Dawn (`tools/webgpu_smoke` can host the native half). | W-S04 | Table in 9.6 |
 | W-S13 | todo | S | Port `tools/stfs_extract.py` to C++ (`tools/stfs_extract/stfs_extract.cpp`, library + CLI), byte-identical output on the user's package. | — | `cmp -r` of both extractions is empty; CLI added to native CMake as an optional tool |
@@ -1606,6 +1606,13 @@ details of W-L04 to W-L09. The critical path is W-L01 → W-L02/W-L04 → W-L15 
 W-L06/W-L07 (graphics).
 
 ### 16.6 Notes log
+
+- 2026-10-15 (pi-gpt): **W-S10 → review (needs macOS check)**. Portability patch
+  preserved/finalized in `bdc023e`/`86088a1`; the real-SDK wasm64 compile passed all
+  107 files, and standalone SDK header assertions passed. Native gate after the
+  `dynlib.h` fix: WebGPU 9 captures / worst 40.3 dB; Vulkan 9 captures / worst
+  45.8 dB; unchanged generated fingerprint; `NATIVE CHECK PASSED`.
+  D14's Mac build-and-boot is unavailable on this server, so not marked `done`.
 
 - 2026-10-15 (claude-opus-5.5): claimed **W-L15** (critical path to WM1) while W-L02,
   W-S10 and W-S11 finish: starting with what does not depend on codegen - the SDK's web
