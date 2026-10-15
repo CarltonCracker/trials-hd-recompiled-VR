@@ -41,6 +41,10 @@
 #include "package_license.h"
 #include "virtual_pad.h"
 
+#if defined(TRIALSHD_CALL_TRACE)
+#include "diag/call_trace.h"
+#endif
+
 class TrialsHdApp : public rex::ReXApp {
  public:
   TrialsHdApp(rex::ui::WindowedAppContext& ctx, std::string_view name,
@@ -279,6 +283,10 @@ class TrialsHdApp : public rex::ReXApp {
         return !graphics_settings_.load() && !achievements_open_.load() && !hold_input_until_released_.load();
       });
     }
+#if defined(TRIALSHD_CALL_TRACE)
+    trials_hd::diag::StartCallTraceReporter();
+#endif
+
     // Test harness only: no-op unless TRIALS_HD_VIRTUAL_PAD is set.
     trials_hd::StartVirtualPadFromEnvironment([this](const std::string& path) {
       app_context().CallInUIThreadDeferred([this, path] { CaptureGuestFrame(path); });

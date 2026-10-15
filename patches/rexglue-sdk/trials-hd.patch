@@ -1417,6 +1417,29 @@ index 953c5fd..5e55cc8 100644
        if (host_depth_encoding_different) {
          it->second.GetHostDepthRenderTarget(dest.GetDepthFormat()) = dest;
        }
+diff --git a/src/graphics/pipeline/shader/interpreter.cpp b/src/graphics/pipeline/shader/interpreter.cpp
+index cc726b7..84113ed 100644
+--- a/src/graphics/pipeline/shader/interpreter.cpp
++++ b/src/graphics/pipeline/shader/interpreter.cpp
+@@ -967,7 +967,7 @@ void ShaderInterpreter::ExecuteVertexFetchInstruction(ucode::VertexFetchInstruct
+     }
+ 
+     uint32_t packed_components = 0b0000;
+-    uint32_t packed_widths[4], packed_offsets[4];
++    uint32_t packed_widths[4] = {}, packed_offsets[4] = {};
+     uint32_t packed_dwords[] = {data[0], data[0]};
+     switch (instr.data_format()) {
+       case xenos::VertexFormat::k_8_8_8_8: {
+@@ -1107,7 +1107,8 @@ void ShaderInterpreter::ExecuteVertexFetchInstruction(ucode::VertexFetchInstruct
+             continue;
+           }
+           uint32_t packed_width = packed_widths[i];
+-          result[i] = float(packed_dwords[i >> 1] & ((UINT32_C(1) << packed_widths[i]) - 1));
++          result[i] = float((packed_dwords[i >> 1] >> packed_offsets[i]) &
++                            ((UINT32_C(1) << packed_widths[i]) - 1));
+         }
+         if (instr.is_normalized()) {
+           for (uint32_t i = 0; i < 4; ++i) {
 diff --git a/src/graphics/pipeline/shader/spirv_translator_fetch.cpp b/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
 index 9ce3bb4..548d1e7 100644
 --- a/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
@@ -13620,9 +13643,18 @@ index e886a88..fd74aaf 100644
  
  }  // namespace rex::ui
 diff --git a/src/ui/rex_app.cpp b/src/ui/rex_app.cpp
-index b94fe9e..95d07ec 100644
+index b94fe9e..4d906b3 100644
 --- a/src/ui/rex_app.cpp
 +++ b/src/ui/rex_app.cpp
+@@ -49,7 +49,7 @@
+ REXCVAR_DEFINE_STRING(gpu_plugin, "", "GPU",
+                       "GPU emulation plugin to load at startup (e.g. 'xenos'); empty disables "
+                       "GPU emulation")
+-    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ 
+ namespace rex {
+ 
 @@ -421,6 +421,10 @@ void ReXApp::SetupOverlays(rex::ui::Presenter* presenter, rex::ui::ImmediateDraw
        achievements_overlay_.reset();
      } else {
