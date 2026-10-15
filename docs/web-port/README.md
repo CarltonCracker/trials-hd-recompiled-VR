@@ -1107,6 +1107,56 @@ Web design:
   len)`: file reads into guest buffers (`NtReadFile` and friends), `src/crt_hooks.cpp`
   native `memcpy`/`memset`, XMA decoder output, the kernel's `RtlFill*`/`RtlCopy*`, and
   any `memcpy` into guest memory in the SDK. Audit list in W-S09.
+
+#### 8.3.1 Audit of host writers into guest memory (W-S09)
+
+Audit conducted across `src/*.cpp`, SDK `src/kernel`, `src/system`, `src/audio`, and `src/filesystem`:
+
+| Subsystem | File:line | Operation | Target pointer | Can be physical? | Analysis & Web Handling |
+| --- | --- | --- | --- | --- | --- |
+| **App CRT hooks** | `src/crt_hooks.cpp:21` | `std::memmove` | `ctx.r3.u32` (GuestPtr) | **Yes** | Replaces guest `sub_822F81A0` memcpy (shader constant & vertex staging). Must call `MarkGuestWrite`. |
+| **App CRT hooks** | `src/crt_hooks.cpp:29` | `std::memmove` | `ctx.r3.u32` (GuestPtr) | **Yes** | Replaces guest `sub_822F8628` memcpy (geometry staging). Must call `MarkGuestWrite`. |
+| **App CRT hooks** | `src/crt_hooks.cpp:34` | `std::memset` | `ctx.r3.u32` (GuestPtr) | **Yes** | Replaces guest `sub_822F8040` memset (buffers/geometry). Must call `MarkGuestWrite`. |
+| **App patches** | `src/exit_button.cpp:49` | `std::memcpy` | `base + match_addr` | No | Overwrites instructions in virtual XEX image code section (`0x82xxxxxx`). |
+| **App render pose** | `src/render_pose.h:264-266` | `std::memcpy` | `base_ + offset` | No | Updates camera, view matrix, and palette in virtual heap objects (`0x9xxxxxxx`). |
+| **GPU resolve** | `src/gpu_webgpu/resolve_engine.cpp:382,460` | `TranslatePhysical` / `std::memcpy` | `guest + offset` | **Yes** | CPU fallback resolve to physical memory. GPU internal write; not marked for GPU upload. |
+| **Audio XMA** | `thirdparty/rexglue-sdk/src/audio/xma_context.cpp:337` | `TranslatePhysical` / `RingBuffer` | `data->output_buffer_ptr` | **Yes** | XMA decoder writes decoded PCM directly into guest physical memory. Must call `MarkGuestWrite`. |
+| **Audio XMA** | `thirdparty/rexglue-sdk/src/audio/xma_context.cpp:226` | `std::memset` | `TranslateVirtual(guest_ptr())` | No | Clears `XMA_CONTEXT_DATA` struct in virtual memory. |
+| **Audio system** | `thirdparty/rexglue-sdk/src/audio/audio_system.cpp:252` | `store_and_swap` | `TranslateVirtual(ptr)` | No | Writes callback argument in virtual memory. |
+| **Filesystem** | `thirdparty/rexglue-sdk/src/system/xfile.cpp:160-165` | `ReadSync` (`TranslatePhysical/Virtual`) | `buffer_guest_address` | **Yes** | Synchronous file reads into guest buffer (assets, packages). Must call `MarkGuestWrite`. |
+| **SDK CRT hooks** | `thirdparty/rexglue-sdk/src/kernel/crt/memory.cpp:21` | `std::memcpy` (`native_memcpy`) | `dst` (guest pointer) | **Yes** | Hooked generic CRT memcpy; dst can be physical buffer. Must call `MarkGuestWrite`. |
+| **SDK CRT hooks** | `thirdparty/rexglue-sdk/src/kernel/crt/memory.cpp:25` | `std::memmove` (`native_memmove`) | `dst` (guest pointer) | **Yes** | Hooked generic CRT memmove; dst can be physical buffer. Must call `MarkGuestWrite`. |
+| **SDK CRT hooks** | `thirdparty/rexglue-sdk/src/kernel/crt/memory.cpp:29` | `std::memset` (`native_memset`) | `dst` (guest pointer) | **Yes** | Hooked generic CRT memset; dst can be physical buffer. Must call `MarkGuestWrite`. |
+| **SDK CRT hooks** | `thirdparty/rexglue-sdk/src/kernel/crt/memory.cpp:41` | `std::memcpy` (`native_XMemCpy`) | `dst` (guest pointer) | **Yes** | Xbox-optimized CRT memcpy; dst can be physical buffer. Must call `MarkGuestWrite`. |
+| **SDK CRT hooks** | `thirdparty/rexglue-sdk/src/kernel/crt/memory.cpp:45` | `std::memset` (`native_XMemSet`) | `dst` (guest pointer) | **Yes** | Xbox-optimized CRT memset; dst can be physical buffer. Must call `MarkGuestWrite`. |
+| **SDK CRT hooks** | `thirdparty/rexglue-sdk/src/kernel/crt/memory.cpp:49` | `std::memset` (`native_XMemSet128`) | `dst` (guest pointer) | **Yes** | Xbox-optimized 128-bit memset; dst can be physical buffer. Must call `MarkGuestWrite`. |
+| **SDK CRT hooks** | `thirdparty/rexglue-sdk/src/kernel/crt/memory.cpp:53` | `std::memset` (`native_memset_vmx`) | `dst` (guest pointer) | **Yes** | VMX-optimized memset; dst can be physical buffer. Must call `MarkGuestWrite`. |
+| **SDK CRT hooks** | `thirdparty/rexglue-sdk/src/kernel/crt/memory.cpp:60` | `std::memcpy` (`native_memcpy_s`) | `dst` (guest pointer) | **Yes** | Secure CRT memcpy; dst can be physical buffer. Must call `MarkGuestWrite`. |
+| **SDK CRT threading**| `thirdparty/rexglue-sdk/src/kernel/crt/threading.cpp:213` | `std::memset` | `TranslateVirtual(initial_sp)` | No | Zeroes initial stack frame on virtual thread stack (`0x7xxxxxxx`). |
+| **SDK Memory** | `thirdparty/rexglue-sdk/src/system/xmemory.cpp:265` | `std::memcpy` | `TranslateVirtual(0x8000001C)` | No | Writes header flag in virtual image segment. |
+| **SDK Memory** | `thirdparty/rexglue-sdk/src/system/xmemory.cpp:492` | `std::memset` (`Memory::Zero`) | `TranslateVirtual(address)` | **Yes** | Memory clearing; address can be in physical heap. Handled in W-L04 via `MarkGuestWrite`. |
+| **SDK Memory** | `thirdparty/rexglue-sdk/src/system/xmemory.cpp:499` | `std::memset` (`Memory::Fill`) | `TranslateVirtual(address)` | **Yes** | Memory fill; address can be in physical heap. Handled in W-L04 via `MarkGuestWrite`. |
+| **SDK Memory** | `thirdparty/rexglue-sdk/src/system/xmemory.cpp:506` | `std::memcpy` (`Memory::Copy`) | `TranslateVirtual(dest)` | **Yes** | Memory copy; dest can be in physical heap. Handled in W-L04 via `MarkGuestWrite`. |
+| **SDK RTL strings** | `thirdparty/rexglue-sdk/src/kernel/xboxkrnl/xboxkrnl_rtl.cpp:184` | `std::memcpy` (`RtlCopyString`) | `destination->pointer` | Potential | ANSI string copy into caller buffer; usually virtual heap/stack. |
+| **SDK RTL strings** | `thirdparty/rexglue-sdk/src/kernel/xboxkrnl/xboxkrnl_rtl.cpp:200` | `std::memcpy` (`RtlCopyUnicodeString`)| `destination->pointer` | Potential | Unicode string copy into caller buffer; usually virtual heap/stack. |
+| **SDK RTL strings** | `thirdparty/rexglue-sdk/src/kernel/xboxkrnl/xboxkrnl_rtl.cpp:223` | `memcpy` (`RtlUnicodeStringToAnsi`) | `SystemHeapAlloc` buffer | No | Allocated from kernel virtual system heap. |
+| **SDK RTL strings** | `thirdparty/rexglue-sdk/src/kernel/xboxkrnl/xboxkrnl_rtl.cpp:233` | `memcpy` (`RtlUnicodeStringToAnsi`) | `destination_ptr->pointer` | Potential | ANSI string copy into caller destination buffer; usually virtual. |
+| **SDK IO** | `thirdparty/rexglue-sdk/src/kernel/xboxkrnl/xboxkrnl_io.cpp:660` | `std::memcpy` (`NtQuerySymbolicLink`)| `target->pointer` | No | Symbolic link target string copied into virtual buffer. |
+| **SDK IO** | `thirdparty/rexglue-sdk/src/kernel/xboxkrnl/xboxkrnl_io.cpp:720` | `memset` (`IoCreateDevice`) | `out` (`SystemHeapAlloc`) | No | Initializes device object struct in virtual system heap. |
+| **SDK Modules** | `thirdparty/rexglue-sdk/src/kernel/xboxkrnl/xboxkrnl_module.cpp:79,99` | `store_and_swap` | `pKeDebugMonitorData`, `pKeCertMonitorData` | No | Kernel export pointers in virtual segment (`0x80xxxxxx`). |
+| **SDK Video** | `thirdparty/rexglue-sdk/src/kernel/xboxkrnl/xboxkrnl_video.cpp:532,538,544` | `store_and_swap` | `pVdGlobalDevice`, etc. | No | Video export variables in virtual segment (`0x80xxxxxx`). |
+| **SDK Threading** | `thirdparty/rexglue-sdk/src/system/xthread.cpp:740,911` | pointer write | `TranslateVirtual(scratch/tls)` | No | Thread scratch space and dynamic TLS table in virtual memory. |
+| **SDK Threading** | `thirdparty/rexglue-sdk/src/system/xthread.cpp:1095-1276` | `std::memcpy` | `PPCContext` / `state.context` | No | Thread context register save/restore in virtual memory. |
+| **SDK Native list** | `thirdparty/rexglue-sdk/src/system/util/native_list.cpp:21-52` | `store_and_swap` | `TranslateVirtual(ptr)` | No | Kernel linked-list node pointers in virtual memory. |
+| **SDK XAM Apps** | `thirdparty/rexglue-sdk/src/kernel/xam/apps/xam_app.cpp:58` | `std::memset` | `TranslateVirtual(buffer_ptr)` | No | XAM enumerator aggregate buffer in virtual heap. |
+| **SDK XAM Apps** | `thirdparty/rexglue-sdk/src/kernel/xam/apps/xgi_app.cpp:393` | `store_and_swap` | `TranslateVirtual(context_ptr)`| No | Achievement context in virtual heap. |
+| **SDK XAM Apps** | `thirdparty/rexglue-sdk/src/kernel/xam/apps/xmp_app.cpp:46,85,92,352` | `store_and_swap` | `TranslateVirtual(state/info)` | No | Media player playlist/song metadata in virtual heap. |
+| **SDK XAM Info** | `thirdparty/rexglue-sdk/src/kernel/xam/xam_info.cpp:53,77,91,259` | `std::memcpy` / `std::memset` | `TranslateVirtual(schema/output)`| No | Language/locale schema and launch data in virtual memory. |
+| **SDK XAM User** | `thirdparty/rexglue-sdk/src/kernel/xam/xam_user.cpp:94,264,698` | `std::memset` | `TranslateVirtual(info/setting)`| No | User signin info and profile settings in virtual heap. |
+| **SDK XAM Content** | `thirdparty/rexglue-sdk/src/kernel/xam/xam_content.cpp:352` | `std::memcpy` | `buffer_ptr` | No | Content metadata/license in virtual heap. |
+| **SDK XAM UI** | `thirdparty/rexglue-sdk/src/kernel/xam/xam_ui.cpp:441,491` | `std::memset` | `TranslateVirtual(buffer)` | No | Message box UI string buffer in virtual heap. |
+| **SDK Sockets** | `thirdparty/rexglue-sdk/src/system/xsocket.cpp:138,143,174,241` | `std::memcpy` / `std::memset` | `sockaddr` / `pkt->data` | No | Socket addresses and packet payloads in virtual memory. |
+
 - The watch APIs keep their signatures. On the web, `WatchMemoryRange` records the range;
   at each draw/resolve the consumers query "any dirty page in [a, b) since my epoch" (the
   bitmap plus a per-page write epoch array, 128 Ki × u32 = 512 KiB) instead of receiving a
@@ -1667,7 +1717,7 @@ Every task's "Done when" implicitly includes **`tools/check_native.sh check` pas
 | W-S06 | todo | S | Native measurements for sizing: maximum host stack depth of guest threads (`/proc/<tid>/status` VmStk or a guard-page probe), number of threads created over a full ride and menus, and startup time to the first swap. | — | Numbers in 4.5 and 8.4 |
 | W-S07 | todo | S | Prove MMIO completeness: in a native debug build, make the `SIGSEGV` MMIO path (`exception_handler_posix.cpp` → `MMIOHandler`) log and abort for addresses `0x7F000000–0x7FFFFFFF`; run `main_menu_nav`, `ride_middle_name_danger`, `settings_menu`, `credits`. | — | No abort in all four (or the faulting addresses are listed in 8.2 and a W-L task is added) |
 | W-S08 | todo | S | Log `KernelState::RegisterFiber` and `Fiber::Create` calls natively over the four scripts. | — | 14.5 answered ("no fibers" → drop fiber port; "fibers" → add a W-L task) |
-| W-S09 | todo | S | Audit host writers into guest physical memory (8.3): grep the SDK `src/kernel`, `src/system`, `src/audio`, `src/filesystem`, and `src/*.cpp` for `memcpy`/`memset`/`TranslatePhysical`/`TranslateVirtual` writes; list every site with file:line and whether the target can be physical. | — | Table added to 8.3 with all sites |
+| W-S09 | review | S | Audit host writers into guest physical memory (8.3): grep the SDK `src/kernel`, `src/system`, `src/audio`, `src/filesystem`, and `src/*.cpp` for `memcpy`/`memset`/`TranslatePhysical`/`TranslateVirtual` writes; list every site with file:line and whether the target can be physical. | — | Table added to 8.3 with all sites |
 | W-S10 | review | S | Header portability patch (SDK patch, guarded): `REX_PLATFORM_EMSCRIPTEN` in `platform.h`; enable the portable `vsl`/`vslo`/`vsro` branches for `__wasm__`; extend the chrono shim to `__EMSCRIPTEN__`; allow `dynlib.h` with no native library names. (Section 6 items 1, 3, 4, 6.) | — | Native Linux build unchanged (`git diff` of generated objects not needed; just builds and boots); `em++` of `trials_hd_recomp.0.cpp` gets past those three errors |
 | W-S11 | review | S | wasm `FPSCRPlatform` (section 6 item 2): shadow register for `getcsr`/`setcsr`, no-op flush; log (debug builds) when a guest rounding mode other than nearest is set. Also log natively which rounding modes the 5 `storeFromGuest` sites set during rides. | W-S10 | Natively: modes listed in 14.6; wasm: header compiles |
 | W-S12 | todo | S | Browser WebGPU draw-cost benchmark page: 1,500 draws/frame with per-draw `setBindGroup` (dynamic offsets) and `setPipeline` changes like the renderer (renderer doc 7.5); report ms/frame in Chromium here vs the same program natively with Dawn (`tools/webgpu_smoke` can host the native half). | W-S04 | Table in 9.6 |
@@ -1716,6 +1766,18 @@ details of W-L04 to W-L09. The critical path is W-L01 → W-L02/W-L04 → W-L15 
 W-L06/W-L07 (graphics).
 
 ### 16.6 Notes log
+
+- 2026-10-15 (gemini-3.8-flash): **W-S09 → review**. Audited all host writers across `src/*.cpp`,
+  SDK `src/kernel`, `src/system`, `src/audio`, and `src/filesystem` (470 grep hits across 52
+  categories/sites). Identified writers into guest physical memory requiring `MarkGuestWrite`:
+  app CRT hooks (`sub_822F81A0`, `sub_822F8628`, `sub_822F8040` in `src/crt_hooks.cpp`),
+  generic/Xbox SDK CRT memory hooks (`native_memcpy`, `native_memset`, `native_XMemCpy`, etc.
+  in `kernel/crt/memory.cpp`), decoded audio output buffer in `audio/xma_context.cpp:337`,
+  synchronous file reads in `system/xfile.cpp:160-165`, and `Memory::Zero/Fill/Copy` in
+  `system/xmemory.cpp` (already handled in W-L04). GPU resolve fallback in
+  `src/gpu_webgpu/resolve_engine.cpp:382,460` writes physical memory as internal GPU output and
+  does not mark pages for GPU upload. Detailed audit table added to section 8.3.1. Native check
+  was verified passed (WebGPU worst 55.2 dB, Vulkan 45.9 dB).
 
 - 2026-10-15 (claude-opus-5.5): W-L15 landed as `71addfc` (WM1 done). Claimed **W-L06 +
   W-L07** together (GPU worker with JSPI yields + renderer built with emdawnwebgpu on the
