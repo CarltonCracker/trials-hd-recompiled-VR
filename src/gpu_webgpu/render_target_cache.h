@@ -2,8 +2,8 @@
 // the guest EDRAM location, pitch, format and sample count. The cache tracks
 // which target last owned each EDRAM tile; a target taking over tiles from
 // another (the game reinterprets 1x targets as 4x MSAA for downsampling, depth
-// as color, and so on) gets the old contents through a guest-layout EDRAM
-// buffer (shaders/transfer.wgsl).
+// as color, and so on) gets the old contents converted sample by sample
+// (shaders/transfer.wgsl).
 
 #pragma once
 
@@ -25,6 +25,7 @@ class WebGpuProvider;
 namespace rex::graphics::webgpu {
 
 class FrameRecorder;
+class GpuProfiler;
 
 union RenderTargetKey {
   uint64_t value = 0;
@@ -43,8 +44,8 @@ struct RenderTarget {
   wgpu::TextureView view;
   wgpu::TextureView depth_only_view;
   wgpu::TextureView stencil_only_view;  // Null without stencil.
-  // EDRAM transfer store bind group (created on first use).
-  wgpu::BindGroup transfer_store_group;
+  // Bind group reading this target in EDRAM transfers (created on first use).
+  wgpu::BindGroup transfer_source_group;
   wgpu::TextureFormat host_format = wgpu::TextureFormat::Undefined;
   uint32_t sample_count = 1;
   // Host pixels (scaled).
@@ -59,6 +60,9 @@ struct RenderTarget {
   float format_output_scale = 1.0f;
   // Contents are undefined until the first pass clears them.
   bool initialized = false;
+  // Depth: stencil may be non-zero somewhere (written by a draw or a clear
+  // since the last zero clear). Transfers skip the stencil bit passes if not.
+  bool stencil_nonzero = false;
 };
 
 class RenderTargetCache {
@@ -76,6 +80,7 @@ class RenderTargetCache {
                     uint32_t scale_x, uint32_t scale_y);
   ~RenderTargetCache();
 
+  void set_gpu_profiler(GpuProfiler* profiler) { gpu_profiler_ = profiler; }
   uint32_t scale_x() const { return scale_x_; }
   uint32_t scale_y() const { return scale_y_; }
 
@@ -108,6 +113,7 @@ class RenderTargetCache {
 
   ui::webgpu::WebGpuProvider& provider_;
   FrameRecorder& frame_recorder_;
+  GpuProfiler* gpu_profiler_ = nullptr;
   uint32_t scale_x_;
   uint32_t scale_y_;
   std::unordered_map<uint64_t, std::unique_ptr<RenderTarget>> targets_;
@@ -115,17 +121,12 @@ class RenderTargetCache {
   std::array<RenderTarget*, xenos::kEdramTileCount> owners_ = {};
   // Incremented whenever a tile changes owner.
   uint64_t ownership_epoch_ = 0;
-  // Guest-layout EDRAM (32 bits per sample, scaled) for transfers.
-  wgpu::Buffer edram_;
   wgpu::ShaderModule transfer_module_;
-  // Store: [color, color 4x, depth, depth 4x]. Load: by host format, samples
-  // and stencil bit pass.
-  std::array<wgpu::ComputePipeline, 4> store_pipelines_;
-  std::array<wgpu::BindGroupLayout, 4> store_bind_group_layouts_;
-  wgpu::BindGroup load_bind_group_;
-  std::unordered_map<uint64_t, wgpu::RenderPipeline> load_pipelines_;
-  wgpu::BindGroupLayout load_bind_group_layout_;
-  wgpu::PipelineLayout load_pipeline_layout_;
+  // By source type (color, color 4x, depth, depth 4x).
+  std::array<wgpu::BindGroupLayout, 4> transfer_bind_group_layouts_;
+  std::array<wgpu::PipelineLayout, 4> transfer_pipeline_layouts_;
+  // By stencil bit pass, source type, destination format and samples.
+  std::unordered_map<uint64_t, wgpu::RenderPipeline> transfer_pipelines_;
 };
 
 }  // namespace rex::graphics::webgpu

@@ -223,9 +223,13 @@ bool WebGpuBackend::Initialize(memory::Memory& memory, const RegisterFile& regis
     return false;
   }
   draw_extent_estimator_ = std::make_unique<DrawExtentEstimator>(register_file, memory);
+
   render_target_cache_ = std::make_unique<RenderTargetCache>(
       provider_, *frame_recorder_, uint32_t(std::clamp(REXCVAR_GET(draw_resolution_scale_x), 1, 3)),
       uint32_t(std::clamp(REXCVAR_GET(draw_resolution_scale_y), 1, 3)));
+  if (gpu_profiler_ && gpu_profiler_->is_enabled()) {
+    render_target_cache_->set_gpu_profiler(gpu_profiler_.get());
+  }
   resolve_engine_ = std::make_unique<ResolveEngine>(provider_, memory, *frame_recorder_,
       *render_target_cache_, *texture_cache_);
   if (!resolve_engine_->Initialize()) { return false; }
@@ -795,6 +799,9 @@ bool WebGpuBackend::Draw(const DrawSnapshot& draw) {
     auto stencil_ref_mask = regs.Get<reg::RB_STENCILREFMASK>();
     key.stencil_read_mask = stencil_ref_mask.stencilmask;
     key.stencil_write_mask = stencil_ref_mask.stencilwritemask;
+    if (depth_control.stencil_enable && stencil_ref_mask.stencilwritemask) {
+      targets.depth->stencil_nonzero = true;
+    }
     DepthBiasState bias = CalculateDepthBias(regs, primitive_polygonal,
                                              render_target_cache_->scale_x(),
                                              render_target_cache_->scale_y());
@@ -1092,6 +1099,10 @@ void WebGpuBackend::MemExport(const DrawSnapshot& draw) {
   frame_recorder_->EndRenderPass();
   wgpu::ComputePassDescriptor pass_desc;
   pass_desc.label = "guest memory export";
+  wgpu::PassTimestampWrites timestamp_writes;
+  if (gpu_profiler_ && gpu_profiler_->BeginPass(PassCategory::kMemExport, timestamp_writes)) {
+    pass_desc.timestampWrites = &timestamp_writes;
+  }
   wgpu::ComputePassEncoder pass = frame_recorder_->encoder().BeginComputePass(&pass_desc);
   pass.SetPipeline(pipeline);
   pass.SetBindGroup(0, draw_bind_group_, offsets.size(), offsets.data());
@@ -1247,6 +1258,7 @@ bool WebGpuBackend::Resolve(const ResolveSnapshot& resolve) {
       }
       frame_recorder_->encoder().BeginRenderPass(&desc).End();
       depth_target->initialized = true;
+      depth_target->stencil_nonzero = (info.rb_depth_clear & 0xFF) != 0;
     }
   }
   return true;

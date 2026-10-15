@@ -29,6 +29,10 @@ const char* PassCategoryName(PassCategory category) {
       return "resolve";
     case PassCategory::kUI:
       return "UI";
+    case PassCategory::kTransfer:
+      return "transfer";
+    case PassCategory::kMemExport:
+      return "memexport";
     default:
       return "other";
   }
@@ -222,10 +226,11 @@ void GpuProfiler::ProcessReadback(uint32_t slot_index) {
       return (double(category_ns_[static_cast<size_t>(cat)]) / 1e6) / frames;
     };
     REXGPU_INFO(
-        "gpu {:.2f} ms/frame (shadow {:.2f}, scene {:.2f}, post {:.2f}, resolve {:.2f}, UI {:.2f}, {} frames)",
+        "gpu {:.2f} ms/frame (shadow {:.2f}, scene {:.2f}, post {:.2f}, resolve {:.2f}, UI {:.2f}, "
+        "transfer {:.2f}, memexport {:.2f}, {} frames)",
         total_ms, cat_ms(PassCategory::kShadow), cat_ms(PassCategory::kScene),
         cat_ms(PassCategory::kPost), cat_ms(PassCategory::kResolve), cat_ms(PassCategory::kUI),
-        frames_counted_);
+        cat_ms(PassCategory::kTransfer), cat_ms(PassCategory::kMemExport), frames_counted_);
 
     total_ns_ = 0;
     std::fill(category_ns_.begin(), category_ns_.end(), 0);

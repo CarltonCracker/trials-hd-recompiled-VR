@@ -1,7 +1,8 @@
 // EDRAM transfer shader (src/gpu_webgpu/shaders/transfer.wgsl): pack/unpack
-// round trips per render-target format, and 1x / 4x / depth addressing that
-// covers every EDRAM sample of the transferred tiles exactly once. Stencil
-// travels in bits 0:7 of depth samples.
+// round trips per render-target format (stencil travels in bits 0:7 of depth
+// samples), and 1x / 4x / depth addressing at 1x and 2x resolution scale that
+// covers every EDRAM sample of the transferred tiles exactly once and maps
+// back to the same host sample.
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -11,26 +12,31 @@
 #include <vector>
 #include "gpu_test.h"
 
-struct Constants {
+struct Target {
   uint32_t base_tiles = 0, pitch_tiles = 1, msaa_4x = 0, is_depth = 0, format = 0;
   float output_scale = 1;
   uint32_t scale_x = 1, scale_y = 1, tile_first = 0, tile_count = 0;
   uint32_t row_first = 0, row_end = 0, width = 0, padding[3] = {};
 };
-static_assert(sizeof(Constants) == 64);
+// Tests use the destination only.
+struct Constants : Target {
+  Target source;
+};
+static_assert(sizeof(Constants) == 128);
 
 static const char* kTestEntryPoints = R"(
 @group(1) @binding(0) var<storage, read> test_in: array<vec4f>;
 @group(1) @binding(1) var<storage, read_write> test_out: array<vec4f>;
 @group(1) @binding(2) var<storage, read_write> test_hits: array<atomic<u32>>;
+@group(1) @binding(3) var<storage, read_write> test_inverse_errors: atomic<u32>;
 
 @compute @workgroup_size(64)
 fn test_round_trip(@builtin(global_invocation_id) id: vec3u) {
   if (id.x < arrayLength(&test_in)) {
     // Depth formats also carry stencil 0xA5 in bits 0:7; z gets it back.
-    let packed = pack(test_in[id.x], select(0u, 0xA5u, c.is_depth != 0u));
-    test_out[id.x] = unpack(packed);
-    if (c.is_depth != 0u) {
+    let packed = pack(c.dest, test_in[id.x], select(0u, 0xA5u, c.dest.is_depth != 0u));
+    test_out[id.x] = unpack(c.dest, packed);
+    if (c.dest.is_depth != 0u) {
       test_out[id.x].z = f32(packed & 0xFFu);
     }
   }
@@ -38,13 +44,18 @@ fn test_round_trip(@builtin(global_invocation_id) id: vec3u) {
 
 @compute @workgroup_size(8, 8)
 fn test_coverage(@builtin(global_invocation_id) id: vec3u) {
-  if (id.x >= c.width || id.y >= c.row_end) {
+  let t = c.dest;
+  if (id.x >= t.width || id.y >= t.row_end) {
     return;
   }
-  for (var i = 0u; i < select(1u, 4u, c.msaa_4x != 0u); i++) {
-    let address = edram_address(id.xy, i);
-    if (address != 0xFFFFFFFFu) {
-      atomicAdd(&test_hits[address], 1u);
+  let tile_samples = 1280u * t.scale_x * t.scale_y;
+  for (var i = 0u; i < select(1u, 4u, t.msaa_4x != 0u); i++) {
+    let location = edram_location(t, id.xy, i);
+    if (location.x != 0xFFFFFFFFu) {
+      atomicAdd(&test_hits[location.x * tile_samples + location.y], 1u);
+      if (any(edram_source(t, location) != vec3u(id.xy, i))) {
+        atomicAdd(&test_inverse_errors, 1u);
+      }
     }
   }
 }
@@ -167,10 +178,23 @@ int main(int argc, char** argv) {
         auto hits = gpu.Buffer(kSamples * 4, wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc |
                                                    wgpu::BufferUsage::CopyDst,
                                zeros.data());
-        std::vector<wgpu::BindGroupEntry> entries(1);
+        auto inverse_errors =
+            gpu.Buffer(4, wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc |
+                              wgpu::BufferUsage::CopyDst, zeros.data());
+        std::vector<wgpu::BindGroupEntry> entries(2);
         entries[0].binding = 2;
         entries[0].buffer = hits;
+        entries[1].binding = 3;
+        entries[1].buffer = inverse_errors;
         run(coverage_pipeline, constants, entries, constants.width / 8, constants.row_end / 8);
+        auto error_bytes = gpu.Read(inverse_errors, 4);
+        uint32_t error_count;
+        std::memcpy(&error_count, error_bytes.data(), 4);
+        if (error_count) {
+          std::fprintf(stderr, "FAIL inverse scale %u msaa_4x %u depth %u: %u samples\n", scale,
+                       msaa_4x, is_depth, error_count);
+          return 1;
+        }
         auto bytes = gpu.Read(hits, kSamples * 4);
         std::vector<uint32_t> counts(kSamples);
         std::memcpy(counts.data(), bytes.data(), bytes.size());

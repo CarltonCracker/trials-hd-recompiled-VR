@@ -23,6 +23,8 @@ enum class PassCategory : uint32_t {
   kPost,
   kResolve,
   kUI,
+  kTransfer,   // EDRAM ownership transfers
+  kMemExport,  // memory export compute
   kCount
 };
 
