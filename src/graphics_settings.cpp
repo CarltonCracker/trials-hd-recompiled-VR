@@ -30,6 +30,7 @@ REXCVAR_DEFINE_INT32(display_height, 0, "Display",
 REXCVAR_DEFINE_BOOL(host_vsync, true, "Display",
                     "Synchronize presentation with the display refresh (no tearing)")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DECLARE(std::string, gpu_plugin);
 
 namespace trials_hd {
 
@@ -45,6 +46,8 @@ constexpr std::array<int, 8> kFpsLimits = {0, 240, 165, 144, 120, 90, 60, 30};
 
 // Values in effect since startup, for "restart to apply" notes.
 std::string g_startup_render_scale;
+std::string g_startup_renderer;
+int g_startup_webgpu_adapter = -1;
 bool g_startup_vsync = true;
 bool g_startup_fps_unlock = true;
 // Refresh rate of the display mode the window is presented in (UI thread writes).
@@ -151,6 +154,20 @@ const char* BindableKeyName(ImGuiKey key) {
 }  // namespace
 
 void ApplyStartupGraphicsSettings() {
+  // Record the renderer chosen at startup (may have come from config or CLI).
+  std::string renderer = REXCVAR_GET(gpu_plugin);
+  if (renderer.empty()) {
+    renderer = "xenos";
+  }
+  g_startup_renderer = renderer;
+
+  std::string adapter_str = rex::cvar::GetFlagByName("webgpu_adapter");
+  try {
+    g_startup_webgpu_adapter = adapter_str.empty() ? -1 : std::stoi(adapter_str);
+  } catch (...) {
+    g_startup_webgpu_adapter = -1;
+  }
+
   g_startup_vsync = REXCVAR_GET(host_vsync);
   g_startup_fps_unlock = GetBool("fps_unlock");
   // The presenter prefers immediate, then mailbox, then FIFO-relaxed, then FIFO.
@@ -158,6 +175,11 @@ void ApplyStartupGraphicsSettings() {
   const char* allow = g_startup_vsync ? "false" : "true";
   rex::cvar::SetFlagByName("vulkan_allow_present_mode_immediate", allow);
   rex::cvar::SetFlagByName("vulkan_allow_present_mode_mailbox", allow);
+  // Apply the same present-mode policy for WebGPU when it is the active renderer.
+  if (renderer == "webgpu") {
+    rex::cvar::SetFlagByName("webgpu_allow_present_mode_immediate", allow);
+    rex::cvar::SetFlagByName("webgpu_allow_present_mode_mailbox", allow);
+  }
 }
 
 void ApplyDisplayMode() {
@@ -362,6 +384,53 @@ void GraphicsSettingsDialog::OnDraw(ImGuiIO& io) {
   }
 
   ImGui::SeparatorText("Graphics");
+
+  // Renderer (Vulkan / WebGPU)
+  std::string cur_renderer = REXCVAR_GET(gpu_plugin);
+  if (cur_renderer.empty()) {
+    cur_renderer = "xenos";
+  }
+  label("Renderer");
+  if (ImGui::BeginCombo("##renderer", cur_renderer == "webgpu" ? "WebGPU" : "Vulkan")) {
+    if (ImGui::Selectable("Vulkan", cur_renderer == "xenos") && cur_renderer != "xenos") {
+      rex::cvar::SetFlagByName("gpu_plugin", "xenos");
+    }
+    if (ImGui::Selectable("WebGPU", cur_renderer == "webgpu") && cur_renderer != "webgpu") {
+      rex::cvar::SetFlagByName("gpu_plugin", "webgpu");
+    }
+    ImGui::EndCombo();
+  }
+  restart_note(cur_renderer != g_startup_renderer);
+
+  // WebGPU Adapter
+  if (cur_renderer == "webgpu" || g_startup_renderer == "webgpu") {
+    int cur_adapter = -1;
+    std::string adapter_str = rex::cvar::GetFlagByName("webgpu_adapter");
+    if (!adapter_str.empty()) {
+      try {
+        cur_adapter = std::stoi(adapter_str);
+      } catch (...) {}
+    }
+    auto adapter_label = [](int a) {
+      return a >= 0 ? fmt::format("Adapter {}", a) : std::string("Default (-1)");
+    };
+    label("WebGPU Adapter");
+    if (ImGui::BeginCombo("##webgpu_adapter", adapter_label(cur_adapter).c_str())) {
+      if (ImGui::Selectable("Default (-1)", cur_adapter < 0)) {
+        rex::cvar::SetFlagByName("webgpu_adapter", "-1");
+      }
+      for (int a = 0; a <= 3; ++a) {
+        if (ImGui::Selectable(fmt::format("Adapter {}", a).c_str(), cur_adapter == a)) {
+          rex::cvar::SetFlagByName("webgpu_adapter", std::to_string(a));
+        }
+      }
+      ImGui::EndCombo();
+    }
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip("WebGPU adapter index (-1 for default discrete GPU)");
+    }
+    restart_note(cur_adapter != g_startup_webgpu_adapter);
+  }
 
   // Display mode
   const bool fullscreen = GetBool("fullscreen");

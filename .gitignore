@@ -24,3 +24,6 @@
 # Packaged builds
 /dist/
 __pycache__/
+
+# Dawn checkout (tools/build_dawn.sh)
+/thirdparty/dawn/

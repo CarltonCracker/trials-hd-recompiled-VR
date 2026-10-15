@@ -1,0 +1,962 @@
+// rexgpu-webgpu - Xenos microcode to WGSL translator: control flow, operands,
+// results, declarations and entry points. ALU: wgsl_alu.cpp; fetch:
+// wgsl_fetch.cpp.
+
+#include "wgsl/wgsl_shader_translator.h"
+
+#include <fmt/format.h>
+
+#include <rex/graphics/xenos.h>
+#include <rex/math.h>
+
+#include "wgsl/wgsl_prelude.wgsl.h"
+
+namespace rex::graphics::webgpu {
+
+namespace {
+constexpr char kComponentChars[] = {'x', 'y', 'z', 'w'};
+
+// Memory export of the written eM# selected by `mask`, following
+// SpirvShaderTranslator::ExportToMemory: eA holds the stream (base address in
+// dwords, eM0's index, format info, element count) as integers in floats.
+// shortcut: 8- and 16-bit-per-element formats (sub-dword stores) are skipped.
+constexpr char kMemExportFunctions[] = R"(
+fn xe_memexport_int(v: vec4f, widths: vec4u, is_signed: bool, is_norm: bool) -> u32 {
+  var packed = 0u;
+  var offset = 0u;
+  for (var i = 0u; i < 4u; i++) {
+    let width = widths[i];
+    if (width == 0u) {
+      break;
+    }
+    var x = select(v[i], 0.0, v[i] != v[i]);
+    var bits: u32;
+    if (is_signed) {
+      if (is_norm) {
+        x = clamp(x, -1.0, 1.0) * f32((1u << (width - 1u)) - 1u);
+      }
+      bits = bitcast<u32>(i32(x + select(0.5, -0.5, x < 0.0)));
+    } else {
+      if (is_norm) {
+        x = clamp(x, 0.0, 1.0) * f32((1u << width) - 1u);
+      }
+      bits = u32(max(x + 0.5, 0.0));
+    }
+    packed = insertBits(packed, bits, offset, width);
+    offset += width;
+  }
+  return packed;
+}
+
+fn xe_memexport_swap(v: vec4u, endian: u32) -> vec4u {
+  switch (endian) {
+    case 4u: {
+      let s = xe_endian_swap4(v, 2u);
+      return s.yxwz;
+    }
+    case 5u: {
+      let s = xe_endian_swap4(v, 2u);
+      return s.wzyx;
+    }
+    default: {
+      return xe_endian_swap4(v, endian);
+    }
+  }
+}
+
+fn xe_memexport(mask: u32) {
+  let eA = bitcast<vec4u>(xe_eA);
+  if (any((eA >> vec4u(30u, 23u, 23u, 23u)) != vec4u(1u, 0x96u, 0x96u, 0x96u))) {
+    return;
+  }
+  let format_info = eA.z;
+  let is_signed = (format_info & (1u << 16u)) != 0u;
+  let is_norm = (format_info & (1u << 17u)) == 0u;
+  let format = extractBits(format_info, 8u, 6u);
+  let endian = format_info & 7u;
+  let eM0_index = eA.y & 0x7FFFFFu;
+  let count = eA.w & 0x7FFFFFu;
+  // Dwords per element (0: unsupported).
+  var dwords = 1u;
+  switch (format) {
+    case 6u, 14u, 50u, 7u, 54u, 16u, 55u, 17u, 56u, 25u, 31u, 36u: {}
+    case 26u, 32u, 37u: { dwords = 2u; }
+    case 38u: { dwords = 4u; }
+    default: { return; }
+  }
+  let base = (eA.x << 2u) >> 2u;
+  for (var i = 0u; i < 5u; i++) {
+    if ((mask & xe_eM_written & (1u << i)) == 0u || eM0_index + i >= count) {
+      continue;
+    }
+    var v = xe_eM[i];
+    if ((format_info & (1u << 19u)) != 0u) {
+      v = v.zyxw;
+    }
+    var packed = vec4u(0u);
+    switch (format) {
+      case 6u, 14u, 50u: { packed.x = xe_memexport_int(v, vec4u(8u), is_signed, is_norm); }
+      case 7u, 54u: { packed.x = xe_memexport_int(v, vec4u(10u, 10u, 10u, 2u), is_signed, is_norm); }
+      case 16u, 55u: { packed.x = xe_memexport_int(v, vec4u(11u, 11u, 10u, 0u), is_signed, is_norm); }
+      case 17u, 56u: { packed.x = xe_memexport_int(v, vec4u(10u, 11u, 11u, 0u), is_signed, is_norm); }
+      case 25u: { packed.x = xe_memexport_int(v, vec4u(16u, 16u, 0u, 0u), is_signed, is_norm); }
+      case 26u: {
+        packed.x = xe_memexport_int(v.xyxy, vec4u(16u, 16u, 0u, 0u), is_signed, is_norm);
+        packed.y = xe_memexport_int(v.zwzw, vec4u(16u, 16u, 0u, 0u), is_signed, is_norm);
+      }
+      case 31u: { packed.x = pack2x16float(select(v.xy, vec2f(0.0), v.xy != v.xy)); }
+      case 32u: {
+        let f = select(v, vec4f(0.0), v != v);
+        packed = vec4u(pack2x16float(f.xy), pack2x16float(f.zw), 0u, 0u);
+      }
+      default: { packed = bitcast<vec4u>(v); }
+    }
+    packed = xe_memexport_swap(packed, endian);
+    let address = base + (eM0_index + i) * dwords;
+    for (var d = 0u; d < dwords; d++) {
+      if (address + d < arrayLength(&xe_shared_memory)) {
+        xe_shared_memory[address + d] = packed[d];
+      }
+    }
+  }
+}
+)";
+}  // namespace
+
+uint64_t WgslShaderTranslator::GetDefaultVertexShaderModification(
+    uint32_t dynamic_addressable_register_count,
+    Shader::HostVertexShaderType host_vertex_shader_type) const {
+  Modification modification;
+  modification.dynamic_addressable_register_count = dynamic_addressable_register_count;
+  modification.host_vertex_shader_type = uint32_t(host_vertex_shader_type);
+  return modification.value;
+}
+
+uint64_t WgslShaderTranslator::GetDefaultPixelShaderModification(
+    uint32_t dynamic_addressable_register_count) const {
+  Modification modification;
+  modification.dynamic_addressable_register_count = dynamic_addressable_register_count;
+  modification.color_targets = 0b1111;
+  return modification.value;
+}
+
+std::vector<WgslShaderTranslator::TextureSlot> WgslShaderTranslator::GetTextureSlots(
+    const Shader& shader) {
+  std::vector<TextureSlot> slots;
+  const auto& bindings = shader.texture_bindings();
+  for (size_t i = 0; i < bindings.size(); ++i) {
+    const Shader::TextureBinding& binding = bindings[i];
+    if (binding.binding_index >= wgsl_binding::kMaxTexturesPerStage) {
+      continue;
+    }
+    if (slots.size() <= binding.binding_index) {
+      slots.resize(binding.binding_index + 1);
+      TextureSlot& slot = slots[binding.binding_index];
+      slot.fetch_constant = binding.fetch_constant;
+      slot.is_cube = binding.fetch_instr.dimension == xenos::FetchOpDimension::kCube;
+      slot.first_binding = i;
+    }
+  }
+  return slots;
+}
+
+uint32_t WgslShaderTranslator::GetFloatConstantArraySize(const Shader& shader) {
+  const Shader::ConstantRegisterMap& map = shader.constant_register_map();
+  if (map.float_dynamic_addressing) {
+    return 256;
+  }
+  return std::max(map.float_count, uint32_t(1));
+}
+
+void WgslShaderTranslator::Reset() {
+  ShaderTranslator::Reset();
+  body_.clear();
+  indent_ = 1;
+  exec_condition_open_ = false;
+  predicate_open_ = false;
+  in_switch_case_ = false;
+  unique_id_ = 0;
+  uses_vfetch_address_ = false;
+  uses_shared_memory_ = false;
+  uses_kill_ = false;
+}
+
+uint32_t WgslShaderTranslator::GetModificationRegisterCount() const {
+  return modification().dynamic_addressable_register_count;
+}
+
+void WgslShaderTranslator::Line(const std::string& text) {
+  body_.append(size_t(indent_) * 2, ' ');
+  body_ += text;
+  body_ += '\n';
+}
+
+void WgslShaderTranslator::Open(const std::string& text) {
+  Line(text + " {");
+  ++indent_;
+}
+
+void WgslShaderTranslator::Close() {
+  --indent_;
+  Line("}");
+}
+
+void WgslShaderTranslator::StartTranslation() {
+  if (uses_pc()) {
+    Line("var xe_pc: u32 = 0u;");
+    Open("loop");
+    Open("switch (xe_pc)");
+    Open("case 0u:");
+    in_switch_case_ = true;
+  }
+}
+
+std::vector<uint8_t> WgslShaderTranslator::CompleteTranslation() {
+  EndPredicate();
+  EndExecCondition();
+  if (uses_pc()) {
+    Line("return;");
+    Close();  // case
+    Open("default:");
+    Line("return;");
+    Close();
+    Close();  // switch
+    Close();  // loop
+  }
+
+  std::string out;
+  out.reserve(body_.size() + 8192);
+  out += "// Translated from Xenos microcode by rexgpu-webgpu (not game data).\n";
+  // Xenos (and Xenia) compute derivatives and texture LODs under any control
+  // flow; WGSL's uniformity analysis would reject that.
+  out += "diagnostic(off, derivative_uniformity);\n\n";
+  out += kWgsl_wgsl_prelude;
+  out += '\n';
+  EmitDeclarations(out);
+  out += "fn xe_main_body() {\n";
+  out += body_;
+  out += "}\n\n";
+  if (is_vertex_shader()) {
+    EmitVertexShaderEntryPoint(out);
+  } else {
+    EmitPixelShaderEntryPoint(out);
+  }
+  return std::vector<uint8_t>(out.begin(), out.end());
+}
+
+void WgslShaderTranslator::EmitDeclarations(std::string& out) const {
+  const Shader& shader = current_shader();
+  out += R"(struct XeSystem {
+  flags: u32,
+  vertex_index_endian: u32,
+  vertex_base_index: i32,
+  vertex_index_load_address: u32,
+  vertex_index_min: u32,
+  vertex_index_max: u32,
+  alpha_test_function: u32,
+  alpha_test_reference: f32,
+  ndc_scale: vec4f,
+  ndc_offset: vec4f,
+  color_output_scale: vec4f,
+  memexport_vertex_count: u32,
+  resolution_scale_inv_x: f32,
+  resolution_scale_inv_y: f32,
+  textures_resolution_scaled: u32,
+}
+)";
+  out += fmt::format("@group({}) @binding({}) var<uniform> xe_system: XeSystem;\n",
+                     wgsl_binding::kGroupDraw, wgsl_binding::kSystemConstants);
+  out += fmt::format("@group({}) @binding({}) var<uniform> xe_c: array<vec4f, {}>;\n",
+                     wgsl_binding::kGroupDraw,
+                     is_vertex_shader() ? wgsl_binding::kVertexFloatConstants
+                                        : wgsl_binding::kPixelFloatConstants,
+                     GetFloatConstantArraySize(shader));
+  out += fmt::format("@group({}) @binding({}) var<uniform> xe_bool_loop: array<vec4u, 10>;\n",
+                     wgsl_binding::kGroupDraw, wgsl_binding::kBoolLoopConstants);
+  out += fmt::format("@group({}) @binding({}) var<uniform> xe_fetch: array<vec4u, 48>;\n",
+                     wgsl_binding::kGroupDraw, wgsl_binding::kFetchConstants);
+  if (is_vertex_shader()) {
+    out += fmt::format(
+        "@group({}) @binding({}) var<storage, {}> xe_shared_memory: array<u32>;\n",
+        wgsl_binding::kGroupSharedMemory, wgsl_binding::kSharedMemory,
+        modification().memexport_compute ? "read_write" : "read");
+  }
+  std::vector<TextureSlot> slots = GetTextureSlots(shader);
+  for (uint32_t i = 0; i < slots.size(); ++i) {
+    uint32_t binding = GetTextureBindingNumber(shader.type(), i);
+    out += fmt::format("@group({}) @binding({}) var xe_texture_{}: {};\n",
+                       wgsl_binding::kGroupTextures, binding, i,
+                       slots[i].is_cube ? "texture_cube<f32>" : "texture_2d<f32>");
+    out += fmt::format("@group({}) @binding({}) var xe_sampler_{}: sampler;\n",
+                       wgsl_binding::kGroupTextures, binding + wgsl_binding::kSamplerOffset, i);
+  }
+  out += '\n';
+  out += R"(var<private> xe_texture_lod: f32;
+// Fetch constant post-processing: signedness (applies to the data before the
+// swizzle), exponent adjustment and the fetch constant's swizzle.
+fn xe_texture_postprocess(value: vec4f, fetch: u32) -> vec4f {
+  let word_0 = xe_fetch_word(fetch * 6u);
+  let word_1 = xe_fetch_word(fetch * 6u + 1u);
+  let word_3 = xe_fetch_word(fetch * 6u + 3u);
+  let format = word_1 & 0x3Fu;
+  // 8-bit-per-component formats are stored unorm on the host.
+  let is_8bpc = format == 2u || format == 6u || format == 8u || format == 9u || format == 10u ||
+                format == 14u;
+  let fixed_components = select(select(0u, 1u, format == 24u),
+                                select(2u, 4u, format == 26u), format == 25u || format == 26u);
+  let integer = (word_3 & 1u) != 0u;
+  var v = value;
+  for (var i = 0u; i < 4u; i++) {
+    let sign = (word_0 >> (2u + 2u * i)) & 3u;
+    if (i < fixed_components) {
+      if (sign == 1u) {
+        v[i] = select(v[i], v[i] - 65536.0, v[i] >= 32768.0);
+        if (!integer) { v[i] = max(v[i] / 32767.0, -1.0); }
+      } else if (!integer) {
+        v[i] /= 65535.0;
+      }
+    }
+    if (sign == 1u && is_8bpc) {
+      let n = round(v[i] * 255.0);
+      v[i] = max(select(n, n - 256.0, n >= 128.0) / 127.0, -1.0);
+    } else if (sign == 2u) {
+      v[i] = v[i] * 2.0 - 1.0;
+    }
+  }
+  v *= exp2(f32(extractBits(bitcast<i32>(word_3), 13u, 6u)));
+  var r: vec4f;
+  for (var i = 0u; i < 4u; i++) {
+    let select_component = (word_3 >> (1u + 3u * i)) & 7u;
+    if (select_component < 4u) {
+      r[i] = v[select_component];
+    } else {
+      r[i] = select(0.0, 1.0, select_component == 5u);
+    }
+  }
+  return r;
+}
+fn xe_texture_offset_scale(fetch: u32) -> vec2f {
+  return select(vec2f(1.0),
+                vec2f(xe_system.resolution_scale_inv_x, xe_system.resolution_scale_inv_y),
+                (xe_system.textures_resolution_scaled & (1u << fetch)) != 0u);
+}
+fn xe_texture_size(fetch: u32) -> vec2f {
+  let word_2 = xe_fetch_word(fetch * 6u + 2u);
+  return vec2f(f32(word_2 & 0x1FFFu) + 1.0, f32((word_2 >> 13u) & 0x1FFFu) + 1.0);
+}
+fn xe_texture_lod_bias(fetch: u32) -> f32 {
+  return f32(extractBits(bitcast<i32>(xe_fetch_word(fetch * 6u + 4u)), 12u, 10u)) / 32.0;
+}
+// Cube coordinates (SC, TC in 1...2, face index) to a direction: the inverse
+// of the ALU cube instruction (SpirvShaderTranslator).
+fn xe_cube_direction(coordinates: vec3f) -> vec3f {
+  let sc = coordinates.x * 2.0 - 3.0;
+  let tc = coordinates.y * 2.0 - 3.0;
+  let face = u32(clamp(coordinates.z, 0.0, 5.0));
+  let negative = (face & 1u) != 0u;
+  let sign = select(1.0, -1.0, negative);
+  switch (face >> 1u) {
+    case 0u: { return vec3f(sign, -tc, select(-sc, sc, negative)); }
+    case 1u: { return vec3f(sc, sign, select(tc, -tc, negative)); }
+    default: { return vec3f(select(sc, -sc, negative), -tc, sign); }
+  }
+}
+)";
+  out += '\n';
+
+  if (shader.constant_register_map().float_dynamic_addressing) {
+    out += R"(fn xe_c_dynamic(index: i32) -> vec4f {
+  if (index < 0 || index > 255) { return vec4f(0.0); }
+  return xe_c[index];
+}
+)";
+  }
+  out += R"(fn xe_loop_constant(index: u32) -> u32 {
+  return xe_bool_loop[(8u + index) >> 2u][(8u + index) & 3u];
+}
+fn xe_fetch_word(index: u32) -> u32 {
+  return xe_fetch[index >> 2u][index & 3u];
+}
+)";
+  if (is_vertex_shader()) {
+    out += R"(fn xe_load_shared(address_dwords: i32) -> u32 {
+  if (address_dwords < 0 || u32(address_dwords) >= arrayLength(&xe_shared_memory)) {
+    return 0u;
+  }
+  return xe_shared_memory[address_dwords];
+}
+)";
+  }
+  out += '\n';
+
+  uint32_t register_count = this->register_count();
+  if (register_count) {
+    out += fmt::format("var<private> xe_r: array<vec4f, {}>;\n", register_count);
+  }
+  out += "var<private> xe_p0: bool;\n";
+  out += "var<private> xe_ps: f32;\n";
+  out += "var<private> xe_a0: i32;\n";
+  out += "var<private> xe_loop_count: vec4u;\n";
+  out += "var<private> xe_aL: vec4i;\n";
+  out += "var<private> xe_vfetch_address: i32;\n";
+  if (is_vertex_shader()) {
+    out += "var<private> xe_out_position: vec4f;\n";
+    out += "var<private> xe_out_interpolators: array<vec4f, 16>;\n";
+    out += "var<private> xe_out_point_misc: vec4f;\n";
+    out += "var<private> xe_eA: vec4f;\n";
+    out += "var<private> xe_eM: array<vec4f, 5>;\n";
+    out += "var<private> xe_eM_written: u32;\n";
+    if (modification().memexport_compute) {
+      out += kMemExportFunctions;
+    }
+  } else {
+    out += "var<private> xe_out_color: array<vec4f, 4>;\n";
+    out += "var<private> xe_out_depth: f32;\n";
+  }
+  out += '\n';
+}
+
+void WgslShaderTranslator::EmitVertexShaderEntryPoint(std::string& out) const {
+  Modification modification = this->modification();
+  bool rectangle_list = Shader::HostVertexShaderType(modification.host_vertex_shader_type) ==
+                        Shader::HostVertexShaderType::kRectangleListAsTriangleStrip;
+  out += "struct XeVertexOut {\n  @invariant @builtin(position) position: vec4f,\n";
+  for (uint32_t i = 0; i < 16; ++i) {
+    if (modification.interpolator_mask & (1u << i)) {
+      out += fmt::format("  @location({}) interpolator_{}: vec4f,\n", i, i);
+    }
+  }
+  out += "}\n\n";
+  out += R"(// Guest vertex index from the host one: optionally read from the guest index
+// buffer (expanded primitives), byte-swapped (guest index buffers bound
+// directly are read in host byte order), offset and clamped.
+fn xe_vertex_index(host_index: u32) -> u32 {
+  var index = host_index;
+  if ((xe_system.flags & 8u) != 0u) {
+    let is_32bit = (xe_system.flags & 16u) != 0u;
+    let address = xe_system.vertex_index_load_address + (index << select(1u, 2u, is_32bit));
+    var loaded = xe_load_shared(i32(address >> 2u));
+    if (!is_32bit) {
+      loaded = extractBits(loaded, (address & 2u) << 3u, 16u);
+    }
+    index = loaded;
+  }
+  index = xe_endian_swap(index, xe_system.vertex_index_endian);
+  return clamp(u32(i32(index) + xe_system.vertex_base_index) & 0xFFFFFFu,
+               xe_system.vertex_index_min, xe_system.vertex_index_max);
+}
+
+// Guest position (PA_CL_VTE_CNTL formats) to host clip space.
+fn xe_transform_position(guest_position: vec4f) -> vec4f {
+  var position = guest_position;
+  if ((xe_system.flags & 4u) == 0u) {
+    position.w = 1.0 / position.w;
+  }
+  if ((xe_system.flags & 1u) != 0u) {
+    position = vec4f(position.xy * position.w, position.zw);
+  }
+  if ((xe_system.flags & 2u) != 0u) {
+    position.z *= position.w;
+  }
+  return vec4f(position.xyz * xe_system.ndc_scale.xyz + xe_system.ndc_offset.xyz * position.w,
+               position.w);
+}
+
+// Runs the guest shader for one guest vertex from a clean state.
+fn xe_run_vertex(index: u32) {
+)";
+  if (register_count()) {
+    out += fmt::format("  xe_r = array<vec4f, {}>();\n", register_count());
+  }
+  out += R"(  xe_p0 = false;
+  xe_ps = 0.0;
+  xe_a0 = 0;
+  xe_loop_count = vec4u(0u);
+  xe_aL = vec4i(0);
+  xe_vfetch_address = 0;
+  xe_out_position = vec4f(0.0);
+  xe_out_interpolators = array<vec4f, 16>();
+  xe_out_point_misc = vec4f(0.0);
+  xe_eA = vec4f(0.0);
+  xe_eM = array<vec4f, 5>();
+  xe_eM_written = 0u;
+)";
+  if (register_count()) {
+    out += "  xe_r[0].x = f32(index);\n";
+  }
+  out += "  xe_main_body();\n}\n\n";
+
+  if (modification.memexport_compute) {
+    out += fmt::format(R"(@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) xe_id: vec3u) {{
+  if (xe_id.x >= xe_system.memexport_vertex_count) {{
+    return;
+  }}
+  xe_run_vertex(xe_vertex_index(xe_id.x));
+  xe_memexport({}u);
+}}
+)",
+                       current_shader().memexport_eM_potentially_written_before_end());
+    return;
+  }
+  out += "@vertex\nfn main(@builtin(vertex_index) xe_vertex_index_in: u32) -> XeVertexOut {\n";
+  out += "  var xe_output: XeVertexOut;\n";
+  if (!rectangle_list) {
+    out += R"(  xe_run_vertex(xe_vertex_index(xe_vertex_index_in));
+  xe_output.position = xe_transform_position(xe_out_position);
+)";
+    for (uint32_t i = 0; i < 16; ++i) {
+      if (modification.interpolator_mask & (1u << i)) {
+        out += fmt::format("  xe_output.interpolator_{} = xe_out_interpolators[{}];\n", i, i);
+      }
+    }
+  } else {
+    // Rectangle lists as two-triangle strips (4 host vertices per rectangle):
+    // run the guest shader for the 3 guest vertices, start the strip at the
+    // corner opposite the longest edge (the right angle), and synthesize the
+    // 4th corner as v1 + v2 - v0 (SpirvShaderTranslator's VS fallback).
+    out += R"(  let rectangle = xe_vertex_index_in >> 2u;
+  let corner = xe_vertex_index_in & 3u;
+  var positions: array<vec4f, 3>;
+  var interpolators: array<array<vec4f, 16>, 3>;
+  for (var v = 0u; v < 3u; v++) {
+    xe_run_vertex(xe_vertex_index(rectangle * 3u + v));
+    positions[v] = xe_transform_position(xe_out_position);
+    interpolators[v] = xe_out_interpolators;
+  }
+  var edge_lengths: array<f32, 3>;
+  for (var e = 0u; e < 3u; e++) {
+    let edge = positions[(e + 2u) % 3u].xy - positions[(e + 1u) % 3u].xy;
+    edge_lengths[e] = dot(edge, edge);
+  }
+  var i0 = 2u;
+  if (edge_lengths[0] > edge_lengths[1] && edge_lengths[0] > edge_lengths[2]) {
+    i0 = 0u;
+  } else if (edge_lengths[1] > edge_lengths[2]) {
+    i0 = 1u;
+  }
+  let i1 = (i0 + 1u) % 3u;
+  let i2 = (i0 + 2u) % 3u;
+  var source = i0;
+  if (corner == 1u) { source = i1; }
+  if (corner == 2u) { source = i2; }
+  let synthetic = corner == 3u;
+  xe_output.position = select(positions[source],
+                              positions[i1] - positions[i0] + positions[i2], synthetic);
+)";
+    for (uint32_t i = 0; i < 16; ++i) {
+      if (modification.interpolator_mask & (1u << i)) {
+        out += fmt::format(
+            "  xe_output.interpolator_{0} = select(interpolators[source][{0}], "
+            "interpolators[i1][{0}] - interpolators[i0][{0}] + interpolators[i2][{0}], "
+            "synthetic);\n",
+            i);
+      }
+    }
+  }
+  out += "  return xe_output;\n}\n";
+}
+
+void WgslShaderTranslator::EmitPixelShaderEntryPoint(std::string& out) const {
+  Modification modification = this->modification();
+  const Shader& shader = current_shader();
+  out += "struct XePixelIn {\n";
+  out += "  @builtin(position) frag_coord: vec4f,\n";
+  out += "  @builtin(front_facing) front_facing: bool,\n";
+  for (uint32_t i = 0; i < 16; ++i) {
+    if (modification.interpolator_mask & (1u << i)) {
+      out += fmt::format("  @location({}) interpolator_{}: vec4f,\n", i, i);
+    }
+  }
+  out += "}\n\n";
+  uint32_t color_outputs = shader.writes_color_targets() & modification.color_targets;
+  bool writes_depth = shader.writes_depth();
+  if (color_outputs || writes_depth) {
+    out += "struct XePixelOut {\n";
+    for (uint32_t i = 0; i < 4; ++i) {
+      if (color_outputs & (1u << i)) {
+        out += fmt::format("  @location({}) color_{}: vec4f,\n", i, i);
+      }
+    }
+    if (writes_depth) {
+      out += "  @builtin(frag_depth) depth: f32,\n";
+    }
+    out += "}\n\n";
+    out += "@fragment\nfn main(xe_in: XePixelIn) -> XePixelOut {\n";
+  } else {
+    out += "@fragment\nfn main(xe_in: XePixelIn) {\n";
+  }
+  uint32_t param_gen_register =
+      modification.param_gen ? modification.param_gen_interpolator : UINT32_MAX;
+  for (uint32_t i = 0; i < std::min(register_count(), uint32_t(16)); ++i) {
+    if (i != param_gen_register && (modification.interpolator_mask & (1u << i))) {
+      out += fmt::format("  xe_r[{}] = xe_in.interpolator_{};\n", i, i);
+    }
+  }
+  if (param_gen_register < register_count()) {
+    // X: pixel X, back-facing in the sign bit. Y: pixel Y, point in the sign
+    // bit. Z, W: point coordinates (not supported: 0).
+    out += "  {\n";
+    // Guest pixels: host pixels divided by the draw resolution scale.
+    out += "    var param_x = abs(floor(xe_in.frag_coord.x) * xe_system.resolution_scale_inv_x);\n";
+    out += "    let param_y = abs(floor(xe_in.frag_coord.y) * xe_system.resolution_scale_inv_y);\n";
+    out +=
+        "    if ((xe_system.flags & 32u) != 0u && !xe_in.front_facing) { param_x = -param_x; }\n";
+    out += fmt::format("    xe_r[{}] = vec4f(param_x, {}param_y, 0.0, 0.0);\n", param_gen_register,
+                       modification.param_gen_point ? "-" : "");
+    out += "  }\n";
+  }
+  out += "  xe_main_body();\n";
+  if (color_outputs & 1) {
+    // Alpha test (RB_COLORCONTROL) on the first color output.
+    out += R"(  if ((xe_system.flags & 64u) != 0u) {
+    let alpha = xe_out_color[0].a;
+    let reference = xe_system.alpha_test_reference;
+    var alpha_pass = true;
+    // Integer NaN guards preserve ordered tests and unordered NotEqual on drivers.
+    switch (xe_system.alpha_test_function) {
+      case 0u: { alpha_pass = false; }
+      case 1u: { alpha_pass = xe_lt(alpha, reference); }
+      case 2u: { alpha_pass = xe_ordered(alpha, reference) && alpha == reference; }
+      case 3u: { alpha_pass = xe_ge(reference, alpha); }
+      case 4u: { alpha_pass = xe_lt(reference, alpha); }
+      case 5u: { alpha_pass = !xe_ordered(alpha, reference) || alpha != reference; }
+      case 6u: { alpha_pass = xe_ge(alpha, reference); }
+      default: { alpha_pass = true; }
+    }
+    if (!alpha_pass) { discard; }
+  }
+)";
+  }
+  if (color_outputs || writes_depth) {
+    out += "  var xe_output: XePixelOut;\n";
+    for (uint32_t i = 0; i < 4; ++i) {
+      if (color_outputs & (1u << i)) {
+        out += fmt::format("  xe_output.color_{} = xe_out_color[{}] * xe_system.color_output_scale[{}];\n",
+                           i, i, i);
+      }
+    }
+    if (writes_depth) {
+      out += "  xe_output.depth = saturate(xe_out_depth);\n";
+    }
+    out += "  return xe_output;\n";
+  }
+  out += "}\n";
+}
+
+std::string WgslShaderTranslator::BoolConstantCondition(uint32_t bool_constant_index,
+                                                        bool condition) const {
+  uint32_t word = bool_constant_index >> 5;
+  return fmt::format("(((xe_bool_loop[{}][{}] >> {}u) & 1u) {} 0u)", word >> 2, word & 3,
+                     bool_constant_index & 31, condition ? "!=" : "==");
+}
+
+std::string WgslShaderTranslator::PredicateCondition(bool condition) const {
+  return condition ? "xe_p0" : "!xe_p0";
+}
+
+void WgslShaderTranslator::BeginExecCondition(ParsedExecInstruction::Type type,
+                                              uint32_t bool_constant_index, bool condition) {
+  EndPredicate();
+  EndExecCondition();
+  switch (type) {
+    case ParsedExecInstruction::Type::kConditional:
+      Open("if " + BoolConstantCondition(bool_constant_index, condition));
+      exec_condition_open_ = true;
+      break;
+    case ParsedExecInstruction::Type::kPredicated:
+      Open("if (" + PredicateCondition(condition) + ")");
+      exec_condition_open_ = true;
+      break;
+    default:
+      break;
+  }
+}
+
+void WgslShaderTranslator::EndExecCondition() {
+  if (exec_condition_open_) {
+    Close();
+    exec_condition_open_ = false;
+  }
+}
+
+void WgslShaderTranslator::BeginPredicate(bool predicated, bool condition) {
+  EndPredicate();
+  if (predicated) {
+    Open("if (" + PredicateCondition(condition) + ")");
+    predicate_open_ = true;
+  }
+}
+
+void WgslShaderTranslator::EndPredicate() {
+  if (predicate_open_) {
+    Close();
+    predicate_open_ = false;
+  }
+}
+
+void WgslShaderTranslator::ProcessLabel(uint32_t cf_index) {
+  if (cf_index == 0) {
+    return;
+  }
+  EndPredicate();
+  EndExecCondition();
+  // Fall through to the next case through the dispatch loop.
+  Line(fmt::format("xe_pc = {}u;", cf_index));
+  Close();
+  Open(fmt::format("case {}u:", cf_index));
+}
+
+void WgslShaderTranslator::ProcessExecInstructionBegin(const ParsedExecInstruction& instr) {
+  BeginExecCondition(instr.type, instr.bool_constant_index, instr.condition);
+}
+
+void WgslShaderTranslator::ProcessExecInstructionEnd(const ParsedExecInstruction& instr) {
+  EndPredicate();
+  if (instr.is_end) {
+    Line("return;");
+  }
+  EndExecCondition();
+}
+
+void WgslShaderTranslator::ProcessLoopStartInstruction(const ParsedLoopStartInstruction& instr) {
+  EndPredicate();
+  EndExecCondition();
+  Open("");
+  Line(fmt::format("let loop_constant = xe_loop_constant({}u);", instr.loop_constant_index));
+  Line("let loop_count = loop_constant & 0xFFu;");
+  Line("xe_loop_count = vec4u(loop_count, xe_loop_count.xyz);");
+  if (instr.is_repeat) {
+    Line("xe_aL = vec4i(xe_aL.x, xe_aL.xyz);");
+  } else {
+    Line("xe_aL = vec4i(i32((loop_constant >> 8u) & 0xFFu), xe_aL.xyz);");
+  }
+  Open("if (loop_count == 0u)");
+  Line(fmt::format("xe_pc = {}u;", instr.loop_skip_address));
+  Line("break;");
+  Close();
+  Close();
+}
+
+void WgslShaderTranslator::ProcessLoopEndInstruction(const ParsedLoopEndInstruction& instr) {
+  EndPredicate();
+  EndExecCondition();
+  Open("");
+  Line("let loop_count = xe_loop_count.x - 1u;");
+  std::string continue_condition = "loop_count != 0u";
+  if (instr.is_predicated_break) {
+    // Break if the predicate matches the condition.
+    continue_condition += " && " + PredicateCondition(!instr.predicate_condition);
+  }
+  Open("if (" + continue_condition + ")");
+  Line("xe_loop_count.x = loop_count;");
+  Line(fmt::format("xe_aL.x += extractBits(bitcast<i32>(xe_loop_constant({}u)), 16u, 8u);",
+                   instr.loop_constant_index));
+  Line(fmt::format("xe_pc = {}u;", instr.loop_body_address));
+  Line("break;");
+  Close();
+  Line("xe_loop_count = vec4u(xe_loop_count.yzw, 0u);");
+  Line("xe_aL = vec4i(xe_aL.yzw, 0);");
+  Close();
+}
+
+void WgslShaderTranslator::ProcessCallInstruction(const ParsedCallInstruction& instr) {
+  // Not supported by the other translators either; not used by known games.
+  EmitTranslationError("Control flow call is not supported", false);
+}
+
+void WgslShaderTranslator::ProcessReturnInstruction(const ParsedReturnInstruction& instr) {
+  EmitTranslationError("Control flow return is not supported", false);
+}
+
+void WgslShaderTranslator::ProcessJumpInstruction(const ParsedJumpInstruction& instr) {
+  ParsedExecInstruction::Type type = ParsedExecInstruction::Type::kUnconditional;
+  if (instr.type == ParsedJumpInstruction::Type::kConditional) {
+    type = ParsedExecInstruction::Type::kConditional;
+  } else if (instr.type == ParsedJumpInstruction::Type::kPredicated) {
+    type = ParsedExecInstruction::Type::kPredicated;
+  }
+  BeginExecCondition(type, instr.bool_constant_index, instr.condition);
+  Line(fmt::format("xe_pc = {}u;", instr.target_address));
+  Line("break;");
+  EndExecCondition();
+}
+
+void WgslShaderTranslator::ProcessAllocInstruction(const ParsedAllocInstruction& instr,
+                                                   uint8_t export_eM) {
+  // Memory export only in the compute variant; for drawing, the exports are
+  // dropped (they ran in the compute dispatch before the draw).
+  if (!export_eM || !is_vertex_shader() || !modification().memexport_compute) {
+    return;
+  }
+  EndPredicate();
+  EndExecCondition();
+  Line(fmt::format("xe_memexport({}u);", export_eM));
+  Line("xe_eM_written = 0u;");
+  Line("xe_eM = array<vec4f, 5>();");
+}
+
+std::string WgslShaderTranslator::StorageIndex(InstructionStorageAddressingMode mode,
+                                               uint32_t index) const {
+  switch (mode) {
+    case InstructionStorageAddressingMode::kAddressRegisterRelative:
+      return fmt::format("({} + xe_a0)", index);
+    case InstructionStorageAddressingMode::kLoopRelative:
+      return fmt::format("({} + xe_aL.x)", index);
+    default:
+      return fmt::format("{}", index);
+  }
+}
+
+std::string WgslShaderTranslator::OperandStorage(const InstructionOperand& operand) const {
+  switch (operand.storage_source) {
+    case InstructionStorageSource::kRegister:
+      if (!register_count()) {
+        return "vec4f(0.0)";
+      }
+      return "xe_r[" + StorageIndex(operand.storage_addressing_mode, operand.storage_index) + "]";
+    case InstructionStorageSource::kConstantFloat: {
+      const Shader::ConstantRegisterMap& map = current_shader().constant_register_map();
+      if (map.float_dynamic_addressing) {
+        return "xe_c_dynamic(" +
+               StorageIndex(operand.storage_addressing_mode, operand.storage_index) + ")";
+      }
+      uint32_t packed = map.GetPackedFloatConstantIndex(operand.storage_index);
+      if (packed == UINT32_MAX) {
+        return "vec4f(0.0)";
+      }
+      return fmt::format("xe_c[{}]", packed);
+    }
+    default:
+      // Fetch constants are not ALU operands.
+      return "vec4f(0.0)";
+  }
+}
+
+std::string WgslShaderTranslator::OperandVector(const InstructionOperand& operand) const {
+  std::string value = OperandStorage(operand);
+  bool identity = true;
+  std::string swizzle;
+  for (uint32_t i = 0; i < 4; ++i) {
+    SwizzleSource component = operand.GetComponent(i);
+    identity &= component == GetSwizzleFromComponentIndex(i);
+    swizzle += GetCharForSwizzle(component);
+  }
+  if (!identity) {
+    value += "." + swizzle;
+  }
+  if (operand.is_absolute_value) {
+    value = "abs(" + value + ")";
+  }
+  if (operand.is_negated) {
+    value = "(-" + value + ")";
+  }
+  return value;
+}
+
+std::string WgslShaderTranslator::OperandScalar(const InstructionOperand& operand,
+                                                uint32_t component) const {
+  std::string value =
+      OperandStorage(operand) + "." + GetCharForSwizzle(operand.GetComponent(component));
+  if (operand.is_absolute_value) {
+    value = "abs(" + value + ")";
+  }
+  if (operand.is_negated) {
+    value = "(-" + value + ")";
+  }
+  return value;
+}
+
+void WgslShaderTranslator::StoreResult(const InstructionResult& result, const std::string& value) {
+  uint32_t used_write_mask = result.GetUsedWriteMask();
+  if (!used_write_mask) {
+    return;
+  }
+  std::string target;
+  switch (result.storage_target) {
+    case InstructionStorageTarget::kRegister:
+      if (!register_count()) {
+        return;
+      }
+      target = "xe_r[" + StorageIndex(result.storage_addressing_mode, result.storage_index) + "]";
+      break;
+    case InstructionStorageTarget::kInterpolator:
+      if (!is_vertex_shader()) {
+        return;
+      }
+      target = fmt::format("xe_out_interpolators[{}]", result.storage_index);
+      break;
+    case InstructionStorageTarget::kPosition:
+      if (!is_vertex_shader()) {
+        return;
+      }
+      target = "xe_out_position";
+      break;
+    case InstructionStorageTarget::kPointSizeEdgeFlagKillVertex:
+      if (!is_vertex_shader()) {
+        return;
+      }
+      target = "xe_out_point_misc";
+      break;
+    case InstructionStorageTarget::kExportAddress:
+      if (!is_vertex_shader()) {
+        return;
+      }
+      target = "xe_eA";
+      break;
+    case InstructionStorageTarget::kExportData:
+      if (!is_vertex_shader() || result.storage_index >= 5) {
+        return;
+      }
+      target = fmt::format("xe_eM[{}]", result.storage_index);
+      Line(fmt::format("xe_eM_written |= {}u;", 1u << result.storage_index));
+      break;
+    case InstructionStorageTarget::kColor:
+      if (is_vertex_shader()) {
+        return;
+      }
+      target = fmt::format("xe_out_color[{}]", result.storage_index);
+      break;
+    case InstructionStorageTarget::kDepth:
+      if (is_vertex_shader()) {
+        return;
+      }
+      target = "xe_out_depth";
+      break;
+    default:
+      return;
+  }
+
+  std::string temp;
+  if (result.GetUsedResultComponents()) {
+    temp = fmt::format("xe_store_{}", unique_id_++);
+    Line(fmt::format("let {} = {};", temp, value));
+  }
+  for (uint32_t i = 0; i < 4; ++i) {
+    if (!(used_write_mask & (1u << i))) {
+      continue;
+    }
+    std::string component_value;
+    switch (result.components[i]) {
+      case SwizzleSource::k0:
+        component_value = "0.0";
+        break;
+      case SwizzleSource::k1:
+        component_value = "1.0";
+        break;
+      default:
+        component_value = temp + "." + GetCharForSwizzle(result.components[i]);
+        if (result.is_clamped) {
+          component_value = "xe_saturate(" + component_value + ")";
+        }
+        break;
+    }
+    if (result.storage_target == InstructionStorageTarget::kDepth) {
+      Line(target + " = " + component_value + ";");
+    } else {
+      Line(fmt::format("{}.{} = {};", target, kComponentChars[i], component_value));
+    }
+  }
+}
+
+}  // namespace rex::graphics::webgpu

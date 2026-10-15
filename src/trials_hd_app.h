@@ -25,6 +25,15 @@
 #include <rex/ui/overlay/achievements_overlay.h>
 #include <rex/ui/presenter.h>
 #include <rex/system/interfaces/graphics.h>
+#include <rex/system/gpu_plugin.h>
+#include <rex/system/xtypes.h>
+#include <fmt/format.h>
+#include <fstream>
+#include <vector>
+
+#if defined(__linux__) || defined(__APPLE__)
+#include <unistd.h>
+#endif
 
 #include "generated/default/trials_hd_init.h"
 #include "fallback_audio.h"
@@ -53,6 +62,20 @@ class TrialsHdApp : public rex::ReXApp {
       rex::ui::WindowedAppContext& ctx) {
     return std::unique_ptr<TrialsHdApp>(new TrialsHdApp(ctx, "trials_hd",
         PPCImageConfig));
+  }
+
+  void Quit() {
+    REXLOG_INFO("TrialsHdApp::Quit: requesting application exit");
+    app_context().CallInUIThreadDeferred([this] {
+      if (window()) {
+        window()->RequestClose();
+      }
+      if (runtime() && runtime()->kernel_state()) {
+        runtime()->kernel_state()->TerminateTitle();
+      }
+      rex::FlushLogging();
+      std::_Exit(0);
+    });
   }
 
   void ShowAchievements() {
@@ -88,6 +111,43 @@ class TrialsHdApp : public rex::ReXApp {
     }
   }
 
+  static void ReExecWithGpuPlugin(std::string_view new_plugin) {
+#if defined(__linux__)
+    std::vector<std::string> args;
+    std::ifstream cmdline("/proc/self/cmdline", std::ios::binary);
+    if (cmdline) {
+      std::string arg;
+      while (std::getline(cmdline, arg, '\0')) {
+        if (!arg.empty()) {
+          args.push_back(arg);
+        }
+      }
+    }
+    if (args.empty()) {
+      return;
+    }
+    bool replaced = false;
+    for (auto& a : args) {
+      if (a.rfind("--gpu_plugin=", 0) == 0) {
+        a = fmt::format("--gpu_plugin={}", new_plugin);
+        replaced = true;
+      }
+    }
+    if (!replaced) {
+      args.push_back(fmt::format("--gpu_plugin={}", new_plugin));
+    }
+    std::vector<char*> c_argv;
+    c_argv.reserve(args.size() + 1);
+    for (auto& a : args) {
+      c_argv.push_back(a.data());
+    }
+    c_argv.push_back(nullptr);
+
+    execv("/proc/self/exe", c_argv.data());
+    REXLOG_ERROR("execv /proc/self/exe failed: {}", strerror(errno));
+#endif
+  }
+
   // The Xenos GPU plugin (librexgpu-xenos*.so, staged next to the binary) is
   // required to render anything; default to it unless --gpu_plugin overrides.
   // Audio falls back to a silent driver when no output device can be opened.
@@ -102,6 +162,45 @@ class TrialsHdApp : public rex::ReXApp {
     if (config.gpu_plugin.empty()) {
       config.gpu_plugin = "xenos";
     }
+
+    REXLOG_INFO("OnPreSetup: gpu_plugin={}", config.gpu_plugin);
+
+    if (config.gpu_plugin == "webgpu") {
+      bool force_failure = (std::getenv("TRIALSHD_FORCE_WEBGPU_FAILURE") != nullptr);
+      std::unique_ptr<rex::system::IGraphicsSystem> graphics;
+      bool init_ok = false;
+      if (!force_failure) {
+        graphics = rex::system::LoadGpuPlugin("webgpu");
+        if (graphics) {
+          rex::X_STATUS status = graphics->SetupPresentation(&app_context());
+          if (XSUCCEEDED(status)) {
+            init_ok = true;
+          } else {
+            REXLOG_WARN("WebGPU SetupPresentation failed: {:08X}", status);
+          }
+        } else {
+          REXLOG_WARN("Failed to load GPU plugin 'webgpu'");
+        }
+      } else {
+        REXLOG_WARN("TRIALSHD_FORCE_WEBGPU_FAILURE is set; forcing WebGPU failure for fallback test");
+      }
+
+      if (!init_ok) {
+        const char* guard = std::getenv("TRIALSHD_WEBGPU_FALLBACK");
+        if (guard && std::string_view(guard) == "1") {
+          REXLOG_ERROR("WebGPU fallback loop detected; aborting fallback");
+        } else {
+          REXLOG_INFO("WebGPU initialization failed; falling back to xenos via re-exec");
+          setenv("TRIALSHD_WEBGPU_FALLBACK", "1", 1);
+          ReExecWithGpuPlugin("xenos");
+        }
+        config.gpu_plugin = "xenos";
+        config.graphics = nullptr;
+      } else {
+        config.graphics = std::move(graphics);
+      }
+    }
+
     config.audio_factory = REX_AUDIO_BACKEND(trials_hd::FallbackAudioSystem);
     trials_hd::ApplyStartupGraphicsSettings();
   }
@@ -143,6 +242,8 @@ class TrialsHdApp : public rex::ReXApp {
   }
 
   void OnPostSetup() override {
+    REXLOG_INFO("OnPostSetup: draw_resolution_scale_x={}",
+                rex::cvar::GetFlagByName("draw_resolution_scale_x"));
     // Guest vblank pacing must not re-cap the independent render loop at 60.
     // Host VSync still controls tearing; physics is paced by the fixed clock.
     const bool unlocked = rex::cvar::GetFlagByName("fps_unlock") == "true";

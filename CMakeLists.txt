@@ -63,6 +63,7 @@ set(TRIALSHD_SOURCES
     src/offline_warning.cpp
     src/package_license.cpp
     src/virtual_pad.cpp
+    src/exit_button.cpp
 )
 
 if(WIN32)
@@ -71,7 +72,19 @@ else()
     add_executable(trials_hd ${TRIALSHD_SOURCES})
 endif()
 
-rexglue_setup_target(trials_hd GPU_PLUGINS xenos)
+# Optional native WebGPU renderer plugin (README: "WebGPU renderer plugin").
+# Needs Dawn from tools/build_dawn.sh:
+#   -DTRIALSHD_WEBGPU=ON -DCMAKE_PREFIX_PATH=$PWD/out/dawn-install
+# Select it at runtime with --gpu_plugin=webgpu.
+option(TRIALSHD_WEBGPU "Build the WebGPU renderer plugin (rexgpu-webgpu)" OFF)
+set(TRIALSHD_GPU_PLUGINS xenos)
+if(TRIALSHD_WEBGPU)
+    # Must exist before rexglue_setup_target, which stages in-tree plugins.
+    add_subdirectory(src/gpu_webgpu)
+    list(APPEND TRIALSHD_GPU_PLUGINS webgpu)
+endif()
+
+rexglue_setup_target(trials_hd GPU_PLUGINS ${TRIALSHD_GPU_PLUGINS})
 
 # A fresh checkout has no generated code when CMake configures, so there is
 # nothing to compile the game from yet (CMake only lists generated sources that
@@ -99,6 +112,10 @@ endif()
 if(NOT WIN32)
     set(TRIALSHD_RUNTIME_LIBS $<TARGET_FILE:rexruntime> $<TARGET_FILE:rexgpu-xenos>)
     set(TRIALSHD_RUNTIME_LIB_TARGETS rexruntime rexgpu-xenos)
+    if(TARGET rexgpu-webgpu)
+        list(APPEND TRIALSHD_RUNTIME_LIBS $<TARGET_FILE:rexgpu-webgpu>)
+        list(APPEND TRIALSHD_RUNTIME_LIB_TARGETS rexgpu-webgpu)
+    endif()
     if(TARGET TracyClient)
         get_target_property(_tracy_type TracyClient TYPE)
         if(_tracy_type STREQUAL "SHARED_LIBRARY")

@@ -70,6 +70,31 @@ seconds) and asks you to build again: CMake can only add the generated sources o
 they exist. The second build re-runs CMake by itself and compiles ~110 MB of generated
 C++, which takes a while and several GB of RAM. Later builds need a single command.
 
+### WebGPU renderer plugin (optional)
+
+The default renderer is the SDK's Vulkan backend. A native WebGPU renderer
+(`librexgpu-webgpu*.so`, built on Dawn) can be built alongside it:
+
+```sh
+# 1. Fetch, build and install the pinned Dawn into out/dawn-install
+tools/build_dawn.sh
+
+# 2. Configure with TRIALSHD_WEBGPU enabled
+cmake --preset linux-amd64-relwithdebinfo -DTRIALSHD_WEBGPU=ON -DCMAKE_PREFIX_PATH=$PWD/out/dawn-install
+cmake --build out/build/linux-amd64-relwithdebinfo -j$(nproc)
+```
+
+Select it at launch with `--gpu_plugin=webgpu`, or with *Renderer* in the F1 settings
+menu (applies after a restart). If WebGPU device initialization fails, `trials_hd`
+restarts itself with the Vulkan renderer. With several GPUs, pick one with
+`--webgpu_adapter=N`.
+
+It renders the whole game, including GPU particles, at any render resolution; on an
+RX 6600 it rides at ~190 FPS uncapped at 1280x720. Debugging and profiling switches:
+`--webgpu_validation=true` (Dawn validation, slower), `--webgpu_debug_labels=true`
+(pass and draw labels for RenderDoc), and `--webgpu_profile=true` (GPU time per pass
+category and the 10 most expensive passes, logged once a second).
+
 ## 3. Run
 
 Run from the build tree (or build the `linux-amd64-release` preset for a release
@@ -121,6 +146,8 @@ cancels); **Reset Keys** restores the default layout. Changes apply immediately.
 
 | Setting | What it does |
 | --- | --- |
+| Renderer | Vulkan or WebGPU (WebGPU needs the optional plugin above; restart to apply) |
+| WebGPU Adapter | GPU used by the WebGPU renderer; *Default* picks the discrete GPU (restart to apply) |
 | Display Mode | Windowed or fullscreen (applies immediately) |
 | Resolution | Window size, or the fullscreen display mode; *Desktop* = borderless at desktop resolution |
 | Render Resolution | Internal resolution: 1280x720, 2560x1440 or 3840x2160 (restart to apply) |
@@ -167,7 +194,8 @@ resolution with 2560x1440 rendering (supersampled) or 1280x720 (upscaled).
 
 ### Main menu
 
-The main menu is the game's own, with all of its buttons. Achievements opens the
+The main menu is the game's own. "Return to Game Library" is replaced by **EXIT GAME**,
+which quits the app (`src/exit_button.cpp`). Achievements opens the
 host achievements overlay. Leaderboards and Download Content require unavailable
 Xbox LIVE services and retain the game's offline / not-signed-in behavior. The
 "Offline warning" message box the game shows before a track (scores can't be saved
@@ -216,12 +244,14 @@ also occur with the original loop; no guest access violations occurred in these 
 | `trials_hd_manifest.toml` | Codegen manifest |
 | `config/codegen.toml` | Codegen settings (CRT `setjmp`/`longjmp` addresses) |
 | `config/functions.toml` | Function starts the analyzer misses (addresses only) |
-| `src/` | Host-side app code: asset path lookup, license from your package, GPU plugin default, audio fallback, fixed-tick FPS unlock, GPU-wait sleeping, settings menu, keyboard layout |
+| `src/` | Host-side app code: asset path lookup, license from your package, GPU plugin default, audio fallback, fixed-tick FPS unlock, GPU-wait sleeping, settings menu, keyboard layout, Exit Game button |
+| `src/gpu_webgpu/` | Optional WebGPU renderer plugin (Dawn): Xenos shader translation to WGSL, EDRAM render target emulation, resolves, textures |
 | `generated/rexglue.cmake` | SDK build glue (from `rexglue init`) |
 | `generated/default/` | Recompiled game code; generated at build time, gitignored |
 | `thirdparty/rexglue-sdk` | ReXGlue SDK (git submodule) |
 | `patches/rexglue-sdk/` | Local SDK changes (one patch), applied automatically at configure time: rendering fixes (16-bit integer resolves, texture exponent bias), render target transfer elision, small-resolve readback, host FPS cap + guest FPS logging, keyboard keystrokes for menus, data race fixes, guest-memory shm cleanup, Vulkan headless surface |
 | `tools/stfs_extract.py` | Extracts your game files (and license) from Xbox 360 STFS (LIVE/PIRS/CON) packages |
+| `tools/build_dawn.sh` | Builds the pinned Dawn for the WebGPU renderer plugin into `out/dawn-install` |
 
 ## Legal
 
