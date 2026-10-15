@@ -951,6 +951,18 @@ bool WebGpuBackend::Draw(const DrawSnapshot& draw) {
   }
   const wgpu::RenderPassEncoder& pass = frame_recorder_->BeginRenderPass(
       pass_targets, pass_label, has_timestamps ? &timestamp_writes : nullptr);
+  // Contents change (see RenderTarget::version).
+  for (uint32_t i = 0; i < 4; ++i) {
+    if (targets.color[i] && ((color_mask >> (4 * i)) & 0xF)) {
+      ++targets.color[i]->version;
+    }
+  }
+  if (targets.depth && (depth_control.z_write_enable ||
+                        (depth_control.stencil_enable &&
+                         regs.Get<reg::RB_STENCILREFMASK>().stencilwritemask))) {
+    ++targets.depth->version;
+  }
+
   // Only state that changed since the last draw of this pass.
   PassState& state = State().pass;
   bool fresh_pass = state.pass_serial != frame_recorder_->pass_serial();
@@ -1307,6 +1319,7 @@ bool WebGpuBackend::Resolve(const ResolveSnapshot& resolve) {
       }
       frame_recorder_->encoder().BeginRenderPass(&desc).End();
       color_target->initialized = true;
+      ++color_target->version;
     }
     if (depth_target) {
       uint32_t depth24 = info.rb_depth_clear >> 8;
@@ -1335,6 +1348,7 @@ bool WebGpuBackend::Resolve(const ResolveSnapshot& resolve) {
       frame_recorder_->encoder().BeginRenderPass(&desc).End();
       depth_target->initialized = true;
       depth_target->stencil_nonzero = (info.rb_depth_clear & 0xFF) != 0;
+      ++depth_target->version;
     }
   }
   return true;

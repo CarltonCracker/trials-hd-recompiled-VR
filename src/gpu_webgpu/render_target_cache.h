@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <memory>
 #include <unordered_map>
+#include <vector>
 
 #include <webgpu/webgpu_cpp.h>
 
@@ -63,6 +64,18 @@ struct RenderTarget {
   // Depth: stencil may be non-zero somewhere (written by a draw or a clear
   // since the last zero clear). Transfers skip the stencil bit passes if not.
   bool stencil_nonzero = false;
+  // Incremented when draws or clears change the contents (not by transfers
+  // in, which copy existing EDRAM data).
+  uint64_t version = 0;
+  // Targets this one received tiles from, at both versions: if neither
+  // changed, giving the tiles back needs no transfer (the source's texture
+  // still holds them), e.g. a 1x target viewed as 4x only to be resolved.
+  struct CopyOrigin {
+    const RenderTarget* source;
+    uint64_t source_version;
+    uint64_t version;
+  };
+  std::vector<CopyOrigin> copied_from;
 };
 
 class RenderTargetCache {
@@ -124,6 +137,7 @@ class RenderTargetCache {
   void Transfer(RenderTarget* source, RenderTarget* dest, uint32_t tile_first,
                 uint32_t tile_count);
   bool InitializeTransfer();
+  static bool HoldsUnchangedCopy(const RenderTarget& owner, const RenderTarget& target);
   static bool CoversTiles(const RenderTarget& target, uint32_t tile_first, uint32_t tile_end,
                           const Overwrite& overwrite);
 

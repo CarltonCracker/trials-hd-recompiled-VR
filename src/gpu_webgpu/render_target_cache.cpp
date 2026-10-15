@@ -262,7 +262,8 @@ void RenderTargetCache::Acquire(RenderTarget* target, uint32_t rows, const Bindi
     if (owner == run_owner) {
       continue;
     }
-    if (run_owner && !(overwrite && CoversTiles(*target, run_first, i, *overwrite))) {
+    if (run_owner && !(overwrite && CoversTiles(*target, run_first, i, *overwrite)) &&
+        !HoldsUnchangedCopy(*run_owner, *target)) {
       Transfer(run_owner, target, run_first, i - run_first);
     }
     run_owner = owner;
@@ -273,6 +274,15 @@ void RenderTargetCache::Acquire(RenderTarget* target, uint32_t rows, const Bindi
   }
   target->owned_epoch = ownership_epoch_;
   target->owned_tiles = tile_count;
+}
+
+bool RenderTargetCache::HoldsUnchangedCopy(const RenderTarget& owner,
+                                           const RenderTarget& target) {
+  return std::any_of(owner.copied_from.begin(), owner.copied_from.end(),
+                     [&](const RenderTarget::CopyOrigin& origin) {
+                       return origin.source == &target && origin.source_version == target.version &&
+                              origin.version == owner.version;
+                     });
 }
 
 bool RenderTargetCache::CoversTiles(const RenderTarget& target, uint32_t tile_first,
@@ -496,6 +506,11 @@ void RenderTargetCache::Transfer(RenderTarget* source, RenderTarget* dest, uint3
   pass.SetScissorRect(0, constants.dest.row_first, constants.dest.width,
                       constants.dest.row_end - constants.dest.row_first);
   pass.Draw(3);
+  // Remember the copy (dropping origins made stale by later writes to dest).
+  std::erase_if(dest->copied_from, [&](const RenderTarget::CopyOrigin& origin) {
+    return origin.version != dest->version || origin.source == source;
+  });
+  dest->copied_from.push_back({source, source->version, dest->version});
   if (restore_stencil) {
     dest->stencil_nonzero = true;
     pass.SetStencilReference(0xFF);
