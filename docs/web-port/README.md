@@ -505,6 +505,15 @@ rAF). Two buffer readbacks assert the values 42/43, using `AllowSpontaneous` and
 The background changes every 300 frames so two CDP screenshots can prove actual
 canvas presentation progresses, rather than merely counting submitted commands.
 
+**W-S05 verified 2026-10-15:** Chromium 154 + Emscripten 6.0.12 + the pinned
+emdawnwebgpu port passes with `-sJSPI` (no custom `JSPI_EXPORTS`, no Asyncify).
+The endless pthread C++ loop reached frames 5 and 305; both map callbacks returned
+correct data on that worker. CDP snapshots changed background RGB from `(13,13,25)`
+to `(13,51,25)` while retaining the orange triangle. Artifacts:
+`out/web-spikes/gpu_jspi_verified.json`, `gpu_jspi_{early,late}.png`.
+**Question 14.2 is answered yes on the primary target.** Use JSPI for D6/W-L06;
+the actual game's yield points and threading still need implementation.
+
 ### 7.5 Rendering
 
 The renderer's command-processor half already runs on one thread. On the web, the
@@ -1333,7 +1342,7 @@ Without ANGLE-on-Vulkan Chromium exposes only SwiftShader to WebGPU.
 | # | Question / risk | How to answer | Task |
 | --- | --- | --- | --- |
 | 1 | Does Chromium on the RX 6600 give `maxStorageBufferBindingSize` and `maxBufferSize` ≥ 512 MiB? | **Yes:** both 4 GiB − 4 (Chromium 154, 2026-10-15); section 9.2 | W-S01 |
-| 2 | Does JSPI work on pthreads with emdawnwebgpu, and can a suspended GPU worker present its `OffscreenCanvas`? | Minimal test page | W-S05 |
+| 2 | Does JSPI work on pthreads with emdawnwebgpu, and can a suspended GPU worker present its `OffscreenCanvas`? | **Yes** in Chromium 154: endless-loop frames, two map modes and changing screenshot pixels verified (7.4) | W-S05 |
 | 3 | Memory64 bounds-check cost on the guest threads | Microbenchmark plus the full game, native vs wasm32 vs wasm64 | W-L03 |
 | 4 | Are the 28 `REX_MM_*` sites the only MMIO accesses? | Native run with the MMIO fault path fatal | W-S07 |
 | 5 | Does Trials create fibers? | Log `RegisterFiber` natively | W-S08 |
@@ -1480,13 +1489,13 @@ Every task's "Done when" implicitly includes **`tools/check_native.sh check` pas
 | W-S02 | done 2026-10-15 7008da0 | S | Feature-detect page `tools/web/spikes/wasm_features.html` using `WebAssembly.validate` on tiny modules: shared memory64, threads, simd128, relaxed SIMD, exception handling (exnref), JSPI (`WebAssembly.Suspending`), plus `crossOriginIsolated`. Run in Chromium here; write the matrix into 5.1. Add the result columns for Firefox and Safari as `unverified` until someone runs it there. | — | 5.1 table updated with "verified in Chromium 154" values |
 | W-S03 | done 2026-10-15 11b0cbb | S | Emscripten "hello pthreads + Memory64" page: `em++ --target=wasm64 -pthread -sPROXY_TO_PTHREAD -sPTHREAD_POOL_SIZE=48 -sINITIAL_MEMORY=3800mb -sMAXIMUM_MEMORY=8gb`; spawn 40 threads that each touch 16 MiB at addresses spread over 3 GiB and join; print timings. | — | Runs in Chromium; startup time and RSS (from `chrome://memory-internals` or `/proc` of the renderer process) recorded in 4.5 |
 | W-S04 | done 2026-10-15 c1cc170 | S | emdawnwebgpu "triangle in an OffscreenCanvas on a pthread" spike: main transfers the canvas, a pthread creates the device, draws a triangle per `requestAnimationFrame` in the worker. | W-S03 | Screenshot via CDP shows the triangle; notes on any proxying needed |
-| W-S05 | claimed pi-gpt 2026-10-15 | M | Same as W-S04 but the pthread runs an endless C++ loop that calls a JSPI-suspending yield (`emscripten_sleep(0)` with `-sJSPI`) after each frame, and uses `wgpu::Buffer::MapAsync` with `CallbackMode::AllowSpontaneous`/`AllowProcessEvents`. Answers question 14.2. Design note from W-L01 first. | W-S04, W-L01 | Frames present while the loop runs; map callbacks arrive; findings in 7.4 |
+| W-S05 | done 2026-10-15 6916330 | M | Same as W-S04 but the pthread runs an endless C++ loop that calls a JSPI-suspending yield (`emscripten_sleep(0)` with `-sJSPI`) after each frame, and uses `wgpu::Buffer::MapAsync` with `CallbackMode::AllowSpontaneous`/`AllowProcessEvents`. Answers question 14.2. Design note from W-L01 first. | W-S04, W-L01 | Frames present while the loop runs; map callbacks arrive; findings in 7.4 |
 | W-S06 | todo | S | Native measurements for sizing: maximum host stack depth of guest threads (`/proc/<tid>/status` VmStk or a guard-page probe), number of threads created over a full ride and menus, and startup time to the first swap. | — | Numbers in 4.5 and 8.4 |
 | W-S07 | todo | S | Prove MMIO completeness: in a native debug build, make the `SIGSEGV` MMIO path (`exception_handler_posix.cpp` → `MMIOHandler`) log and abort for addresses `0x7F000000–0x7FFFFFFF`; run `main_menu_nav`, `ride_middle_name_danger`, `settings_menu`, `credits`. | — | No abort in all four (or the faulting addresses are listed in 8.2 and a W-L task is added) |
 | W-S08 | todo | S | Log `KernelState::RegisterFiber` and `Fiber::Create` calls natively over the four scripts. | — | 14.5 answered ("no fibers" → drop fiber port; "fibers" → add a W-L task) |
 | W-S09 | todo | S | Audit host writers into guest physical memory (8.3): grep the SDK `src/kernel`, `src/system`, `src/audio`, `src/filesystem`, and `src/*.cpp` for `memcpy`/`memset`/`TranslatePhysical`/`TranslateVirtual` writes; list every site with file:line and whether the target can be physical. | — | Table added to 8.3 with all sites |
-| W-S10 | claimed claude-opus-5.5 2026-10-15 | S | Header portability patch (SDK patch, guarded): `REX_PLATFORM_EMSCRIPTEN` in `platform.h`; enable the portable `vsl`/`vslo`/`vsro` branches for `__wasm__`; extend the chrono shim to `__EMSCRIPTEN__`. (Section 6 items 1, 3, 4.) | — | Native Linux build unchanged (`git diff` of generated objects not needed; just builds and boots); `em++` of `trials_hd_recomp.0.cpp` gets past those three errors |
-| W-S11 | claimed claude-opus-5.5 2026-10-15 | S | wasm `FPSCRPlatform` (section 6 item 2): shadow register for `getcsr`/`setcsr`, no-op flush; log (debug builds) when a guest rounding mode other than nearest is set. Also log natively which rounding modes the 5 `storeFromGuest` sites set during rides. | W-S10 | Natively: modes listed in 14.6; wasm: header compiles |
+| W-S10 | claimed pi-gpt 2026-10-15 (takeover) | S | Header portability patch (SDK patch, guarded): `REX_PLATFORM_EMSCRIPTEN` in `platform.h`; enable the portable `vsl`/`vslo`/`vsro` branches for `__wasm__`; extend the chrono shim to `__EMSCRIPTEN__`. (Section 6 items 1, 3, 4.) | — | Native Linux build unchanged (`git diff` of generated objects not needed; just builds and boots); `em++` of `trials_hd_recomp.0.cpp` gets past those three errors |
+| W-S11 | claimed pi-gpt 2026-10-15 (takeover) | S | wasm `FPSCRPlatform` (section 6 item 2): shadow register for `getcsr`/`setcsr`, no-op flush; log (debug builds) when a guest rounding mode other than nearest is set. Also log natively which rounding modes the 5 `storeFromGuest` sites set during rides. | W-S10 | Natively: modes listed in 14.6; wasm: header compiles |
 | W-S12 | todo | S | Browser WebGPU draw-cost benchmark page: 1,500 draws/frame with per-draw `setBindGroup` (dynamic offsets) and `setPipeline` changes like the renderer (renderer doc 7.5); report ms/frame in Chromium here vs the same program natively with Dawn (`tools/webgpu_smoke` can host the native half). | W-S04 | Table in 9.6 |
 | W-S13 | todo | S | Port `tools/stfs_extract.py` to C++ (`tools/stfs_extract/stfs_extract.cpp`, library + CLI), byte-identical output on the user's package. | — | `cmp -r` of both extractions is empty; CLI added to native CMake as an optional tool |
 | W-S14 | done 2026-10-15 9b5a087 | S | `tools/web/serve.py`: static server on `127.0.0.1:8080` with COOP/COEP/CORP headers, `application/wasm`, brotli/gzip pre-compressed files, no directory listing outside the build folder. | — | `curl -I` shows the headers; a test page reports `crossOriginIsolated === true` |
@@ -1500,7 +1509,7 @@ Every task's "Done when" implicitly includes **`tools/check_native.sh check` pas
 | ID | Status | Task | Depends | Read first | Done when |
 | --- | --- | --- | --- | --- | --- |
 | W-L01 | done 2026-10-15 (section 7.9) | **Web platform design note.** Turn sections 7–9 into concrete interfaces: the `REX_PLATFORM_EMSCRIPTEN` layer, the memory-model macro and helpers (7.2, 8.1), the dirty-bitmap API (8.3), the SAB layouts for input and audio, the GPU-worker yield points (7.4), the ImGui draw-list mailbox (9.4). Write it into this document. | — | 3, 7, 8, 9 | Design note merged; W-S05, W-S16, W-S18 unblocked |
-| W-L02 | claimed claude-opus-5.5 2026-10-15 | **Codegen changes.** Emit `setFromMaskPs`/`setFromMaskEpi8` (section 6 item 5) for all targets; emit the web memory macros (`REX_PHYS_HOST_OFFSET` replacement and the dirty-marking store) under `__EMSCRIPTEN__`; keep native output identical apart from the renamed method. | W-L01 | `src/codegen/builders/{memory,vector,context}.cpp`, 3.3 | Native build boots, golden scenes unchanged; all 107 files compile with `em++` without the spike's scratch headers |
+| W-L02 | claimed pi-gpt 2026-10-15 (takeover) | **Codegen changes.** Emit `setFromMaskPs`/`setFromMaskEpi8` (section 6 item 5) for all targets; emit the web memory macros (`REX_PHYS_HOST_OFFSET` replacement and the dirty-marking store) under `__EMSCRIPTEN__`; keep native output identical apart from the renamed method. | W-L01 | `src/codegen/builders/{memory,vector,context}.cpp`, 3.3 | Native build boots, golden scenes unchanged; all 107 files compile with `em++` without the spike's scratch headers |
 | W-L03 | todo | **Memory-model cost.** Build a micro-benchmark from real generated functions (a physics-heavy one and a VMX-heavy one, driven with captured inputs) for native, wasm32 and wasm64; then compare the full game's busiest guest threads once WM1 runs. Decide A vs B (7.1) with numbers. | W-S03, W-S10, W-S11 | 7.1, 7.2 | Table of ns/call in 7.1; decision recorded in 1 (D1) |
 | W-L04 | todo | **Runtime memory for the web** (`xmemory.cpp`, `memory_posix.cpp` → `memory_emscripten.cpp`): one linear-memory window, folded physical views, bookkeeping-only protection, `MarkPhysicalWritten`, the dirty bitmap and write epochs; `TranslateVirtual`/`TranslatePhysical`/`GetPhysicalAddress` consistent with the macro. | W-L01 | 3.4, 8.1, 8.3 | Unit test (native-hosted with the web memory model compiled in): guest writes through all three views land in the same physical bytes; bitmap bits match the writes |
 | W-L05 | todo | **Write tracking consumers**: `SharedMemory`, `PrimitiveProcessor` and the renderer's texture cache and memory mirror use the dirty bitmap on the web; debug assertion mode compares against chunk hashes (14.8). | W-L04, W-S09 | 8.3, renderer doc 8.3, 8.9 | WM4 ride shows no stale textures; assertion mode passes over `ride_middle_name_danger` |
@@ -1531,6 +1540,18 @@ details of W-L04 to W-L09. The critical path is W-L01 → W-L02/W-L04 → W-L15 
 W-L06/W-L07 (graphics).
 
 ### 16.6 Notes log
+
+- 2026-10-15 (pi-gpt): **W-S05 done** (`6916330`): JSPI endless pthread loop,
+  both MapAsync callback modes, and changing OffscreenCanvas pixels all pass in
+  Chromium 154 (7.4). Native check passed (WebGPU 55.8 dB, Vulkan 44.4 dB).
+  Per the user's explicit handoff, transferred Claude's W-L02/W-S10/W-S11 claims
+  to pi-gpt. Will preserve/inspect current edits, finish Linux/wasm verification,
+  export the SDK patch, and retain `review` if the required macOS check is unavailable.
+
+- 2026-10-15 (pi-gpt): W-S05 source/build committed `6916330`; both JSPI and the
+  original worker-rAF configurations compile. Native guard completed: WebGPU 9 captures /
+  worst 55.8 dB; Vulkan 9 captures / worst 44.4 dB; `NATIVE CHECK PASSED`.
+  Task stays claimed while the JSPI canvas-progress/readback browser test finishes.
 
 - 2026-10-15 (pi-gpt): user explicitly requested takeover of Claude's unfinished
   work (Claude exhausted usage) **after W-S05**. Next: inspect/preserve its current
