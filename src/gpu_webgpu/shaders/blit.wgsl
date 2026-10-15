@@ -1,12 +1,13 @@
 // Copies a rectangle of a single-sampled texture 1:1 into the render target
 // (frontbuffer to guest output), applying the guest's gamma ramp. The
-// viewport covers the destination.
+// viewport covers the destination. With luma_alpha, alpha is the luma of the
+// result, for FXAA (fxaa.wgsl).
 
 struct BlitConstants {
   source_offset: vec2i,
   // 0: none, 1: 256-entry table (8-bit frontbuffers), 2: piecewise linear.
   gamma_mode: u32,
-  padding: u32,
+  luma_alpha: u32,
 }
 @group(0) @binding(0) var source: texture_2d<f32>;
 @group(0) @binding(1) var<uniform> constants: BlitConstants;
@@ -29,16 +30,18 @@ fn apply_pwl(value_10b: u32, channel: u32) -> f32 {
 @fragment
 fn fs_main(@builtin(position) position: vec4f) -> @location(0) vec4f {
   let coord = constants.source_offset + vec2i(position.xy);
-  let color = textureLoad(source, coord, 0).rgb;
+  var color = textureLoad(source, coord, 0).rgb;
   if (constants.gamma_mode == 1u) {
     let index = vec3u(saturate(color) * 255.0 + 0.5);
-    return vec4f(f32((gamma_ramp[index.r] >> 20u) & 0x3FFu) / 1023.0,
-                 f32((gamma_ramp[index.g] >> 10u) & 0x3FFu) / 1023.0,
-                 f32(gamma_ramp[index.b] & 0x3FFu) / 1023.0, 1.0);
-  }
-  if (constants.gamma_mode == 2u) {
+    color = vec3f(f32((gamma_ramp[index.r] >> 20u) & 0x3FFu) / 1023.0,
+                  f32((gamma_ramp[index.g] >> 10u) & 0x3FFu) / 1023.0,
+                  f32(gamma_ramp[index.b] & 0x3FFu) / 1023.0);
+  } else if (constants.gamma_mode == 2u) {
     let value = vec3u(saturate(color) * 1023.0 + 0.5);
-    return vec4f(apply_pwl(value.r, 0u), apply_pwl(value.g, 1u), apply_pwl(value.b, 2u), 1.0);
+    color = vec3f(apply_pwl(value.r, 0u), apply_pwl(value.g, 1u), apply_pwl(value.b, 2u));
+  }
+  if (constants.luma_alpha != 0u) {
+    return vec4f(color, dot(saturate(color), vec3f(0.299, 0.587, 0.114)));
   }
   return vec4f(color, 1.0);
 }

@@ -12,7 +12,7 @@ A static recompilation of **Trials HD** (Xbox 360 / XBLA, title ID `5841095A`) t
 Linux x86-64, built with the [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk).
 
 ReXGlue translates the game's PowerPC executable into C++ ahead of time and links it
-against a native runtime (kernel HLE, Vulkan GPU backend, SDL input/audio).
+against a native runtime (kernel HLE, WebGPU or Vulkan GPU backend, SDL input/audio).
 
 > **This repository contains no game code or assets.** You must own Trials HD and supply
 > your own copy. The C++ in `generated/` is produced on your machine from your own
@@ -26,7 +26,8 @@ Linux (x86-64) is the only supported target for now.
 ## Requirements
 
 - Linux x86-64 with an SSE4.2-class CPU (x86-64-v2) and a Vulkan 1.2+ GPU/driver
-- clang (19+), CMake 3.25+, Ninja, Python 3
+- clang (19+), CMake 3.25+, Ninja, Python 3, and git with network access for the
+  first configure (it builds Dawn for the WebGPU renderer)
 - Debian/Ubuntu packages:
 
   ```sh
@@ -70,31 +71,25 @@ seconds) and asks you to build again: CMake can only add the generated sources o
 they exist. The second build re-runs CMake by itself and compiles ~110 MB of generated
 C++, which takes a while and several GB of RAM. Later builds need a single command.
 
-### WebGPU renderer plugin (optional)
+### Renderers
 
-To build the native WebGPU renderer plugin (`librexgpu-webgpu.so` via Dawn):
+The game draws with the native WebGPU renderer (`src/gpu_webgpu/`, built on Dawn) by
+default. The SDK's Vulkan renderer is always built too and takes over automatically if
+WebGPU cannot start. The first configure fetches and builds the pinned Dawn into
+`out/dawn-install` (`tools/build_dawn.sh`; needs network access and takes a while,
+once). Configure with `-DTRIALSHD_WEBGPU=OFF` to build the Vulkan renderer only.
 
-```sh
-# 1. Build and install pinned Dawn
-tools/build_dawn.sh
+Pick the renderer with *Renderer* in the F1 settings menu (applies after a restart) or
+on the command line with `--gpu_plugin=webgpu` / `--gpu_plugin=xenos` (Vulkan). With
+several GPUs, choose one with `--webgpu_adapter=N` or `--vulkan_device=N` (the lists are
+printed at startup).
 
-# 2. Configure with TRIALSHD_WEBGPU enabled
-cmake --preset linux-amd64-relwithdebinfo -DTRIALSHD_WEBGPU=ON -DCMAKE_PREFIX_PATH=$PWD/out/dawn-install
-cmake --build out/build/linux-amd64-relwithdebinfo -j$(nproc)
-```
-
-Select the WebGPU renderer at launch with:
-```sh
-./out/build/linux-amd64-relwithdebinfo/trials_hd --gpu_plugin=webgpu
-```
-If WebGPU device initialization fails, `trials_hd` automatically falls back to `xenos` (Vulkan).
-The renderer can also be chosen in the F1 settings menu (applies after a restart).
-
-It renders the whole game, including GPU particles, at any `draw_resolution_scale`.
-Debugging and profiling switches: `--webgpu_validation=true` (Dawn validation, slower),
+The WebGPU renderer draws the whole game, including GPU particles, at every render
+resolution; on an RX 6600 it rides at ~190 FPS uncapped at 1280x720. Debugging and
+profiling switches: `--webgpu_validation=true` (Dawn validation, slower),
 `--webgpu_debug_labels=true` (pass and draw labels for RenderDoc), and
-`--webgpu_profile=true` (GPU time per pass category and the 10 most expensive passes, logged
-once a second).
+`--webgpu_profile=true` (GPU time per pass category and the 10 most expensive passes,
+logged once a second).
 
 ## 3. Run
 
@@ -155,9 +150,12 @@ cancels); **Reset Keys** restores the default layout. Changes apply immediately.
 
 | Setting | What it does |
 | --- | --- |
+| Renderer | WebGPU (default) or Vulkan (restart to apply) |
+| WebGPU Adapter | GPU used by the WebGPU renderer; *Default* picks the discrete GPU (restart to apply) |
 | Display Mode | Windowed or fullscreen (applies immediately) |
 | Resolution | Window size, or the fullscreen display mode; *Desktop* = borderless at desktop resolution |
 | Render Resolution | Internal resolution: 1280x720, 2560x1440 or 3840x2160 (restart to apply) |
+| Anti-aliasing | Off, FXAA or FXAA (Extreme) on the final image (applies immediately). The game's own 4x MSAA is only used to speed up its depth and shadow passes and does not smooth edges; a higher Render Resolution supersamples instead |
 | Unlock FPS | Independent real rendering with the original fixed physics tick (on by default; restart to apply) |
 | FPS Limit | Unlimited, 240, 165, 144, 120, 90, 60 or 30 real rendered frames per second; independent of physics with Unlock FPS enabled |
 | VSync | Tear-free presentation (restart to apply) |
@@ -206,14 +204,14 @@ resolution with 2560x1440 rendering (supersampled) or 1280x720 (upscaled).
 
 ### Main menu
 
-The main menu is the game's own, with all of its buttons. Achievements opens the
+The main menu is the game's own. "Return to Game Library" is replaced by **EXIT GAME**,
+which quits the app (`src/exit_button.cpp`). Achievements opens the
 host achievements overlay. Leaderboards and Download Content require unavailable
 Xbox LIVE services and retain the game's offline / not-signed-in behavior. The
 "Offline warning" message box the game shows before a track (scores can't be saved
 to Xbox LIVE leaderboards) is skipped (`src/offline_warning.cpp`).
 
-With no audio device the game continues with silent audio. With several GPUs, pick
-one with `--vulkan_device=N` (the device list is printed at startup).
+With no audio device the game continues with silent audio.
 
 ### Performance defaults
 

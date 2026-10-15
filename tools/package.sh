@@ -38,7 +38,7 @@ This folder contains no game data. You need your own copy of Trials HD (XBLA).
    You should get assets/default.xex and assets/data/*.pak.
 
 2. Run ./trials_hd   (a Vulkan-capable GPU and an Xbox-style controller are needed)
-   To select the WebGPU renderer: ./trials_hd --gpu_plugin=webgpu
+   The WebGPU renderer is the default; for the Vulkan one: ./trials_hd --gpu_plugin=xenos
 
 Graphics settings: press the controller's Guide button (or Back + Start, or F1).
 Settings are saved to trials_hd.toml next to the executable.

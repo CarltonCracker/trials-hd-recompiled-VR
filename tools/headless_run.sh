@@ -28,6 +28,14 @@ input_pid=""
 trap 'kill "$input_pid" "$game_pid" "$xvfb_pid" 2>/dev/null || true' EXIT
 sleep 1
 
+# Vulkan flags without a renderer choice mean the Vulkan renderer (WebGPU is
+# the default).
+args=("$@")
+if [[ " ${args[*]} " == *" --vulkan_"* && " ${args[*]} " != *" --gpu_plugin="* ]]; then
+  args+=(--gpu_plugin=xenos)
+fi
+set -- "${args[@]}"
+
 DISPLAY="$display" "$exe" --game_data_root="$root/assets" --log_level="${LOG_LEVEL:-debug}" \
   --log_file="$out/trials_hd.log" "$@" > "$out/stdout.log" 2>&1 &
 game_pid=$!

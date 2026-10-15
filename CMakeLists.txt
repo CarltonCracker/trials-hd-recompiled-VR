@@ -72,13 +72,27 @@ else()
     add_executable(trials_hd ${TRIALSHD_SOURCES})
 endif()
 
-# Native WebGPU renderer plugin (in development; docs/webgpu-renderer/README.md).
-# Needs Dawn from tools/build_dawn.sh:
-#   -DTRIALSHD_WEBGPU=ON -DCMAKE_PREFIX_PATH=$PWD/out/dawn-install
-# Select it at runtime with --gpu_plugin=webgpu.
-option(TRIALSHD_WEBGPU "Build the WebGPU renderer plugin (rexgpu-webgpu)" OFF)
+# Native WebGPU renderer plugin (docs/webgpu-renderer/README.md), the default
+# renderer; the Vulkan one (xenos) is always built too, as the fallback. Needs
+# Dawn: tools/build_dawn.sh installs it to out/dawn-install, and the first
+# configure runs it when no Dawn is found. -DTRIALSHD_WEBGPU=OFF skips it.
+option(TRIALSHD_WEBGPU "Build the WebGPU renderer plugin (rexgpu-webgpu)" ON)
 set(TRIALSHD_GPU_PLUGINS xenos)
 if(TRIALSHD_WEBGPU)
+    find_package(Threads REQUIRED)  # Dawn's exported targets reference Threads::Threads
+    list(APPEND CMAKE_PREFIX_PATH "${CMAKE_CURRENT_SOURCE_DIR}/out/dawn-install")
+    find_package(Dawn QUIET)
+    if(NOT Dawn_FOUND)
+        message(STATUS "Dawn not found: building it with tools/build_dawn.sh (first configure only; "
+                       "downloads Dawn and takes a while)")
+        execute_process(COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tools/build_dawn.sh"
+                        RESULT_VARIABLE _dawn_result)
+        if(NOT _dawn_result EQUAL 0)
+            message(FATAL_ERROR "Building Dawn failed (see above). Configure with "
+                                "-DTRIALSHD_WEBGPU=OFF to build with the Vulkan renderer only.")
+        endif()
+        find_package(Dawn REQUIRED)
+    endif()
     # Must exist before rexglue_setup_target, which stages in-tree plugins.
     add_subdirectory(src/gpu_webgpu)
     list(APPEND TRIALSHD_GPU_PLUGINS webgpu)

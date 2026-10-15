@@ -31,6 +31,7 @@
 #include "webgpu_presenter.h"
 #include "webgpu_provider.h"
 #include "wgsl/blit.wgsl.h"
+#include "wgsl/fxaa.wgsl.h"
 #include "wgsl/wgsl_shader_translator.h"
 
 REXCVAR_DEFINE_INT32(webgpu_trace_frame, -1, "GPU/WebGPU",
@@ -108,6 +109,16 @@ struct BlitResources {
   wgpu::RenderPipeline pipeline;
   wgpu::Buffer constants;
   wgpu::Buffer gamma_ramp;
+  // FXAA (swap_post_effect): the blit writes the frontbuffer with luma in
+  // alpha to fxaa_source, and fxaa.wgsl draws it to the guest output.
+  wgpu::BindGroupLayout fxaa_layout;
+  wgpu::RenderPipeline fxaa_pipeline;
+  wgpu::Buffer fxaa_constants;
+  wgpu::Sampler fxaa_sampler;
+  wgpu::Texture fxaa_source;
+  wgpu::TextureView fxaa_source_view;
+  uint32_t fxaa_width = 0;
+  uint32_t fxaa_height = 0;
 };
 
 }  // namespace
@@ -331,6 +342,45 @@ bool WebGpuBackend::Initialize(memory::Memory& memory, const RegisterFile& regis
   gamma_desc.size = 128 * 3 * 4;  // The larger of the two ramps.
   gamma_desc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
   blit.gamma_ramp = device.CreateBuffer(&gamma_desc);
+
+  // FXAA.
+  wgsl.code = kWgsl_fxaa;
+  module_desc.label = "fxaa.wgsl";
+  wgpu::ShaderModule fxaa_module = device.CreateShaderModule(&module_desc);
+  std::array<wgpu::BindGroupLayoutEntry, 3> fxaa_entries;
+  fxaa_entries[0].binding = 0;
+  fxaa_entries[0].visibility = wgpu::ShaderStage::Fragment;
+  fxaa_entries[0].texture.sampleType = wgpu::TextureSampleType::Float;
+  fxaa_entries[1].binding = 1;
+  fxaa_entries[1].visibility = wgpu::ShaderStage::Fragment;
+  fxaa_entries[1].sampler.type = wgpu::SamplerBindingType::Filtering;
+  fxaa_entries[2].binding = 2;
+  fxaa_entries[2].visibility = wgpu::ShaderStage::Fragment;
+  fxaa_entries[2].buffer.type = wgpu::BufferBindingType::Uniform;
+  wgpu::BindGroupLayoutDescriptor fxaa_layout_desc;
+  fxaa_layout_desc.entryCount = fxaa_entries.size();
+  fxaa_layout_desc.entries = fxaa_entries.data();
+  blit.fxaa_layout = device.CreateBindGroupLayout(&fxaa_layout_desc);
+  wgpu::PipelineLayoutDescriptor fxaa_pipeline_layout_desc;
+  fxaa_pipeline_layout_desc.bindGroupLayoutCount = 1;
+  fxaa_pipeline_layout_desc.bindGroupLayouts = &blit.fxaa_layout;
+  wgpu::FragmentState fxaa_fragment;
+  fxaa_fragment.module = fxaa_module;
+  fxaa_fragment.entryPoint = "fs_main";
+  fxaa_fragment.targetCount = 1;
+  fxaa_fragment.targets = &blit_target;
+  wgpu::RenderPipelineDescriptor fxaa_desc;
+  fxaa_desc.label = "fxaa";
+  fxaa_desc.layout = device.CreatePipelineLayout(&fxaa_pipeline_layout_desc);
+  fxaa_desc.vertex.module = fxaa_module;
+  fxaa_desc.vertex.entryPoint = "vs_main";
+  fxaa_desc.fragment = &fxaa_fragment;
+  blit.fxaa_pipeline = device.CreateRenderPipeline(&fxaa_desc);
+  blit.fxaa_constants = device.CreateBuffer(&blit_constants_desc);
+  wgpu::SamplerDescriptor fxaa_sampler_desc;
+  fxaa_sampler_desc.magFilter = wgpu::FilterMode::Linear;
+  fxaa_sampler_desc.minFilter = wgpu::FilterMode::Linear;
+  blit.fxaa_sampler = device.CreateSampler(&fxaa_sampler_desc);
   return true;
 }
 
@@ -1448,19 +1498,39 @@ void WebGpuBackend::Swap(const SwapSnapshot& swap) {
             static_cast<ui::webgpu::WebGpuPresenter::WebGpuGuestOutputRefreshContext&>(context);
         context.SetIs8bpc(true);
         std::lock_guard lock(provider_.device_mutex());
-        wgpu::RenderPassColorAttachment color;
-        color.view = webgpu_context.view();
-        color.loadOp = wgpu::LoadOp::Clear;
-        color.storeOp = wgpu::StoreOp::Store;
-        color.clearValue = {0.10, 0.12, 0.18, 1.0};
-        wgpu::RenderPassDescriptor pass_desc;
-        pass_desc.label = "guest output";
-        pass_desc.colorAttachmentCount = 1;
-        pass_desc.colorAttachments = &color;
+        BlitResources& blit = State().blit;
+        const bool have_frontbuffer = region.target && region.target->sample_count == 1;
+        const bool fxaa = have_frontbuffer && swap.post_effect != 0;
+        const uint32_t width = webgpu_context.texture().GetWidth();
+        const uint32_t height = webgpu_context.texture().GetHeight();
+        if (fxaa && (!blit.fxaa_source || blit.fxaa_width != width ||
+                     blit.fxaa_height != height)) {
+          wgpu::TextureDescriptor desc;
+          desc.label = "fxaa source";
+          desc.size = {width, height, 1};
+          desc.format = ui::webgpu::WebGpuPresenter::kGuestOutputFormat;
+          desc.usage = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding;
+          blit.fxaa_source = provider_.device().CreateTexture(&desc);
+          blit.fxaa_source_view = blit.fxaa_source.CreateView();
+          blit.fxaa_width = width;
+          blit.fxaa_height = height;
+        }
         wgpu::CommandEncoder encoder = provider_.device().CreateCommandEncoder();
-        wgpu::RenderPassEncoder pass = encoder.BeginRenderPass(&pass_desc);
-        if (region.target && region.target->sample_count == 1) {
-          BlitResources& blit = State().blit;
+        auto begin_pass = [&](const wgpu::TextureView& view, const char* label) {
+          wgpu::RenderPassColorAttachment color;
+          color.view = view;
+          color.loadOp = wgpu::LoadOp::Clear;
+          color.storeOp = wgpu::StoreOp::Store;
+          color.clearValue = {0.10, 0.12, 0.18, 1.0};
+          wgpu::RenderPassDescriptor pass_desc;
+          pass_desc.label = label;
+          pass_desc.colorAttachmentCount = 1;
+          pass_desc.colorAttachments = &color;
+          return encoder.BeginRenderPass(&pass_desc);
+        };
+        wgpu::RenderPassEncoder pass = begin_pass(
+            fxaa ? blit.fxaa_source_view : webgpu_context.view(), "guest output");
+        if (have_frontbuffer) {
           // The 256-entry table for 8-bit frontbuffers, PWL for 10-bit ones
           // (as in the Vulkan backend).
           xenos::ColorRenderTargetFormat format =
@@ -1473,7 +1543,8 @@ void WebGpuBackend::Swap(const SwapSnapshot& swap) {
             provider_.queue().WriteBuffer(blit.gamma_ramp, 0, ramp,
                                           (pwl ? 128 * 3 : 256) * sizeof(uint32_t));
           }
-          int32_t constants[4] = {int32_t(region.x), int32_t(region.y), int32_t(gamma_mode), 0};
+          int32_t constants[4] = {int32_t(region.x), int32_t(region.y), int32_t(gamma_mode),
+                                  int32_t(fxaa)};
           provider_.queue().WriteBuffer(blit.constants, 0, constants, sizeof(constants));
           std::array<wgpu::BindGroupEntry, 3> entries;
           entries[0].binding = 0;
@@ -1491,6 +1562,31 @@ void WebGpuBackend::Swap(const SwapSnapshot& swap) {
           pass.Draw(3);
         }
         pass.End();
+        if (fxaa) {
+          struct {
+            float size_inv[2];
+            uint32_t extreme;
+            uint32_t padding;
+          } fxaa_constants = {{1.0f / width, 1.0f / height}, swap.post_effect == 2 ? 1u : 0u, 0};
+          provider_.queue().WriteBuffer(blit.fxaa_constants, 0, &fxaa_constants,
+                                        sizeof(fxaa_constants));
+          std::array<wgpu::BindGroupEntry, 3> entries;
+          entries[0].binding = 0;
+          entries[0].textureView = blit.fxaa_source_view;
+          entries[1].binding = 1;
+          entries[1].sampler = blit.fxaa_sampler;
+          entries[2].binding = 2;
+          entries[2].buffer = blit.fxaa_constants;
+          wgpu::BindGroupDescriptor bind_group_desc;
+          bind_group_desc.layout = blit.fxaa_layout;
+          bind_group_desc.entryCount = entries.size();
+          bind_group_desc.entries = entries.data();
+          wgpu::RenderPassEncoder fxaa_pass = begin_pass(webgpu_context.view(), "fxaa");
+          fxaa_pass.SetPipeline(blit.fxaa_pipeline);
+          fxaa_pass.SetBindGroup(0, provider_.device().CreateBindGroup(&bind_group_desc));
+          fxaa_pass.Draw(3);
+          fxaa_pass.End();
+        }
         wgpu::CommandBuffer commands = encoder.Finish();
         provider_.queue().Submit(1, &commands);
         return true;

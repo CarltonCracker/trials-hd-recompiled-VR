@@ -151,8 +151,9 @@ class TrialsHdApp : public rex::ReXApp {
 #endif
   }
 
-  // The Xenos GPU plugin (librexgpu-xenos*.so, staged next to the binary) is
-  // required to render anything; default to it unless --gpu_plugin overrides.
+  // A GPU plugin (librexgpu-*.so, staged next to the binary) is required to
+  // render anything. The WebGPU renderer is the default unless --gpu_plugin
+  // overrides; if it cannot start, the Vulkan one (xenos) is used instead.
   // Audio falls back to a silent driver when no output device can be opened.
   void OnPreSetup(rex::RuntimeConfig& config) override {
 #if defined(__APPLE__)
@@ -163,7 +164,7 @@ class TrialsHdApp : public rex::ReXApp {
     setenv("MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS", "1", 0);
 #endif
     if (config.gpu_plugin.empty()) {
-      config.gpu_plugin = "xenos";
+      config.gpu_plugin = "webgpu";
     }
 
     REXLOG_INFO("OnPreSetup: gpu_plugin={}", config.gpu_plugin);

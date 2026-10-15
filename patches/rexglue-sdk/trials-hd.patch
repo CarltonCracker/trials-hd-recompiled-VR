@@ -1091,10 +1091,32 @@ index 19874a5..2b86263 100644
        for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
          memexport_total_size += memexport_range.size_bytes;
 diff --git a/src/graphics/graphics_system.cpp b/src/graphics/graphics_system.cpp
-index 8f2fcb0..3f31746 100644
+index 8f2fcb0..10d27b0 100644
 --- a/src/graphics/graphics_system.cpp
 +++ b/src/graphics/graphics_system.cpp
-@@ -253,7 +253,7 @@ uint32_t GraphicsSystem::ReadRegister(uint32_t addr) {
+@@ -136,6 +136,13 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
+     return X_STATUS_UNSUCCESSFUL;
+   }
+   command_processor_->SetDesiredSwapPostEffect(ParseSwapPostEffect(REXCVAR_GET(swap_post_effect)));
++  // Applies at the next swap when changed at runtime (settings menu).
++  rex::cvar::RegisterChangeCallback(
++      "swap_post_effect", [this](std::string_view, std::string_view value) {
++        if (command_processor_) {
++          command_processor_->SetDesiredSwapPostEffect(ParseSwapPostEffect(std::string(value)));
++        }
++      });
+ 
+   // Register GPU MMIO handlers
+   // GPU registers are at 0x7FC80000-0x7FCFFFFF
+@@ -179,6 +186,7 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
+ }
+ 
+ void GraphicsSystem::Shutdown() {
++  rex::cvar::UnregisterChangeCallbacks("swap_post_effect");
+   if (command_processor_) {
+     command_processor_->Shutdown();
+     command_processor_.reset();
+@@ -253,7 +261,7 @@ uint32_t GraphicsSystem::ReadRegister(uint32_t addr) {
        return (viewport_width << 16) | viewport_height;
      }
      default:
