@@ -232,6 +232,24 @@ file-backed (code). Host-side budget for the web build: about 1 GiB.
 36 (section 3.2). The web build needs a pthread pool of at least 48 workers (guest threads
 are created on demand; Emscripten creates workers asynchronously unless pre-pooled).
 
+W-S03's executable probe is `tools/web/spikes/thread_memory64.cpp` with
+`thread_memory64_shell.html`. It reserves a page-aligned 3 GiB window, starts 40
+pthreads together through a barrier, fills/verifies a disjoint 16 MiB region per
+thread at offsets spanning that window (640 MiB committed), and leaves it resident
+for `/proc/<renderer-pid>/status` measurement. This is synthetic code, not game code.
+
+```sh
+source ~/emsdk/emsdk_env.sh
+mkdir -p out/web-spikes
+em++ tools/web/spikes/thread_memory64.cpp -o out/web-spikes/thread_memory64.html \
+  --shell-file tools/web/spikes/thread_memory64_shell.html --target=wasm64 -O2 \
+  -std=c++20 -pthread -sPROXY_TO_PTHREAD -sPTHREAD_POOL_SIZE=48 \
+  -sINITIAL_MEMORY=3800mb -sMAXIMUM_MEMORY=8gb -sALLOW_MEMORY_GROWTH -sASSERTIONS=1
+python3 tools/web/serve.py out/web-spikes
+# Launch Chromium as in 11.1 on /thread_memory64.html, then:
+.venv/bin/python tools/web/spikes/record.py http://127.0.0.1:9222 out/thread_memory64.json
+```
+
 ### 4.6 Game data
 
 206 MiB total: `data/data.pak` 112 MiB, `data_menu.pak` 36 MiB, `XACT/Music.xwb` 40 MiB,
