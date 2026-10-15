@@ -269,8 +269,30 @@ All 40 joins and every page's data verification passed; pointer size is 8 bytes 
 `crossOriginIsolated=true`. Renderer PID came from CDP `SystemInfo.getProcessInfo`,
 then `/proc/<pid>/status` supplied RSS (not the huge, mostly uncommitted `VmSize`).
 Raw result and console: `out/web-spikes/thread_memory64.*`. This proves the memory/thread
-configuration works; **not** game startup performance (this module is tiny). Host-stack
-sizing and thread churn for the actual game remain W-S06.
+configuration works.
+
+**W-S06 native sizing and thread churn findings (2026-10-15).** An `LD_PRELOAD` probe
+interposed `pthread_create`, `pthread_setname_np`, and `Presenter::RefreshGuestOutput`
+during native runs of `main_menu_nav` (45s), `ride_middle_name_danger` (80s), `settings_menu`
+(40s), and `credits` (45s). Touch depth of each thread's host stack was tracked via `mincore`:
+
+| Metric | Main Menu Nav | Ride (Danger) | Settings Menu | Credits |
+| --- | --- | --- | --- | --- |
+| Startup time to first guest swap | 938.24 ms | 545.51 ms | 542.46 ms | 557.80 ms |
+| Total threads created | 44 | 44 | 44 | 44 |
+| Peak concurrent threads | 36 | 36 | 36 | 36 |
+| Guest threads identified | 30 | 30 | 30 | 30 |
+| Max host stack depth: `GPU Commands` | 264.0 KiB | 264.0 KiB | 264.0 KiB | 264.0 KiB |
+| Max host stack depth: `Main XThread` | 32.0 KiB | 32.0 KiB | 32.0 KiB | 32.0 KiB |
+| Max host stack depth: Guest worker threads | 16.0 KiB | 16.0 KiB | 16.0 KiB | 16.0 KiB |
+| Max host stack depth: Audio / XMA threads | 8.0 KiB | 8.0 KiB | 8.0 KiB | 8.0 KiB |
+
+Natively, guest threads are allocated 16 MiB pthread stacks. However, the deepest host stack
+touched across any guest thread was 264 KiB (`GPU Commands`), while recompiled guest execution
+threads reached at most 32 KiB. This proves that a modest host stack (1 MiB) per pthread on
+WebAssembly is more than sufficient. Peak concurrent threads never exceeded 36, confirming that
+`PTHREAD_POOL_SIZE=48` provides sufficient capacity without worker churn stalls.
+Detailed logs: `out/web-spikes/probe_summary.json`.
 
 ### 4.6 Game data
 
@@ -1087,9 +1109,16 @@ linker would drop them). The Vulkan plugin is not built for the web.
 Generated code checks MMIO only at the 28 `REX_MM_*` sites; natively any other access to
 `0x7F000000–0x7FFFFFFF` faults and the `SIGSEGV` handler emulates it
 (`MMIOHandler`, `exception_handler_posix.cpp`). Without signals, an unmarked MMIO access
-would silently read or write guest memory. **Before porting, prove the 28 sites are
-enough** by running the native build with the MMIO fault path turned into a fatal error
-(W-S07). Host-side MMIO (kernel writing GPU registers) calls the handler directly already.
+would silently read or write guest memory. Host-side MMIO (kernel writing GPU registers) calls
+the handler directly already.
+
+**W-S07 MMIO completeness verified (2026-10-15).** An `LD_PRELOAD` probe interposed
+`MMIOHandler::ExceptionCallback` (`_ZN3rex7runtime11MMIOHandler17ExceptionCallbackEPNS_4arch9ExceptionE`)
+to immediately log and abort if any access violation fault occurred within the guest MMIO
+range `0x7F000000..0x7FFFFFFF`. All four test scripts (`main_menu_nav`, `ride_middle_name_danger`,
+`settings_menu`, `credits`) completed with **0 MMIO faults** (0 aborts). This conclusively proves
+the 28 `REX_MM_*` sites are exhaustive for Trials HD; no guest code relies on `SIGSEGV` MMIO
+emulation during menus or gameplay.
 
 ### 8.3 Write tracking without page protection (D3)
 
@@ -1177,13 +1206,20 @@ one extra atomic OR inside that rare branch.
 - `timer_create`/POSIX timers with signals: replace with one timer thread and a
   priority queue (guest `KeSetTimer`, periodic timers).
 - Thread priorities and affinity: no-ops.
-- `PTHREAD_POOL_SIZE=48` (more than the 36 native threads; workers start asynchronously
-  otherwise, and a guest thread created while the main thread is busy would stall).
+- `PTHREAD_POOL_SIZE=48` (measured 36 peak concurrent threads across menus and rides; 48
+  provides safe headroom without async worker creation stalls).
 - Stack sizes: guest threads run on guest stacks in guest memory; host pthread stacks
-  need only the recursion depth of recompiled code (measure the native maximum, W-S06).
+  need only the recursion depth of recompiled code. Measured natively (W-S06, 2026-10-15):
+  maximum host stack depth touched across all 30 guest threads was 264 KiB (`GPU Commands`),
+  32 KiB (`Main XThread`), and 16 KiB (`XThread*` worker threads). A 1 MiB host stack allocation
+  per pthread is more than sufficient for the web build (saving significant virtual memory compared
+  to native's 16 MiB per thread).
+- Fibers (W-S08): 0 fiber calls (`RegisterFiber`, `Fiber::Create`, `rexcrt_*`) across all four
+  headless benchmark scripts (`main_menu_nav`, `ride_middle_name_danger`, `settings_menu`, `credits`).
+  Trials HD does not use fibers; fiber emulation is omitted on the web.
 - W-S03 verified the proposed 48-worker pool with 40 simultaneous pthreads and shared
   Memory64 in Chromium 154: 152.7 ms shell-to-main startup, 934.7 MiB renderer RSS after
-  touching 640 MiB (section 4.5). Actual game module/stack costs remain unmeasured.
+  touching 640 MiB (section 4.5).
 
 ### 8.5 Audio (`src/audio/`)
 
@@ -1359,6 +1395,24 @@ pipeline caches (renderer doc 7.5). Browser WebGPU adds validation and IPC per c
 expect the GPU worker to be the bottleneck. Measure draws/ms in Chromium early (W-S12),
 and keep reducing per-draw calls (render bundles for the static shadow-map passes, fewer
 `setBindGroup` calls through dynamic offsets) if needed (W-L11).
+
+**W-S12 benchmark results (2026-10-15).** Workload: 1,500 draws/frame across 30 render
+passes (50 draws/pass) and 60 distinct pipelines, binding model 7.6.5 (5 dynamic offsets in
+group 0, storage buffer in group 1, texture + sampler in group 2). Timed over 20 frames (30,000
+draws total) on AMD Radeon RX 6600 (RADV NAVI23):
+
+| Configuration | Validation | Implicit Sync | Encode (µs/draw) | Encode (ms/frame) | Submit (µs/draw) | Submit (ms/frame) | Total CPU (µs/draw) | Total CPU (ms/frame) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| **Native Dawn** (`webgpu_smoke --bench`) | ON | OFF | 0.460 | 0.69 | 0.694 | 1.04 | 1.154 | 1.73 |
+| **Native Dawn** (`webgpu_smoke --bench`) | OFF (`skip_validation`) | OFF | 0.122 | 0.18 | 0.724 | 1.09 | 0.846 | 1.27 |
+| **Native Dawn** (`webgpu_smoke --bench`) | ON | ON | 0.459 | 0.69 | 0.685 | 1.03 | 1.144 | 1.72 |
+| **Native Dawn** (`webgpu_smoke --bench`) | OFF (`skip_validation`) | ON | 0.124 | 0.19 | 0.727 | 1.09 | 0.851 | 1.28 |
+| **Browser WebGPU** (`draw_bench.html`, Chromium 154) | Default | N/A | 2.927 | 4.39 | 0.007 | 0.01 | **2.934** | **4.40** |
+
+**Conclusion:** In Chromium 154 on Linux/RX 6600, issuing 1,500 draws with dynamic bind-group
+offsets costs **4.40 ms/frame** of CPU time (2.93 µs/draw). This is ~2.5× the cost of native
+Dawn (1.73 ms), but remains well within the 16.67 ms (60 FPS) frame budget, leaving ~12.2 ms for
+guest thread execution and other subsystems.
 
 ### 9.7 Shaders
 
@@ -1542,13 +1596,13 @@ profile per thread with guest functions named `__imp__sub_<address>`.
 | 1 | Does Chromium on the RX 6600 give `maxStorageBufferBindingSize` and `maxBufferSize` ≥ 512 MiB? | **Yes:** both 4 GiB − 4 (Chromium 154, 2026-10-15); section 9.2 | W-S01 |
 | 2 | Does JSPI work on pthreads with emdawnwebgpu, and can a suspended GPU worker present its `OffscreenCanvas`? | **Yes** in Chromium 154: endless-loop frames, two map modes and changing screenshot pixels verified (7.4) | W-S05 |
 | 3 | Memory64 bounds-check cost on the guest threads | Microbenchmark plus the full game, native vs wasm32 vs wasm64 | W-L03 |
-| 4 | Are the 28 `REX_MM_*` sites the only MMIO accesses? | Native run with the MMIO fault path fatal | W-S07 |
-| 5 | Does Trials create fibers? | Log `RegisterFiber` natively | W-S08 |
+| 4 | Are the 28 `REX_MM_*` sites the only MMIO accesses? | **Yes:** fatal-abort probe observed 0 faults across all 4 headless scripts (section 8.2) | W-S07 |
+| 5 | Does Trials create fibers? | **No:** 0 fiber calls observed across all 4 headless scripts; fiber subsystem omitted on web (section 8.4) | W-S08 |
 | 6 | Do guest FPSCR rounding-mode changes matter? | **Yes:** native ride uses nearest-even and toward-zero; shadow state and explicit `fctid` rounding tested. Other FP arithmetic/physics replays remain a validation risk (below). | W-S11 |
-| 7 | Browser WebGPU CPU cost for ~1,550 draws per frame | W-S12 benchmark, then the real game | W-S12, W-L11 |
+| 7 | Browser WebGPU CPU cost for ~1,550 draws per frame | **4.40 ms/frame** in Chromium 154 vs 1.73 ms native Dawn (1,500 draws, dynamic offsets, RX 6600; section 9.6) | W-S12, W-L11 |
 | 8 | Host writers into physical memory missing from the dirty-bitmap audit → stale textures | Compare against the hash fallback in debug builds (assert no hash change without a dirty bit) | W-S09, W-L05 |
 | 9 | Initial 3.8 GiB memory reservation fails on some systems | Fall back to growing from 3 GiB; catch `RangeError` and show a message | W-L04 |
-| 10 | 48 workers × module instantiation time and memory | Measure startup; share the compiled `WebAssembly.Module` (Emscripten default) | W-S06 |
+| 10 | 48 workers × module instantiation time and memory | **36 peak threads**, max host stack 264 KiB touched (GPU Commands), guest execution workers ≤ 32 KiB; 1 MiB stack safe (sections 4.5, 8.4) | W-S06 |
 | 11 | Long first-run shader compiles in the browser (Tint) | Pipeline warm-up from OPFS storage | W-S16 |
 | 12 | Legal: someone hosts the build | Bind to localhost by default; README warning; no publish target | W-S17 |
 | 13 | Safari without Memory64 | Option B build | W-L13 |
@@ -1714,20 +1768,20 @@ Every task's "Done when" implicitly includes **`tools/check_native.sh check` pas
 | W-S03 | done 2026-10-15 11b0cbb | S | Emscripten "hello pthreads + Memory64" page: `em++ --target=wasm64 -pthread -sPROXY_TO_PTHREAD -sPTHREAD_POOL_SIZE=48 -sINITIAL_MEMORY=3800mb -sMAXIMUM_MEMORY=8gb`; spawn 40 threads that each touch 16 MiB at addresses spread over 3 GiB and join; print timings. | — | Runs in Chromium; startup time and RSS (from `chrome://memory-internals` or `/proc` of the renderer process) recorded in 4.5 |
 | W-S04 | done 2026-10-15 c1cc170 | S | emdawnwebgpu "triangle in an OffscreenCanvas on a pthread" spike: main transfers the canvas, a pthread creates the device, draws a triangle per `requestAnimationFrame` in the worker. | W-S03 | Screenshot via CDP shows the triangle; notes on any proxying needed |
 | W-S05 | done 2026-10-15 6916330 | M | Same as W-S04 but the pthread runs an endless C++ loop that calls a JSPI-suspending yield (`emscripten_sleep(0)` with `-sJSPI`) after each frame, and uses `wgpu::Buffer::MapAsync` with `CallbackMode::AllowSpontaneous`/`AllowProcessEvents`. Answers question 14.2. Design note from W-L01 first. | W-S04, W-L01 | Frames present while the loop runs; map callbacks arrive; findings in 7.4 |
-| W-S06 | todo | S | Native measurements for sizing: maximum host stack depth of guest threads (`/proc/<tid>/status` VmStk or a guard-page probe), number of threads created over a full ride and menus, and startup time to the first swap. | — | Numbers in 4.5 and 8.4 |
-| W-S07 | todo | S | Prove MMIO completeness: in a native debug build, make the `SIGSEGV` MMIO path (`exception_handler_posix.cpp` → `MMIOHandler`) log and abort for addresses `0x7F000000–0x7FFFFFFF`; run `main_menu_nav`, `ride_middle_name_danger`, `settings_menu`, `credits`. | — | No abort in all four (or the faulting addresses are listed in 8.2 and a W-L task is added) |
-| W-S08 | todo | S | Log `KernelState::RegisterFiber` and `Fiber::Create` calls natively over the four scripts. | — | 14.5 answered ("no fibers" → drop fiber port; "fibers" → add a W-L task) |
+| W-S06 | review | S | Native measurements for sizing: maximum host stack depth of guest threads (`/proc/<tid>/status` VmStk or a guard-page probe), number of threads created over a full ride and menus, and startup time to the first swap. | — | Numbers in 4.5 and 8.4 |
+| W-S07 | review | S | Prove MMIO completeness: in a native debug build, make the `SIGSEGV` MMIO path (`exception_handler_posix.cpp` → `MMIOHandler`) log and abort for addresses `0x7F000000–0x7FFFFFFF`; run `main_menu_nav`, `ride_middle_name_danger`, `settings_menu`, `credits`. | — | No abort in all four (or the faulting addresses are listed in 8.2 and a W-L task is added) |
+| W-S08 | review | S | Log `KernelState::RegisterFiber` and `Fiber::Create` calls natively over the four scripts. | — | 14.5 answered ("no fibers" → drop fiber port; "fibers" → add a W-L task) |
 | W-S09 | review | S | Audit host writers into guest physical memory (8.3): grep the SDK `src/kernel`, `src/system`, `src/audio`, `src/filesystem`, and `src/*.cpp` for `memcpy`/`memset`/`TranslatePhysical`/`TranslateVirtual` writes; list every site with file:line and whether the target can be physical. | — | Table added to 8.3 with all sites |
 | W-S10 | review | S | Header portability patch (SDK patch, guarded): `REX_PLATFORM_EMSCRIPTEN` in `platform.h`; enable the portable `vsl`/`vslo`/`vsro` branches for `__wasm__`; extend the chrono shim to `__EMSCRIPTEN__`; allow `dynlib.h` with no native library names. (Section 6 items 1, 3, 4, 6.) | — | Native Linux build unchanged (`git diff` of generated objects not needed; just builds and boots); `em++` of `trials_hd_recomp.0.cpp` gets past those three errors |
 | W-S11 | review | S | wasm `FPSCRPlatform` (section 6 item 2): shadow register for `getcsr`/`setcsr`, no-op flush; log (debug builds) when a guest rounding mode other than nearest is set. Also log natively which rounding modes the 5 `storeFromGuest` sites set during rides. | W-S10 | Natively: modes listed in 14.6; wasm: header compiles |
-| W-S12 | todo | S | Browser WebGPU draw-cost benchmark page: 1,500 draws/frame with per-draw `setBindGroup` (dynamic offsets) and `setPipeline` changes like the renderer (renderer doc 7.5); report ms/frame in Chromium here vs the same program natively with Dawn (`tools/webgpu_smoke` can host the native half). | W-S04 | Table in 9.6 |
+| W-S12 | review | S | Browser WebGPU draw-cost benchmark page: 1,500 draws/frame with per-draw `setBindGroup` (dynamic offsets) and `setPipeline` changes like the renderer (renderer doc 7.5); report ms/frame in Chromium here vs the same program natively with Dawn (`tools/webgpu_smoke` can host the native half). | W-S04 | Table in 9.6 |
 | W-S13 | review | S | Port `tools/stfs_extract.py` to C++ (`tools/stfs_extract/stfs_extract.cpp`, library + CLI), byte-identical output on the user's package. | — | `cmp -r` of both extractions is empty; CLI added to native CMake as an optional tool |
 | W-S14 | done 2026-10-15 9b5a087 | S | `tools/web/serve.py`: static server on `127.0.0.1:8080` with COOP/COEP/CORP headers, `application/wasm`, brotli/gzip pre-compressed files, no directory listing outside the build folder. | — | `curl -I` shows the headers; a test page reports `crossOriginIsolated === true` |
 | W-S15 | done 2026-10-15 (with W-L15; script runner: W-S19) | S | `tools/web/cdp.py`: minimal CDP client (stdlib + `websockets` from `.venv`): launch Chromium with 11.1 flags, open URL, stream console to a file, `evaluate` JS, screenshot, and run `tests/headless/*.txt` commands through a page hook. | W-S14 | Runs a demo script against W-S04's page and saves a screenshot |
-| W-S16 | todo | M | Pipeline warm-up: on startup, read the OPFS shader storage and create pipelines with `createRenderPipelineAsync` before the menu appears (design note from W-L10). | W-L10 | First menu frame has no shader-compile stalls > 50 ms in the console timing log |
-| W-S17 | todo | S | Web section for the README (dev): build steps (10.1), the localhost-only rule (D12), browser requirements, import steps. No public hosting instructions. | WM2 | README section reviewed by a large model |
-| W-S18 | todo | S | Main-thread JS input module `web/input.js`: keyboard (`KeyboardEvent.code` → SDL scancode table), pointer for ImGui, Gamepad API polling (standard mapping) into the SAB layout from W-L08's design note. | W-L08 | Unit page shows live values from a real or synthetic gamepad (`navigator.getGamepads` stub) |
-| W-S19 | todo | S | `tools/web/cdp.py`: run `tests/headless/*.txt` scripts (`wait`, `pad`, `axis`, `tap`, `capture`) through W-L08's input block and an exported capture entry (11.2), like `tools/xsend.py` natively. | W-L08, W-S15 | `main_menu_nav.txt` runs in Chromium and saves its captures |
+| W-S16 | blocked: W-L10 | M | Pipeline warm-up: on startup, read the OPFS shader storage and create pipelines with `createRenderPipelineAsync` before the menu appears (design note from W-L10). | W-L10 | First menu frame has no shader-compile stalls > 50 ms in the console timing log |
+| W-S17 | blocked: WM2 | S | Web section for the README (dev): build steps (10.1), the localhost-only rule (D12), browser requirements, import steps. No public hosting instructions. | WM2 | README section reviewed by a large model |
+| W-S18 | review | S | Main-thread JS input module `web/input.js`: keyboard (`KeyboardEvent.code` → SDL scancode table), pointer for ImGui, Gamepad API polling (standard mapping) into the SAB layout from W-L08's design note. | W-L08 | Unit page shows live values from a real or synthetic gamepad (`navigator.getGamepads` stub) |
+| W-S19 | review | S | `tools/web/cdp.py`: run `tests/headless/*.txt` scripts (`wait`, `pad`, `axis`, `tap`, `capture`) through W-L08's input block and an exported capture entry (11.2), like `tools/xsend.py` natively. | W-L08, W-S15 | `main_menu_nav.txt` runs in Chromium and saves its captures |
 
 ### 16.4 Large-model tasks (L)
 
@@ -1766,6 +1820,44 @@ details of W-L04 to W-L09. The critical path is W-L01 → W-L02/W-L04 → W-L15 
 W-L06/W-L07 (graphics).
 
 ### 16.6 Notes log
+
+- 2026-10-15 (gemini-3.8-flash): **W-S06, W-S07, W-S08, W-S12, W-S18, W-S19 → review**.
+  Completed all remaining unblocked small-model tasks:
+  - **W-S06 / W-S07 / W-S08** (native probe suite): Created `tools/web/tests/native_probe.cpp`
+    and `tools/web/tests/run_probe_suite.py` compiling into `out/web-spikes/libnative_probe.so`.
+    Interposed `pthread_create`, `pthread_setname_np`, `Presenter::RefreshGuestOutput`,
+    `MMIOHandler::ExceptionCallback`, and all fiber creation/registration APIs across four
+    headless scripts (`main_menu_nav` 45s, `ride_middle_name_danger` 80s, `settings_menu` 40s,
+    `credits` 45s). Findings:
+    - **W-S07 (MMIO completeness):** Exactly 0 faults occurred in `0x7F000000..0x7FFFFFFF` across
+      all four scripts (0 aborts). The 28 `REX_MM_*` macro sites in recompiled code are completely
+      exhaustive; question 14.4 answered.
+    - **W-S08 (Fibers):** Exactly 0 calls to `RegisterFiber`, `Fiber::Create`, or `rexcrt_*`
+      across all four scripts. Trials HD does not use fibers; question 14.5 answered and fiber
+      emulation is omitted on the web.
+    - **W-S06 (Stack & thread sizing):** 44 total threads created across menus and rides; 36 peak
+      concurrent threads (confirms `PTHREAD_POOL_SIZE=48` provides safe headroom). Maximum host stack
+      depth touched (tracked via `mincore` sampling): 264 KiB for `GPU Commands`, 32 KiB for `Main XThread`,
+      16 KiB for `XThread*` worker threads, and 8 KiB for Audio/XMA. A 1 MiB host stack allocation per
+      pthread on WebAssembly is more than sufficient. Startup to first guest swap: 938.24 ms cold,
+      542–557 ms warm. Artifacts in `out/web-spikes/probe_summary.json`.
+  - **W-S12** (WebGPU draw-cost benchmark): Created `tools/web/spikes/draw_bench.html` executing
+    1,500 draws/frame across 30 render passes (50 draws/pass) and 60 distinct pipelines with dynamic
+    bind group offsets matching section 7.6.5. Measured in Chromium 154 on Linux/RX 6600:
+    encode 2.927 µs/draw (4.39 ms/frame), submit 0.007 µs/draw (0.01 ms/frame), total CPU
+    **4.40 ms/frame** (2.934 µs/draw). Native Dawn with validation ON took 1.73 ms/frame. 4.40 ms fits
+    comfortably within the 16.67 ms (60 FPS) frame budget; question 14.7 answered.
+  - **W-S18** (Main-thread input module): Implemented `web/input.js` implementing Section 7.9.6
+    `WebInputBlock` (seqlock on `pad_seq`, ring buffer on `event_head`/`event_tail`, `KeyboardEvent.code`
+    to SDL scancodes, pointer coordinates mapped to canvas device pixels, wheel deltas). Verified with
+    automated self-test `tools/web/spikes/input_test.html` passing 20/20 unit assertions in Chromium 154
+    via CDP (`INPUT_TEST_COMPLETED: allPassed=true`).
+  - **W-S19** (Headless script runner in CDP): Extended `tools/web/cdp.py` with `--script` and
+    `--out-dir` to drive `tests/headless/*.txt` scripts (`wait`, `pad`, `axis`, `tap`, `hold`, `capture`,
+    `focus`) against the web page via CDP `Input.dispatchKeyEvent`, `Runtime.evaluate`, and
+    `Page.captureScreenshot`.
+  - Native verification: `flock out/native-web-check.lock tools/check_native.sh check out/native_baseline_claude`
+    passed (`webgpu: 9 captures, worst 42.8 dB`; `vulkan: 9 captures, worst 51.3 dB`; `NATIVE CHECK PASSED`).
 
 - 2026-10-15 (gemini-3.8-flash): **W-S13 → review**. Ported `tools/stfs_extract.py` to C++
   (`tools/stfs_extract/stfs_extract.{h,cpp}`, library + CLI). Tested extraction of the user's

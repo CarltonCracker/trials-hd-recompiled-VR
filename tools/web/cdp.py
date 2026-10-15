@@ -118,6 +118,81 @@ class Session:
             pass
 
 
+PAD_BUTTON_MAP = {
+    "a": 0, "b": 1, "x": 2, "y": 3,
+    "lb": 4, "rb": 5, "lt": 6, "rt": 7,
+    "back": 8, "start": 9,
+    "ls": 10, "rs": 11,
+    "up": 12, "down": 13, "left": 14, "right": 15,
+}
+
+KEYSYM_MAP = {
+    "space": ("Space", " "), "Return": ("Enter", "\r"), "Escape": ("Escape", ""),
+    "Tab": ("Tab", "\t"), "BackSpace": ("Backspace", ""),
+    "Up": ("ArrowUp", ""), "Down": ("ArrowDown", ""),
+    "Left": ("ArrowLeft", ""), "Right": ("ArrowRight", ""),
+    "F1": ("F1", ""), "F2": ("F2", ""), "F3": ("F3", ""), "F4": ("F4", ""),
+    "F5": ("F5", ""), "F6": ("F6", ""), "F7": ("F7", ""), "F8": ("F8", ""),
+    "F9": ("F9", ""), "F10": ("F10", ""), "F11": ("F11", ""), "F12": ("F12", ""),
+}
+
+
+async def run_headless_script(s, script_path, out_dir):
+    """Executes a tests/headless/*.txt script against the web page via CDP."""
+    with open(script_path) as f:
+        lines = [line.split("#")[0].strip().split() for line in f]
+    lines = [l for l in lines if l]
+    for parts in lines:
+        cmd, c_args = parts[0], parts[1:]
+        if cmd == "wait":
+            await asyncio.sleep(float(c_args[0]))
+        elif cmd in ("tap", "hold"):
+            ms = float(c_args[1]) if len(c_args) > 1 else 80
+            key = c_args[0]
+            code, text = KEYSYM_MAP.get(key, (f"Key{key.upper()}", key))
+            await s.call("Input.dispatchKeyEvent", {
+                "type": "rawKeyDown", "code": code, "key": key, "text": text
+            }, session=s.page_session)
+            await asyncio.sleep(ms / 1000.0)
+            await s.call("Input.dispatchKeyEvent", {
+                "type": "keyUp", "code": code, "key": key
+            }, session=s.page_session)
+        elif cmd == "down":
+            key = c_args[0]
+            code, text = KEYSYM_MAP.get(key, (f"Key{key.upper()}", key))
+            await s.call("Input.dispatchKeyEvent", {
+                "type": "rawKeyDown", "code": code, "key": key, "text": text
+            }, session=s.page_session)
+        elif cmd == "up":
+            key = c_args[0]
+            code, _ = KEYSYM_MAP.get(key, (f"Key{key.upper()}", key))
+            await s.call("Input.dispatchKeyEvent", {
+                "type": "keyUp", "code": code, "key": key
+            }, session=s.page_session)
+        elif cmd == "pad":
+            btn = c_args[0].lower()
+            val = int(c_args[1])
+            idx = PAD_BUTTON_MAP.get(btn, 0)
+            expr = f"if (window.setSyntheticPadButton) window.setSyntheticPadButton({idx}, {val});"
+            await s.call("Runtime.evaluate", {"expression": expr}, session=s.page_session)
+        elif cmd == "axis":
+            axis = c_args[0].lower()
+            raw_val = float(c_args[1])
+            expr = f"if (window.setSyntheticPadAxis) window.setSyntheticPadAxis('{axis}', {raw_val});"
+            await s.call("Runtime.evaluate", {"expression": expr}, session=s.page_session)
+        elif cmd == "capture":
+            name = c_args[0]
+            shot = await s.call("Page.captureScreenshot", {"format": "png"}, session=s.page_session)
+            out_file = out_dir / f"{name}.png"
+            out_file.parent.mkdir(parents=True, exist_ok=True)
+            out_file.write_bytes(base64.b64decode(shot["data"]))
+            s.write("capture", f"saved screenshot to {out_file}")
+        elif cmd == "focus":
+            await s.call("Runtime.evaluate", {
+                "expression": "const c = document.querySelector('canvas'); if (c) c.focus();"
+            }, session=s.page_session)
+
+
 async def drive(s, args):
     """Opens the page with every worker attached and waits; prints a summary."""
     s.pattern = re.compile(args.until) if args.until else None
@@ -134,6 +209,12 @@ async def drive(s, args):
     await s.call("Page.navigate", {"url": args.url}, session=s.page_session)
     started = time.monotonic()
     exit_code = None
+
+    script_task = None
+    if getattr(args, "script", None):
+        out_dir = getattr(args, "out_dir", Path("out/run"))
+        script_task = asyncio.ensure_future(run_headless_script(s, args.script, out_dir))
+
     while time.monotonic() - started < args.seconds and s.matched is None:
         await asyncio.sleep(1)
         state = await s.call("Runtime.evaluate", {
@@ -142,6 +223,14 @@ async def drive(s, args):
         exit_code = state.get("result", {}).get("value")
         if exit_code is not None:
             break
+        if script_task and script_task.done():
+            # If script completed and no other wait pattern requested, we can finish
+            if not args.until:
+                break
+
+    if script_task and not script_task.done():
+        script_task.cancel()
+
     elapsed = time.monotonic() - started
     result = None
     if args.eval:
@@ -211,6 +300,8 @@ def main():
     parser.add_argument("--console", type=Path, default=Path("out/web-run/console.log"))
     parser.add_argument("--eval", help="JavaScript expression to evaluate at the end")
     parser.add_argument("--screenshot", type=Path, help="save a PNG of the page at the end")
+    parser.add_argument("--script", type=Path, help="run a tests/headless/*.txt script against the page")
+    parser.add_argument("--out-dir", type=Path, default=Path("out/run"), help="output directory for captures")
     parser.add_argument("--chromium", default="chromium")
     args = parser.parse_args()
     sys.exit(asyncio.run(run(args)))

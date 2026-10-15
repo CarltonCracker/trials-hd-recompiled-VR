@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Trials HD WebGPU Draw-Cost Benchmark (W-S12)</title>
+<style>
+  body { font-family: monospace; background: #111; color: #eee; padding: 20px; }
+  h1 { font-size: 1.2rem; color: #4af; }
+  .box { background: #222; border: 1px solid #444; border-radius: 4px; padding: 16px; max-width: 800px; margin-bottom: 16px; }
+  table { border-collapse: collapse; width: 100%; margin-top: 12px; }
+  th, td { border: 1px solid #555; padding: 6px 12px; text-align: left; }
+  th { background: #333; }
+  .highlight { color: #5f5; font-weight: bold; }
+  pre { background: #0a0a0a; padding: 12px; border-radius: 4px; overflow-x: auto; }
+</style>
+</head>
+<body>
+<h1>Trials HD WebGPU Draw-Cost Benchmark (W-S12)</h1>
+<div class="box">
+  <p><strong>Workload:</strong> 1,500 draws/frame across 30 render passes, 60 pipelines, binding model 7.6.5 (5 dynamic offsets in group 0, storage in group 1, texture+sampler in group 2).</p>
+  <p><strong>Config:</strong> 20 benchmark frames (30,000 draws total).</p>
+  <div id="status">Initializing WebGPU...</div>
+</div>
+
+<div class="box" id="resultBox" style="display: none;">
+  <h3>Benchmark Results (Browser WebGPU)</h3>
+  <table id="resultTable">
+    <tr>
+      <th>Phase</th>
+      <th>Time per draw (µs)</th>
+      <th>Time per frame (ms)</th>
+    </tr>
+    <tr>
+      <td>Encode</td>
+      <td id="encUs">-</td>
+      <td id="encMs">-</td>
+    </tr>
+    <tr>
+      <td>Submit</td>
+      <td id="subUs">-</td>
+      <td id="subMs">-</td>
+    </tr>
+    <tr>
+      <td><strong>Total</strong></td>
+      <td id="totalUs" class="highlight">-</td>
+      <td id="totalMs" class="highlight">-</td>
+    </tr>
+  </table>
+  <pre id="rawLog"></pre>
+</div>
+
+<canvas id="offscreenCanvas" width="1280" height="720" style="display: none;"></canvas>
+
+<script>
+async function runBenchmark() {
+  const statusEl = document.getElementById('status');
+  const resultBox = document.getElementById('resultBox');
+
+  if (!navigator.gpu) {
+    statusEl.innerHTML = '<span style="color:#f55;">WebGPU is not supported in this browser.</span>';
+    return;
+  }
+
+  statusEl.textContent = 'Requesting adapter & device...';
+  const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+  if (!adapter) {
+    statusEl.innerHTML = '<span style="color:#f55;">Failed to get WebGPU adapter.</span>';
+    return;
+  }
+
+  const device = await adapter.requestDevice();
+  const info = adapter.info || {};
+  statusEl.textContent = `Adapter: ${info.vendor || ''} ${info.architecture || ''} ${info.device || ''} (driver: ${info.description || ''}). Building resources...`;
+
+  // Render target (1280x720)
+  const target = device.createTexture({
+    size: [1280, 720, 1],
+    format: 'rgba8unorm',
+    usage: GPUTextureUsage.RENDER_ATTACHMENT,
+  });
+  const colorView = target.createView();
+
+  // Group 0 layout: 5 dynamic-offset uniform buffers
+  const bgl0 = device.createBindGroupLayout({
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform', hasDynamicOffset: true, minBindingSize: 256 } },
+      { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform', hasDynamicOffset: true, minBindingSize: 4096 } },
+      { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform', hasDynamicOffset: true, minBindingSize: 4096 } },
+      { binding: 3, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform', hasDynamicOffset: true, minBindingSize: 256 } },
+      { binding: 4, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform', hasDynamicOffset: true, minBindingSize: 768 } },
+    ]
+  });
+
+  // Group 1 layout: read-only storage buffer
+  const bgl1 = device.createBindGroupLayout({
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage', hasDynamicOffset: false, minBindingSize: 1024 } }
+    ]
+  });
+
+  // Group 2 layout: texture and sampler
+  const bgl2 = device.createBindGroupLayout({
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d' } },
+      { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } }
+    ]
+  });
+
+  // Pipeline layout
+  const pipelineLayout = device.createPipelineLayout({
+    bindGroupLayouts: [bgl0, bgl1, bgl2]
+  });
+
+  // Buffers and BindGroups
+  const buf0 = device.createBuffer({
+    size: 65536,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+
+  const bg0 = device.createBindGroup({
+    layout: bgl0,
+    entries: [
+      { binding: 0, resource: { buffer: buf0, offset: 0, size: 256 } },
+      { binding: 1, resource: { buffer: buf0, offset: 0, size: 4096 } },
+      { binding: 2, resource: { buffer: buf0, offset: 0, size: 4096 } },
+      { binding: 3, resource: { buffer: buf0, offset: 0, size: 256 } },
+      { binding: 4, resource: { buffer: buf0, offset: 0, size: 768 } },
+    ]
+  });
+
+  const buf1 = device.createBuffer({
+    size: 65536,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+
+  const bg1 = device.createBindGroup({
+    layout: bgl1,
+    entries: [
+      { binding: 0, resource: { buffer: buf1, offset: 0, size: 65536 } }
+    ]
+  });
+
+  const tex2 = device.createTexture({
+    size: [4, 4, 1],
+    format: 'rgba8unorm',
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+  });
+  const tex2View = tex2.createView();
+
+  const samp2 = device.createSampler({
+    minFilter: 'linear',
+    magFilter: 'linear',
+  });
+
+  const bg2 = device.createBindGroup({
+    layout: bgl2,
+    entries: [
+      { binding: 0, resource: tex2View },
+      { binding: 1, resource: samp2 }
+    ]
+  });
+
+  // 60 distinct pipelines
+  statusEl.textContent = 'Creating 60 pipelines...';
+  const pipelines = [];
+  for (let i = 0; i < 60; ++i) {
+    const wgsl = `
+struct VsOut {
+  @builtin(position) pos : vec4f,
+  @location(0) uv : vec2f,
+};
+
+@group(0) @binding(0) var<uniform> sys: vec4f;
+@group(0) @binding(1) var<uniform> vs_flt: array<vec4f, 64>;
+@group(0) @binding(2) var<uniform> ps_flt: array<vec4f, 64>;
+@group(0) @binding(3) var<uniform> bool_loop: vec4u;
+@group(0) @binding(4) var<uniform> fetch: array<vec4u, 16>;
+
+@group(1) @binding(0) var<storage, read> guest_mem: array<u32>;
+
+@group(2) @binding(0) var tex: texture_2d<f32>;
+@group(2) @binding(1) var smp: sampler;
+
+const PIPE_ID: u32 = ${i}u;
+
+@vertex fn vs(@builtin(vertex_index) idx: u32) -> VsOut {
+  var p = array<vec2f, 3>(vec2f(0.0, 0.5), vec2f(-0.5, -0.5), vec2f(0.5, -0.5));
+  var out: VsOut;
+  var offset = f32(PIPE_ID) * 0.0001;
+  out.pos = vec4f(p[idx] + sys.xy + vs_flt[0].xy + vec2f(offset, offset), 0.0, 1.0);
+  out.uv = p[idx] * 0.5 + 0.5;
+  return out;
+}
+
+@fragment fn fs(in: VsOut) -> @location(0) vec4f {
+  var color = textureSample(tex, smp, in.uv);
+  return color + ps_flt[0] + vec4f(f32(PIPE_ID) * 0.001);
+}
+`;
+    const module = device.createShaderModule({ code: wgsl });
+    const pipeline = device.createRenderPipeline({
+      layout: pipelineLayout,
+      vertex: { module, entryPoint: 'vs' },
+      fragment: { module, entryPoint: 'fs', targets: [{ format: 'rgba8unorm' }] },
+    });
+    pipelines.push(pipeline);
+  }
+
+  // Dynamic offsets
+  const offsets = new Uint32Array([0, 256, 4352, 8448, 8704]);
+
+  // Warm-up run (3 frames)
+  statusEl.textContent = 'Running warm-up (3 frames)...';
+  for (let f = 0; f < 3; ++f) {
+    const enc = device.createCommandEncoder();
+    for (let p = 0; p < 30; ++p) {
+      const pass = enc.beginRenderPass({
+        colorAttachments: [{
+          view: colorView,
+          loadOp: (p === 0) ? 'clear' : 'load',
+          storeOp: 'store',
+          clearValue: { r: 0, g: 0, b: 0, a: 1 },
+        }]
+      });
+      pass.setBindGroup(1, bg1);
+      pass.setBindGroup(2, bg2);
+
+      for (let d = 0; d < 50; ++d) {
+        const pipeIdx = (d * 7 + p) % 60;
+        offsets[0] = (d * 256) % 32768;
+        pass.setPipeline(pipelines[pipeIdx]);
+        pass.setBindGroup(0, bg0, offsets);
+        pass.draw(3);
+      }
+      pass.end();
+    }
+    const cmd = enc.finish();
+    device.queue.submit([cmd]);
+  }
+
+  // Wait for GPU idle after warm-up
+  await device.queue.onSubmittedWorkDone();
+
+  // Timed benchmark (20 frames)
+  const benchFrames = 20;
+  statusEl.textContent = `Running benchmark (${benchFrames} frames)...`;
+
+  let totalEncodeMs = 0;
+  let totalSubmitMs = 0;
+
+  for (let f = 0; f < benchFrames; ++f) {
+    const tEncStart = performance.now();
+    const enc = device.createCommandEncoder();
+    for (let p = 0; p < 30; ++p) {
+      const pass = enc.beginRenderPass({
+        colorAttachments: [{
+          view: colorView,
+          loadOp: (p === 0) ? 'clear' : 'load',
+          storeOp: 'store',
+          clearValue: { r: 0, g: 0, b: 0, a: 1 },
+        }]
+      });
+      pass.setBindGroup(1, bg1);
+      pass.setBindGroup(2, bg2);
+
+      for (let d = 0; d < 50; ++d) {
+        const pipeIdx = (d * 7 + p) % 60;
+        offsets[0] = (d * 256) % 32768;
+        pass.setPipeline(pipelines[pipeIdx]);
+        pass.setBindGroup(0, bg0, offsets);
+        pass.draw(3);
+      }
+      pass.end();
+    }
+    const cmd = enc.finish();
+    const tEncEnd = performance.now();
+    totalEncodeMs += (tEncEnd - tEncStart);
+
+    const tSubStart = performance.now();
+    device.queue.submit([cmd]);
+    const tSubEnd = performance.now();
+    totalSubmitMs += (tSubEnd - tSubStart);
+  }
+
+  await device.queue.onSubmittedWorkDone();
+
+  const totalDraws = benchFrames * 1500;
+  const encMsPerFrame = totalEncodeMs / benchFrames;
+  const subMsPerFrame = totalSubmitMs / benchFrames;
+  const totalMsPerFrame = encMsPerFrame + subMsPerFrame;
+
+  const encUsPerDraw = (totalEncodeMs * 1000.0) / totalDraws;
+  const subUsPerDraw = (totalSubmitMs * 1000.0) / totalDraws;
+  const totalUsPerDraw = encUsPerDraw + subUsPerDraw;
+
+  statusEl.textContent = `Benchmark completed across ${benchFrames} frames (${totalDraws} draws).`;
+  resultBox.style.display = 'block';
+
+  document.getElementById('encUs').textContent = encUsPerDraw.toFixed(3);
+  document.getElementById('encMs').textContent = encMsPerFrame.toFixed(2);
+  document.getElementById('subUs').textContent = subUsPerDraw.toFixed(3);
+  document.getElementById('subMs').textContent = subMsPerFrame.toFixed(2);
+  document.getElementById('totalUs').textContent = totalUsPerDraw.toFixed(3);
+  document.getElementById('totalMs').textContent = totalMsPerFrame.toFixed(2);
+
+  const raw = [
+    `Workload: 1,500 draws/frame across 30 render passes, 60 pipelines`,
+    `Frames: ${benchFrames} (${totalDraws} draws total)`,
+    `Encode:  ${encUsPerDraw.toFixed(3)} µs/draw  (${encMsPerFrame.toFixed(2)} ms/frame)`,
+    `Submit:  ${subUsPerDraw.toFixed(3)} µs/draw  (${subMsPerFrame.toFixed(2)} ms/frame)`,
+    `Total:   ${totalUsPerDraw.toFixed(3)} µs/draw  (${totalMsPerFrame.toFixed(2)} ms/frame)`,
+  ].join('\n');
+  document.getElementById('rawLog').textContent = raw;
+
+  window.benchResults = {
+    adapter: info,
+    benchFrames,
+    totalDraws,
+    encUsPerDraw,
+    encMsPerFrame,
+    subUsPerDraw,
+    subMsPerFrame,
+    totalUsPerDraw,
+    totalMsPerFrame,
+  };
+
+  console.log('DRAW_BENCH_COMPLETED: ' + JSON.stringify(window.benchResults));
+}
+
+window.addEventListener('DOMContentLoaded', runBenchmark);
+</script>
+</body>
+</html>

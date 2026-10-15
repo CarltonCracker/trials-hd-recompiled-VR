@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Trials HD Web Input Test (W-S18)</title>
+<style>
+  body { font-family: monospace; background: #1a1a1a; color: #eee; padding: 20px; }
+  h1 { font-size: 1.2rem; color: #4af; }
+  .box { background: #252525; border: 1px solid #444; border-radius: 4px; padding: 12px; margin-bottom: 16px; }
+  canvas { border: 2px dashed #666; background: #111; cursor: crosshair; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+  .pass { color: #5f5; font-weight: bold; }
+  .fail { color: #f55; font-weight: bold; }
+  pre { background: #111; padding: 8px; border-radius: 4px; overflow-x: auto; max-height: 200px; }
+  button { background: #333; color: #fff; border: 1px solid #666; padding: 6px 12px; border-radius: 4px; cursor: pointer; }
+  button:hover { background: #444; }
+</style>
+</head>
+<body>
+<h1>Trials HD Web Input Module Test (W-S18)</h1>
+<div class="grid">
+  <div class="box">
+    <h3>Interactive Canvas (Click & Type)</h3>
+    <canvas id="inputCanvas" width="400" height="225" tabindex="0"></canvas>
+    <p>Focus canvas and press keys, click, or scroll.</p>
+    <div style="margin-top: 8px;">
+      <button id="btnSyntheticPad">Inject Synthetic Gamepad</button>
+      <button id="btnResetPad">Reset Gamepad</button>
+    </div>
+  </div>
+
+  <div class="box">
+    <h3>SAB Gamepad State (Pad 0)</h3>
+    <div id="padStatus">Disconnected</div>
+    <div>Buttons: <span id="padButtons">0x0000</span></div>
+    <div>Axes: LX=<span id="padLX">0.00</span> LY=<span id="padLY">0.00</span> RX=<span id="padRX">0.00</span> RY=<span id="padRY">0.00</span></div>
+    <div>Triggers: LT=<span id="padLT">0.00</span> RT=<span id="padRT">0.00</span></div>
+    <div>Seqlock: <span id="padSeq">0</span></div>
+  </div>
+</div>
+
+<div class="box">
+  <h3>Unit Self-Test Results</h3>
+  <div id="testResults">Running tests...</div>
+</div>
+
+<div class="box">
+  <h3>Recent Ring Events</h3>
+  <pre id="eventLog"></pre>
+</div>
+
+<script type="module">
+import { WebInput, CODE_TO_SCANCODE, EVENT_TYPE } from '/web/input.js';
+
+// Setup SAB
+const sab = new SharedArrayBuffer(65536);
+const canvas = document.getElementById('inputCanvas');
+const webInput = new WebInput(canvas, sab, 0);
+webInput.start();
+
+const u32 = new Uint32Array(sab);
+const i32 = new Int32Array(sab);
+const f32 = new Float32Array(sab);
+
+// Synthetic gamepad stub
+let syntheticGamepad = null;
+const originalGetGamepads = navigator.getGamepads ? navigator.getGamepads.bind(navigator) : null;
+
+function setSyntheticPad(connected, buttonsMask, lx, ly, rx, ry, lt, rt) {
+  if (!connected) {
+    syntheticGamepad = null;
+    return;
+  }
+  const buttons = [];
+  for (let b = 0; b < 17; ++b) {
+    const pressed = (buttonsMask & (1 << b)) !== 0;
+    let val = pressed ? 1.0 : 0.0;
+    if (b === 6) val = lt;
+    if (b === 7) val = rt;
+    buttons.push({ pressed, value: val });
+  }
+  syntheticGamepad = {
+    connected: true,
+    index: 0,
+    mapping: 'standard',
+    buttons: buttons,
+    axes: [lx, ly, rx, ry],
+  };
+}
+
+navigator.getGamepads = function() {
+  if (syntheticGamepad) {
+    return [syntheticGamepad, null, null, null];
+  }
+  return originalGetGamepads ? originalGetGamepads() : [];
+};
+
+document.getElementById('btnSyntheticPad').onclick = () => {
+  // Simulate throttle (RT=0.85), lean forward (LX=0.75), button A pressed
+  setSyntheticPad(true, 1 << 0, 0.75, 0.0, 0.0, 0.0, 0.0, 0.85);
+};
+
+document.getElementById('btnResetPad').onclick = () => {
+  setSyntheticPad(false, 0, 0, 0, 0, 0, 0, 0);
+};
+
+// UI Monitor loop
+const eventLog = document.getElementById('eventLog');
+let lastReadTail = 0;
+const logHistory = [];
+
+function updateUI() {
+  // Read SAB pad 0
+  const seq = Atomics.load(u32, 0);
+  const connected = u32[2];
+  const buttons = u32[3];
+  const lx = f32[4];
+  const ly = f32[5];
+  const rx = f32[6];
+  const ry = f32[7];
+  const lt = f32[8];
+  const rt = f32[9];
+
+  document.getElementById('padStatus').textContent = connected ? 'CONNECTED' : 'Disconnected';
+  document.getElementById('padStatus').style.color = connected ? '#5f5' : '#888';
+  document.getElementById('padButtons').textContent = '0x' + buttons.toString(16).padStart(4, '0');
+  document.getElementById('padLX').textContent = lx.toFixed(2);
+  document.getElementById('padLY').textContent = ly.toFixed(2);
+  document.getElementById('padRX').textContent = rx.toFixed(2);
+  document.getElementById('padRY').textContent = ry.toFixed(2);
+  document.getElementById('padLT').textContent = lt.toFixed(2);
+  document.getElementById('padRT').textContent = rt.toFixed(2);
+  document.getElementById('padSeq').textContent = seq.toString();
+
+  // Read ring events
+  const head = Atomics.load(u32, 136 >> 2);
+  while (lastReadTail < head) {
+    const slot = lastReadTail & 255;
+    const base = (144 + slot * 16) >> 2;
+    const type = u32[base + 0];
+    const code = u32[base + 1];
+    const x = i32[base + 2];
+    const y = i32[base + 3];
+
+    const typeNames = {
+      1: 'KEY_DOWN', 2: 'KEY_UP', 3: 'PTR_MOVE', 4: 'PTR_DOWN',
+      5: 'PTR_UP', 6: 'WHEEL', 7: 'TEXT', 8: 'FOCUS', 9: 'BLUR'
+    };
+    logHistory.unshift(`[Event ${lastReadTail}] ${typeNames[type] || type} code=${code} x=${x} y=${y}`);
+    if (logHistory.length > 30) logHistory.pop();
+    lastReadTail++;
+  }
+  // Simulate wasm reading: advance tail
+  Atomics.store(u32, 140 >> 2, head);
+  eventLog.textContent = logHistory.join('\n');
+
+  requestAnimationFrame(updateUI);
+}
+requestAnimationFrame(updateUI);
+
+// Automated self-test
+async function runSelfTests() {
+  const resultsDiv = document.getElementById('testResults');
+  const tests = [];
+
+  function assert(name, condition) {
+    tests.push({ name, passed: Boolean(condition) });
+    if (!condition) console.error(`Assertion failed: ${name}`);
+  }
+
+  // Test 1: SDL scancode mapping
+  assert('CODE_TO_SCANCODE: KeyA === 4', CODE_TO_SCANCODE['KeyA'] === 4);
+  assert('CODE_TO_SCANCODE: KeyZ === 29', CODE_TO_SCANCODE['KeyZ'] === 29);
+  assert('CODE_TO_SCANCODE: Digit1 === 30', CODE_TO_SCANCODE['Digit1'] === 30);
+  assert('CODE_TO_SCANCODE: Escape === 41', CODE_TO_SCANCODE['Escape'] === 41);
+  assert('CODE_TO_SCANCODE: Space === 44', CODE_TO_SCANCODE['Space'] === 44);
+  assert('CODE_TO_SCANCODE: ArrowUp === 82', CODE_TO_SCANCODE['ArrowUp'] === 82);
+  assert('CODE_TO_SCANCODE: ShiftLeft === 225', CODE_TO_SCANCODE['ShiftLeft'] === 225);
+
+  // Test 2: Push event into ring buffer
+  const initialHead = Atomics.load(u32, 136 >> 2);
+  webInput.pushEvent(EVENT_TYPE.KEY_DOWN, 4, 10, 20); // KeyA
+  const newHead = Atomics.load(u32, 136 >> 2);
+  assert('pushEvent increments event_head', newHead === initialHead + 1);
+
+  const slot = initialHead & 255;
+  const base = (144 + slot * 16) >> 2;
+  assert('Pushed event type is KEY_DOWN', u32[base + 0] === EVENT_TYPE.KEY_DOWN);
+  assert('Pushed event code is 4', u32[base + 1] === 4);
+  assert('Pushed event x is 10', i32[base + 2] === 10);
+  assert('Pushed event y is 20', i32[base + 3] === 20);
+
+  // Test 3: Synthetic Gamepad Polling & Seqlock
+  setSyntheticPad(true, (1 << 0) | (1 << 7), -0.5, 0.25, 0.0, 0.0, 0.0, 0.95);
+  webInput.pollGamepads();
+
+  const seq = Atomics.load(u32, 0);
+  assert('Seqlock seq is even after update', (seq & 1) === 0 && seq > 0);
+  assert('Pad count is 1', u32[1] === 1);
+  assert('Pad 0 connected === 1', u32[2] === 1);
+  assert('Pad 0 buttons mask matches (A + RT)', u32[3] === ((1 << 0) | (1 << 7)));
+  assert('Pad 0 LX matches -0.5', Math.abs(f32[4] - (-0.5)) < 1e-4);
+  assert('Pad 0 LY matches 0.25', Math.abs(f32[5] - 0.25) < 1e-4);
+  assert('Pad 0 RT trigger matches 0.95', Math.abs(f32[9] - 0.95) < 1e-4);
+
+  // Test 4: Gamepad Disconnect
+  setSyntheticPad(false, 0, 0, 0, 0, 0, 0, 0);
+  webInput.pollGamepads();
+  assert('Pad 0 disconnected === 0', u32[2] === 0);
+  assert('Pad count is 0', u32[1] === 0);
+
+  // Render results
+  const allPassed = tests.every(t => t.passed);
+  resultsDiv.innerHTML = tests.map(t =>
+    `<div>[${t.passed ? '<span class="pass">PASS</span>' : '<span class="fail">FAIL</span>'}] ${t.name}</div>`
+  ).join('');
+
+  resultsDiv.innerHTML += `<h4>Overall: ${allPassed ? '<span class="pass">ALL TESTS PASSED</span>' : '<span class="fail">SOME TESTS FAILED</span>'}</h4>`;
+
+  window.unitTestResults = {
+    allPassed,
+    tests,
+  };
+  console.log('INPUT_TEST_COMPLETED: allPassed=' + allPassed);
+}
+
+// Run test after small delay
+setTimeout(runSelfTests, 200);
+</script>
+</body>
+</html>
