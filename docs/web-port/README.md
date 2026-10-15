@@ -1470,8 +1470,8 @@ Every task's "Done when" implicitly includes **`tools/check_native.sh check` pas
 | W-S01 | done 2026-10-15 b2b504e | S | Test page `tools/web/spikes/limits.html`: request the adapter, print `adapter.info`, all `adapter.limits` and `adapter.features`; run it in headless Chromium (11.1) with a 10-line CDP script that saves the console output. Record the values the renderer needs (9.2) in section 9.2. | — | Section 9.2 lists Chromium 154 / RX 6600 values for `maxBufferSize`, `maxStorageBufferBindingSize`, the 8 wanted features; question 14.1 answered |
 | W-S02 | done 2026-10-15 7008da0 | S | Feature-detect page `tools/web/spikes/wasm_features.html` using `WebAssembly.validate` on tiny modules: shared memory64, threads, simd128, relaxed SIMD, exception handling (exnref), JSPI (`WebAssembly.Suspending`), plus `crossOriginIsolated`. Run in Chromium here; write the matrix into 5.1. Add the result columns for Firefox and Safari as `unverified` until someone runs it there. | — | 5.1 table updated with "verified in Chromium 154" values |
 | W-S03 | done 2026-10-15 11b0cbb | S | Emscripten "hello pthreads + Memory64" page: `em++ --target=wasm64 -pthread -sPROXY_TO_PTHREAD -sPTHREAD_POOL_SIZE=48 -sINITIAL_MEMORY=3800mb -sMAXIMUM_MEMORY=8gb`; spawn 40 threads that each touch 16 MiB at addresses spread over 3 GiB and join; print timings. | — | Runs in Chromium; startup time and RSS (from `chrome://memory-internals` or `/proc` of the renderer process) recorded in 4.5 |
-| W-S04 | claimed pi-gpt 2026-10-15 | S | emdawnwebgpu "triangle in an OffscreenCanvas on a pthread" spike: main transfers the canvas, a pthread creates the device, draws a triangle per `requestAnimationFrame` in the worker. | W-S03 | Screenshot via CDP shows the triangle; notes on any proxying needed |
-| W-S05 | todo | M | Same as W-S04 but the pthread runs an endless C++ loop that calls a JSPI-suspending yield (`emscripten_sleep(0)` with `-sJSPI`) after each frame, and uses `wgpu::Buffer::MapAsync` with `CallbackMode::AllowSpontaneous`/`AllowProcessEvents`. Answers question 14.2. Design note from W-L01 first. | W-S04, W-L01 | Frames present while the loop runs; map callbacks arrive; findings in 7.4 |
+| W-S04 | done 2026-10-15 c1cc170 | S | emdawnwebgpu "triangle in an OffscreenCanvas on a pthread" spike: main transfers the canvas, a pthread creates the device, draws a triangle per `requestAnimationFrame` in the worker. | W-S03 | Screenshot via CDP shows the triangle; notes on any proxying needed |
+| W-S05 | claimed pi-gpt 2026-10-15 | M | Same as W-S04 but the pthread runs an endless C++ loop that calls a JSPI-suspending yield (`emscripten_sleep(0)` with `-sJSPI`) after each frame, and uses `wgpu::Buffer::MapAsync` with `CallbackMode::AllowSpontaneous`/`AllowProcessEvents`. Answers question 14.2. Design note from W-L01 first. | W-S04, W-L01 | Frames present while the loop runs; map callbacks arrive; findings in 7.4 |
 | W-S06 | todo | S | Native measurements for sizing: maximum host stack depth of guest threads (`/proc/<tid>/status` VmStk or a guard-page probe), number of threads created over a full ride and menus, and startup time to the first swap. | — | Numbers in 4.5 and 8.4 |
 | W-S07 | todo | S | Prove MMIO completeness: in a native debug build, make the `SIGSEGV` MMIO path (`exception_handler_posix.cpp` → `MMIOHandler`) log and abort for addresses `0x7F000000–0x7FFFFFFF`; run `main_menu_nav`, `ride_middle_name_danger`, `settings_menu`, `credits`. | — | No abort in all four (or the faulting addresses are listed in 8.2 and a W-L task is added) |
 | W-S08 | todo | S | Log `KernelState::RegisterFiber` and `Fiber::Create` calls natively over the four scripts. | — | 14.5 answered ("no fibers" → drop fiber port; "fibers" → add a W-L task) |
@@ -1522,6 +1522,13 @@ details of W-L04 to W-L09. The critical path is W-L01 → W-L02/W-L04 → W-L15 
 W-L06/W-L07 (graphics).
 
 ### 16.6 Notes log
+
+- 2026-10-15 (pi-gpt): **W-S04 done** (`c1cc170`, findings `143dccc`). Emdawnwebgpu
+  wasm64 triangle presents through the worker-owned OffscreenCanvas in Chromium 154;
+  callback/thread assertions and CDP screenshot pixel assertions pass (9.3). Native
+  guard: WebGPU 9 captures / worst 45.9 dB; Vulkan 9 captures / worst 39.9 dB;
+  `NATIVE CHECK PASSED`. Claimed W-S05 next (design note 7.9.5 already available),
+  testing JSPI suspension in the pthread's endless frame loop plus map callbacks.
 
 - 2026-10-15 (pi-gpt): **W-S03 done** (`11b0cbb`, measurements `b548dc1`):
   Chromium 154 verifies 40 pthreads, 8-byte pointers, 640 MiB filled/checked across a
