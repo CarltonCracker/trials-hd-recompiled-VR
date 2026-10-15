@@ -46,9 +46,85 @@ bool AlphaPass(unsigned function, float alpha, float reference) {
   }
 }
 
+void CheckPositions(GpuTest& gpu) {
+  std::array<uint32_t, 6> code = {1u | (1u << 12),
+      uint32_t(ucode::ControlFlowOpcode::kExecEnd) << 12, 0u,
+      62u | (1u << 15) | (15u << 16) | (uint32_t(ucode::AluScalarOpcode::kRetainPrev) << 26),
+      0u, (uint32_t(ucode::AluVectorOpcode::kMax) << 24) | (7u << 29)};
+  Shader shader(xenos::ShaderType::kVertex, 0, code.data(), code.size(), std::endian::native);
+  rex::string::StringBuffer disassembly; shader.AnalyzeUcode(disassembly);
+  WgslShaderTranslator translator;
+  auto* translation = shader.GetOrCreateTranslation(translator.GetDefaultVertexShaderModification(64));
+  GPU_CHECK(translator.TranslateAnalyzedShader(*translation));
+  GPU_CHECK(translation->errors().empty());
+  std::string source = translation->GetTranslatedBinaryString();
+  source += R"(
+@group(1) @binding(1) var<storage, read> test_positions: array<vec4f>;
+@group(1) @binding(2) var<storage, read_write> test_transformed: array<vec4f>;
+@compute @workgroup_size(8) fn test_positions_main(@builtin(global_invocation_id) id: vec3u) {
+  if (id.x < arrayLength(&test_positions)) {
+    test_transformed[id.x] = xe_transform_position(test_positions[id.x]);
+  }
+})";
+  auto module = gpu.Module(source);
+  wgpu::ComputePipelineDescriptor pd; pd.compute.module = module; pd.compute.entryPoint = "test_positions_main";
+  auto pipeline = gpu.device.CreateComputePipeline(&pd);
+  const std::array<Vec, 8> positions = {{{-2, -1, 0, 1}, {-1, 2, 1, 2}, {2, 4, 0.25f, 0.5f},
+      {0, -0.0f, 3, -2}, {12, 3, -1, 0.125f}, {-3, 7, 5, -0.5f},
+      {1, 2, 0.5f, 4}, {1.25f, -0.25f, 1.5f, -0.125f}}};
+  const std::array<Vec, 4> scales = {{{1, 1, 1, 0}, {1, -1, 1, 0},
+      {1, -1, -1, 0}, {-2, 1.5f, 0.5f, 0}}};
+  const std::array<Vec, 4> offsets = {{{0, 0, 0, 0}, {-1.0f / 1280, 1.0f / 720, 0, 0},
+      {0, 0, 1, 0}, {0.125f, -0.25f, 0.5f, 0}}};
+  auto input = gpu.Buffer(sizeof(positions), wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst, positions.data());
+  auto output = gpu.Buffer(sizeof(positions), wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc);
+  auto uniform = gpu.Buffer(sizeof(WgslSystemConstants), wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst);
+  wgpu::BindGroupEntry entry; entry.binding = 0; entry.buffer = uniform; entry.size = sizeof(WgslSystemConstants);
+  wgpu::BindGroupDescriptor bd; bd.layout = pipeline.GetBindGroupLayout(0); bd.entryCount = 1; bd.entries = &entry;
+  auto draw = gpu.device.CreateBindGroup(&bd);
+  std::array<wgpu::BindGroupEntry, 2> storage;
+  storage[0].binding = 1; storage[0].buffer = input; storage[0].size = sizeof(positions);
+  storage[1].binding = 2; storage[1].buffer = output; storage[1].size = sizeof(positions);
+  bd.layout = pipeline.GetBindGroupLayout(1); bd.entryCount = storage.size(); bd.entries = storage.data();
+  auto values = gpu.device.CreateBindGroup(&bd);
+  for (unsigned flags = 0; flags < 8; ++flags) {
+    for (unsigned viewport = 0; viewport < scales.size(); ++viewport) {
+      WgslSystemConstants system; system.flags = flags;
+      std::copy(scales[viewport].begin(), scales[viewport].end(), system.ndc_scale);
+      std::copy(offsets[viewport].begin(), offsets[viewport].end(), system.ndc_offset);
+      gpu.device.GetQueue().WriteBuffer(uniform, 0, &system, sizeof(system));
+      auto encoder = gpu.device.CreateCommandEncoder(); auto pass = encoder.BeginComputePass();
+      pass.SetPipeline(pipeline); pass.SetBindGroup(0, draw); pass.SetBindGroup(1, values); pass.DispatchWorkgroups(1); pass.End();
+      auto command = encoder.Finish(); gpu.device.GetQueue().Submit(1, &command);
+      auto bytes = gpu.Read(output, sizeof(positions));
+      for (unsigned i = 0; i < positions.size(); ++i) {
+        Vec expected = positions[i];
+        // Same separate operations as the SDK SPIR-V position epilogue.
+        if (!(flags & WgslSystemConstants::kWNotReciprocal)) { expected[3] = 1.0f / expected[3]; }
+        for (unsigned c = 0; c < 3; ++c) {
+          if (flags & (c < 2 ? WgslSystemConstants::kXYDividedByW : WgslSystemConstants::kZDividedByW)) {
+            expected[c] *= expected[3];
+          }
+          expected[c] *= scales[viewport][c];
+          expected[c] += offsets[viewport][c] * expected[3];
+        }
+        for (unsigned c = 0; c < 4; ++c) {
+          float actual; std::memcpy(&actual, bytes.data() + (i * 4 + c) * 4, 4);
+          if (!Equal(actual, expected[c])) {
+            std::fprintf(stderr, "position flags%u viewport%u input%u c%u GPU%.9g CPU%.9g\n", flags, viewport, i, c, actual, expected[c]);
+            GPU_CHECK(false);
+          }
+        }
+      }
+    }
+  }
+  std::puts("PASS: 256 position cases: all VTE formats, signed/reciprocal W, Y flip, half-pixel offsets and reverse-Z transform");
+}
+
 int main(int argc, char** argv) {
   rex::InitLogging();
   GpuTest gpu(argc > 1 ? unsigned(std::strtoul(argv[1], nullptr, 10)) : 0);
+  CheckPositions(gpu);
   rex::memory::Memory memory; // The authored pixel shader does not access guest memory.
   RegisterFile regs;
   reg::SQ_PS_CONST ps{}; ps.size = 255;

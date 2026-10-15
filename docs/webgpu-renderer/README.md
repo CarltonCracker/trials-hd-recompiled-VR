@@ -2275,9 +2275,15 @@ finding: `YYYY-MM-DD <agent> <task ID>: what changed; evidence; what is left`.
     unordered NotEqual and ordered remaining comparisons, reusing existing helpers.
     Final 810-case reruns and fresh **80-opcode ALU / 27 pixel-kill regressions**
     pass on both GPUs; whitespace checks pass.
-  - L-04e remains claimed/in progress: viewport/half-pixel position coverage,
+  - Added **256 production position-helper checks per GPU**, passing on both
+    adapters alongside the 810 fragment cases. Covers all eight VTE format-flag
+    combinations, finite signed reciprocal/direct W, Y flip, half-pixel offsets,
+    reverse-Z and general NDC scale/offset, against the SDK SPIR-V epilogue's
+    arithmetic. This checks supplied uniforms, not production viewport-register
+    setup or rasterized depth precision.
+  - L-04e remains claimed/in progress: viewport-register setup, rasterized
     reverse-Z/float24, other RT conversions, actual point coordinates and M3
-    silhouette acceptance are not established by this fixture.
+    silhouette acceptance remain open.
 - 2026-10-14 antigravity (Tier S tasks completion):
   - **S-01:** Executed 7 headless test scripts (`main_menu_nav.txt`, `settings_menu.txt`,
     `credits.txt`, `ride_tutorial.txt`, `ride_middle_name_danger.txt`, `ride_hello_world.txt`,

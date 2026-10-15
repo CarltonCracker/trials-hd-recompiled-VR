@@ -38,6 +38,12 @@ The default SDK paths refer to `thirdparty/rexglue-sdk` and the existing
   guest-index helpers with base offsets and limits. The fixture pins a low guest
   physical address so it does not require a 512 MiB storage binding.
 
+- **Vertex positions:** 256 compute checks of the production position helper,
+  using the SDK SPIR-V epilogue's arithmetic as reference. Covers all eight VTE
+  format-flag combinations, finite positive/negative reciprocal and direct W,
+  identity/Y-flipped NDC, half-pixel offsets, reverse-Z and nontrivial scale/offset.
+  This tests supplied system constants, not production viewport-register setup
+  or rasterized depth precision.
 - **Pixel outputs:** 810 authored real-fragment cases, with SDK-interpreted
   exports and a CPU alpha-test oracle. Four RGBA16Float render targets exercise
   positive/negative HDR values, half conversion and independent exponent scales.
