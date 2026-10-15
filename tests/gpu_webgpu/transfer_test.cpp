@@ -1,6 +1,7 @@
 // EDRAM transfer shader (src/gpu_webgpu/shaders/transfer.wgsl): pack/unpack
 // round trips per render-target format, and 1x / 4x / depth addressing that
-// covers every EDRAM sample of the transferred tiles exactly once.
+// covers every EDRAM sample of the transferred tiles exactly once. Stencil
+// travels in bits 0:7 of depth samples.
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -26,7 +27,12 @@ static const char* kTestEntryPoints = R"(
 @compute @workgroup_size(64)
 fn test_round_trip(@builtin(global_invocation_id) id: vec3u) {
   if (id.x < arrayLength(&test_in)) {
-    test_out[id.x] = unpack(pack(test_in[id.x]));
+    // Depth formats also carry stencil 0xA5 in bits 0:7; z gets it back.
+    let packed = pack(test_in[id.x], select(0u, 0xA5u, c.is_depth != 0u));
+    test_out[id.x] = unpack(packed);
+    if (c.is_depth != 0u) {
+      test_out[id.x].z = f32(packed & 0xFFu);
+    }
   }
 }
 
@@ -125,6 +131,10 @@ int main(int argc, char** argv) {
     auto bytes = gpu.Read(output, 16);
     float result[4];
     std::memcpy(result, bytes.data(), 16);
+    if (test_case.is_depth && result[2] != 165.0f) {
+      std::fprintf(stderr, "FAIL depth format %u stencil: %g\n", test_case.format, result[2]);
+      return 1;
+    }
     for (uint32_t i = 0; i < test_case.components; ++i) {
       float expected = test_case.value[i];
       // 20e4 keeps 20 mantissa bits, so 1/3 is not exact.

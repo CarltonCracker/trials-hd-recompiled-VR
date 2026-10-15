@@ -42,6 +42,7 @@ struct RenderTarget {
   wgpu::Texture texture;
   wgpu::TextureView view;
   wgpu::TextureView depth_only_view;
+  wgpu::TextureView stencil_only_view;  // Null without stencil.
   wgpu::TextureFormat host_format = wgpu::TextureFormat::Undefined;
   uint32_t sample_count = 1;
   // Host pixels (scaled).
@@ -115,9 +116,12 @@ class RenderTargetCache {
   // Guest-layout EDRAM (32 bits per sample, scaled) for transfers.
   wgpu::Buffer edram_;
   wgpu::ShaderModule transfer_module_;
-  // Store: [color, color 4x, depth, depth 4x]. Load: by host format and samples.
+  // Store: [color, color 4x, depth, depth 4x]. Load: by host format, samples
+  // and stencil bit pass.
   std::array<wgpu::ComputePipeline, 4> store_pipelines_;
   std::unordered_map<uint64_t, wgpu::RenderPipeline> load_pipelines_;
+  wgpu::BindGroupLayout load_bind_group_layout_;
+  wgpu::PipelineLayout load_pipeline_layout_;
 };
 
 }  // namespace rex::graphics::webgpu

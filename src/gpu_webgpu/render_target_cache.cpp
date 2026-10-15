@@ -122,6 +122,10 @@ RenderTarget* RenderTargetCache::GetOrCreate(RenderTargetKey key) {
     wgpu::TextureViewDescriptor depth_view;
     depth_view.aspect = wgpu::TextureAspect::DepthOnly;
     target->depth_only_view = target->texture.CreateView(&depth_view);
+    if (HostDepthFormatHasStencil(target->host_format)) {
+      depth_view.aspect = wgpu::TextureAspect::StencilOnly;
+      target->stencil_only_view = target->texture.CreateView(&depth_view);
+    }
   }
   REXGPU_DEBUG("WebGPU: created {} ({}x{})", label, target->width, target->height);
   RenderTarget* result = target.get();
@@ -283,6 +287,24 @@ bool RenderTargetCache::InitializeTransfer() {
     desc.compute.entryPoint = kStoreEntryPoints[i];
     store_pipelines_[i] = device.CreateComputePipeline(&desc);
   }
+  // Loads share one layout so a bind group works across the depth and
+  // stencil bit pipelines.
+  std::array<wgpu::BindGroupLayoutEntry, 2> load_entries;
+  load_entries[0].binding = 0;
+  load_entries[0].visibility = wgpu::ShaderStage::Fragment;
+  load_entries[0].buffer.type = wgpu::BufferBindingType::Uniform;
+  load_entries[1].binding = 2;
+  load_entries[1].visibility = wgpu::ShaderStage::Fragment;
+  load_entries[1].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
+  wgpu::BindGroupLayoutDescriptor load_layout_desc;
+  load_layout_desc.label = "EDRAM transfer load";
+  load_layout_desc.entryCount = load_entries.size();
+  load_layout_desc.entries = load_entries.data();
+  load_bind_group_layout_ = device.CreateBindGroupLayout(&load_layout_desc);
+  wgpu::PipelineLayoutDescriptor load_pipeline_layout_desc;
+  load_pipeline_layout_desc.bindGroupLayoutCount = 1;
+  load_pipeline_layout_desc.bindGroupLayouts = &load_bind_group_layout_;
+  load_pipeline_layout_ = device.CreatePipelineLayout(&load_pipeline_layout_desc);
   return bool(edram_);
 }
 
@@ -333,7 +355,7 @@ void RenderTargetCache::Transfer(RenderTarget* source, RenderTarget* dest, uint3
   uint32_t store_offset = frame_recorder_.UploadUniforms(&store_constants, sizeof(store_constants));
   uint32_t store_index = (source->key.is_depth ? 2 : 0) + (source->sample_count > 1 ? 1 : 0);
   const wgpu::ComputePipeline& store_pipeline = store_pipelines_[store_index];
-  std::array<wgpu::BindGroupEntry, 3> store_entries;
+  std::array<wgpu::BindGroupEntry, 4> store_entries;
   store_entries[0].binding = 0;
   store_entries[0].buffer = frame_recorder_.uniform_ring();
   store_entries[0].offset = store_offset;
@@ -342,9 +364,13 @@ void RenderTargetCache::Transfer(RenderTarget* source, RenderTarget* dest, uint3
   store_entries[1].buffer = edram_;
   store_entries[2].binding = 3 + store_index;
   store_entries[2].textureView = source->key.is_depth ? source->depth_only_view : source->view;
+  // shortcut: a depth target without stencil would need its own store entry
+  // point; all host depth formats here have stencil.
+  store_entries[3].binding = 7 + (source->sample_count > 1 ? 1 : 0);
+  store_entries[3].textureView = source->stencil_only_view;
   wgpu::BindGroupDescriptor store_group_desc;
   store_group_desc.layout = store_pipeline.GetBindGroupLayout(0);
-  store_group_desc.entryCount = store_entries.size();
+  store_group_desc.entryCount = source->key.is_depth ? 4 : 3;
   store_group_desc.entries = store_entries.data();
   wgpu::BindGroup store_group = device.CreateBindGroup(&store_group_desc);
   {
@@ -363,24 +389,48 @@ void RenderTargetCache::Transfer(RenderTarget* source, RenderTarget* dest, uint3
   if (load_constants.row_first >= load_constants.row_end) {
     return;
   }
-  uint64_t load_key = (uint64_t(dest->host_format) << 8) | dest->sample_count;
-  auto pipeline_it = load_pipelines_.find(load_key);
-  if (pipeline_it == load_pipelines_.end()) {
+  bool dest_stencil = dest->key.is_depth && HostDepthFormatHasStencil(dest->host_format);
+  // stencil_bit 8: the depth (and stencil = 0) or color pass; 0...7: one stencil bit.
+  auto get_load_pipeline = [&](uint32_t stencil_bit) -> const wgpu::RenderPipeline& {
+    uint64_t load_key =
+        (uint64_t(stencil_bit) << 40) | (uint64_t(dest->host_format) << 8) | dest->sample_count;
+    auto it = load_pipelines_.find(load_key);
+    if (it != load_pipelines_.end()) {
+      return it->second;
+    }
     wgpu::ColorTargetState color_target;
     color_target.format = dest->host_format;
     wgpu::FragmentState fragment;
     fragment.module = transfer_module_;
+    wgpu::ConstantEntry bit_constant;
+    bit_constant.key = "stencil_bit";
+    bit_constant.value = double(stencil_bit);
     wgpu::DepthStencilState depth_stencil;
     wgpu::RenderPipelineDescriptor desc;
     desc.label = "EDRAM transfer load";
+    desc.layout = load_pipeline_layout_;
     desc.vertex.module = transfer_module_;
     desc.vertex.entryPoint = "vs_main";
     desc.multisample.count = dest->sample_count;
     if (dest->key.is_depth) {
-      fragment.entryPoint = "fs_load_depth";
       depth_stencil.format = dest->host_format;
-      depth_stencil.depthWriteEnabled = wgpu::OptionalBool::True;
       depth_stencil.depthCompare = wgpu::CompareFunction::Always;
+      if (stencil_bit < 8) {
+        fragment.entryPoint = "fs_load_stencil_bit";
+        fragment.constantCount = 1;
+        fragment.constants = &bit_constant;
+        depth_stencil.depthWriteEnabled = wgpu::OptionalBool::False;
+        depth_stencil.stencilWriteMask = 1u << stencil_bit;
+      } else {
+        fragment.entryPoint = "fs_load_depth";
+        depth_stencil.depthWriteEnabled = wgpu::OptionalBool::True;
+        depth_stencil.stencilWriteMask = dest_stencil ? 0xFFu : 0u;
+      }
+      if (dest_stencil) {
+        depth_stencil.stencilFront.compare = wgpu::CompareFunction::Always;
+        depth_stencil.stencilFront.passOp = wgpu::StencilOperation::Replace;
+        depth_stencil.stencilBack = depth_stencil.stencilFront;
+      }
       desc.depthStencil = &depth_stencil;
     } else {
       fragment.entryPoint = "fs_load_color";
@@ -388,9 +438,10 @@ void RenderTargetCache::Transfer(RenderTarget* source, RenderTarget* dest, uint3
       fragment.targets = &color_target;
     }
     desc.fragment = &fragment;
-    pipeline_it = load_pipelines_.emplace(load_key, device.CreateRenderPipeline(&desc)).first;
-  }
-  const wgpu::RenderPipeline& load_pipeline = pipeline_it->second;
+    return load_pipelines_.emplace(load_key, provider_.device().CreateRenderPipeline(&desc))
+        .first->second;
+  };
+  const wgpu::RenderPipeline& load_pipeline = get_load_pipeline(8);
   uint32_t load_offset = frame_recorder_.UploadUniforms(&load_constants, sizeof(load_constants));
   std::array<wgpu::BindGroupEntry, 2> load_entries;
   load_entries[0].binding = 0;
@@ -400,7 +451,7 @@ void RenderTargetCache::Transfer(RenderTarget* source, RenderTarget* dest, uint3
   load_entries[1].binding = 2;
   load_entries[1].buffer = edram_;
   wgpu::BindGroupDescriptor load_group_desc;
-  load_group_desc.layout = load_pipeline.GetBindGroupLayout(0);
+  load_group_desc.layout = load_bind_group_layout_;
   load_group_desc.entryCount = load_entries.size();
   load_group_desc.entries = load_entries.data();
   wgpu::BindGroup load_group = device.CreateBindGroup(&load_group_desc);
@@ -434,6 +485,13 @@ void RenderTargetCache::Transfer(RenderTarget* source, RenderTarget* dest, uint3
   pass.SetScissorRect(0, load_constants.row_first, load_constants.width,
                       load_constants.row_end - load_constants.row_first);
   pass.Draw(3);
+  if (dest_stencil) {
+    pass.SetStencilReference(0xFF);
+    for (uint32_t bit = 0; bit < 8; ++bit) {
+      pass.SetPipeline(get_load_pipeline(bit));
+      pass.Draw(3);
+    }
+  }
   pass.End();
 }
 

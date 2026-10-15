@@ -36,6 +36,12 @@ struct TransferConstants {
 @group(0) @binding(4) var color_source_ms: texture_multisampled_2d<f32>;
 @group(0) @binding(5) var depth_source: texture_depth_2d;
 @group(0) @binding(6) var depth_source_ms: texture_depth_multisampled_2d;
+@group(0) @binding(7) var stencil_source: texture_2d<u32>;
+@group(0) @binding(8) var stencil_source_ms: texture_multisampled_2d<u32>;
+
+// Stencil bit set by fs_load_stencil_bit (WebGPU has no stencil export, so
+// each bit is written by its own pass with that bit as the write mask).
+override stencil_bit: u32 = 0u;
 
 // EDRAM dword index of a host sample, or 0xFFFFFFFF outside the transferred tiles.
 fn edram_address(pixel: vec2u, sample_index: u32) -> u32 {
@@ -59,13 +65,12 @@ fn edram_address(pixel: vec2u, sample_index: u32) -> u32 {
          in_tile.y * tile_size.x + in_tile.x;
 }
 
-fn pack(v: vec4f) -> u32 {
+fn pack(v: vec4f, stencil: u32) -> u32 {
   if (c.is_depth != 0u) {
-    // Stencil (bits 0:7) is not transferred.
     if (c.format == 1u) {
-      return xe_float32_to_20e4(v.x, true) << 8u;
+      return (xe_float32_to_20e4(v.x, true) << 8u) | stencil;
     }
-    return u32(round(saturate(v.x) * 16777215.0)) << 8u;
+    return (u32(round(saturate(v.x) * 16777215.0)) << 8u) | stencil;
   }
   switch (c.format) {
     case 0u, 1u: {
@@ -133,10 +138,10 @@ fn store_in_bounds(pixel: vec2u) -> bool {
   return pixel.x < c.width && pixel.y < c.row_end;
 }
 
-fn store(pixel: vec2u, sample_index: u32, value: vec4f) {
+fn store(pixel: vec2u, sample_index: u32, value: vec4f, stencil: u32) {
   let address = edram_address(pixel, sample_index);
   if (address != 0xFFFFFFFFu) {
-    edram[address] = pack(value);
+    edram[address] = pack(value, stencil & 0xFFu);
   }
 }
 
@@ -144,7 +149,7 @@ fn store(pixel: vec2u, sample_index: u32, value: vec4f) {
 fn cs_store_color(@builtin(global_invocation_id) id: vec3u) {
   let pixel = store_pixel(id);
   if (store_in_bounds(pixel)) {
-    store(pixel, 0u, textureLoad(color_source, pixel, 0));
+    store(pixel, 0u, textureLoad(color_source, pixel, 0), 0u);
   }
 }
 
@@ -153,7 +158,7 @@ fn cs_store_color_ms(@builtin(global_invocation_id) id: vec3u) {
   let pixel = store_pixel(id);
   if (store_in_bounds(pixel)) {
     for (var i = 0u; i < 4u; i++) {
-      store(pixel, i, textureLoad(color_source_ms, pixel, i));
+      store(pixel, i, textureLoad(color_source_ms, pixel, i), 0u);
     }
   }
 }
@@ -162,7 +167,8 @@ fn cs_store_color_ms(@builtin(global_invocation_id) id: vec3u) {
 fn cs_store_depth(@builtin(global_invocation_id) id: vec3u) {
   let pixel = store_pixel(id);
   if (store_in_bounds(pixel)) {
-    store(pixel, 0u, vec4f(textureLoad(depth_source, pixel, 0)));
+    store(pixel, 0u, vec4f(textureLoad(depth_source, pixel, 0)),
+          textureLoad(stencil_source, pixel, 0).x);
   }
 }
 
@@ -171,7 +177,8 @@ fn cs_store_depth_ms(@builtin(global_invocation_id) id: vec3u) {
   let pixel = store_pixel(id);
   if (store_in_bounds(pixel)) {
     for (var i = 0u; i < 4u; i++) {
-      store(pixel, i, vec4f(textureLoad(depth_source_ms, pixel, i)));
+      store(pixel, i, vec4f(textureLoad(depth_source_ms, pixel, i)),
+            textureLoad(stencil_source_ms, pixel, i).x);
     }
   }
 }
@@ -183,12 +190,16 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4f
   return vec4f(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.0, 1.0);
 }
 
-fn load(position: vec4f, sample_index: u32) -> vec4f {
+fn load_packed(position: vec4f, sample_index: u32) -> u32 {
   let address = edram_address(vec2u(position.xy), sample_index);
   if (address == 0xFFFFFFFFu) {
     discard;
   }
-  return unpack(edram_in[address]);
+  return edram_in[address];
+}
+
+fn load(position: vec4f, sample_index: u32) -> vec4f {
+  return unpack(load_packed(position, sample_index));
 }
 
 @fragment
@@ -201,4 +212,14 @@ fn fs_load_color(@builtin(position) position: vec4f,
 fn fs_load_depth(@builtin(position) position: vec4f,
                  @builtin(sample_index) sample_index: u32) -> @builtin(frag_depth) f32 {
   return load(position, sample_index).x;
+}
+
+// Depth target stencil, one bit per pass (stencil reference 0xFF, write mask
+// 1 << stencil_bit, after fs_load_depth wrote 0).
+@fragment
+fn fs_load_stencil_bit(@builtin(position) position: vec4f,
+                       @builtin(sample_index) sample_index: u32) {
+  if ((load_packed(position, sample_index) & (1u << stencil_bit)) == 0u) {
+    discard;
+  }
 }
