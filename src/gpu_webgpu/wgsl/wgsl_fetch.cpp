@@ -267,8 +267,8 @@ void WgslShaderTranslator::ProcessTextureFetchInstruction(
     if (needs_size) {
       Line(fmt::format("let xe_ts{} = xe_texture_size({}u);", id, fetch));
       if (attributes.offset_x != 0.0f || attributes.offset_y != 0.0f) {
-        uv = fmt::format("({} + vec2f({:.9g}, {:.9g}){})", uv, attributes.offset_x,
-                         attributes.offset_y,
+        uv = fmt::format("({} + vec2f({:.9g}, {:.9g}) * xe_texture_offset_scale({}u){})", uv,
+                         attributes.offset_x, attributes.offset_y, fetch,
                          attributes.unnormalized_coordinates ? "" : fmt::format(" / xe_ts{}", id));
       }
       if (attributes.unnormalized_coordinates) {

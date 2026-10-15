@@ -59,7 +59,13 @@ struct WgslSystemConstants {
   float color_output_scale[4] = {1.0f, 1.0f, 1.0f, 1.0f};
   // Memory export compute variant: guest vertices to run.
   uint32_t memexport_vertex_count = 0;
-  uint32_t padding[43] = {};
+  // 1 / draw resolution scale: guest pixel positions (ps_param_gen).
+  float resolution_scale_inv[2] = {1.0f, 1.0f};
+  // Bit per fetch constant: the texture is a resolve at the draw resolution
+  // scale, so fetch offsets (in guest texels) are divided by the scale like
+  // the SPIR-V translator does (box-filter taps keep their guest footprint).
+  uint32_t textures_resolution_scaled = 0;
+  uint32_t padding[40] = {};
 };
 static_assert(sizeof(WgslSystemConstants) == 256);
 

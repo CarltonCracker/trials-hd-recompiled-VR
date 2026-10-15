@@ -146,42 +146,48 @@ int main(int argc, char** argv) {
     }
   }
 
-  // Coverage: 4 tiles across the end of EDRAM (bases 2046...1), 2 tiles per row.
-  constexpr uint32_t kSamples = 2048 * 80 * 16;
-  for (uint32_t msaa_4x = 0; msaa_4x < 2; ++msaa_4x) {
-    for (uint32_t is_depth = 0; is_depth < 2; ++is_depth) {
-      Constants constants;
-      constants.base_tiles = 2046;
-      constants.pitch_tiles = 2;
-      constants.msaa_4x = msaa_4x;
-      constants.is_depth = is_depth;
-      constants.tile_first = 0;
-      constants.tile_count = 4;
-      constants.width = msaa_4x ? 80 : 160;
-      constants.row_end = msaa_4x ? 16 : 32;
-      std::vector<uint32_t> zeros(kSamples);
-      auto hits = gpu.Buffer(kSamples * 4, wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc |
-                                                 wgpu::BufferUsage::CopyDst,
-                             zeros.data());
-      std::vector<wgpu::BindGroupEntry> entries(1);
-      entries[0].binding = 2;
-      entries[0].buffer = hits;
-      run(coverage_pipeline, constants, entries, constants.width / 8, constants.row_end / 8);
-      auto bytes = gpu.Read(hits, kSamples * 4);
-      std::vector<uint32_t> counts(kSamples);
-      std::memcpy(counts.data(), bytes.data(), bytes.size());
-      for (uint32_t sample = 0; sample < kSamples; ++sample) {
-        uint32_t tile = sample / 1280;
-        uint32_t expected = tile >= 2046 || tile < 2 ? 1 : 0;
-        if (counts[sample] != expected) {
-          std::fprintf(stderr, "FAIL coverage msaa_4x %u depth %u: sample %u hit %u times\n",
-                       msaa_4x, is_depth, sample, counts[sample]);
-          return 1;
+  // Coverage: 4 tiles across the end of EDRAM (bases 2046...1), 2 tiles per
+  // row, at resolution scales 1 and 2.
+  for (uint32_t scale = 1; scale <= 2; ++scale) {
+    const uint32_t kSamples = 2048 * 80 * 16 * scale * scale;
+    for (uint32_t msaa_4x = 0; msaa_4x < 2; ++msaa_4x) {
+      for (uint32_t is_depth = 0; is_depth < 2; ++is_depth) {
+        Constants constants;
+        constants.base_tiles = 2046;
+        constants.pitch_tiles = 2;
+        constants.msaa_4x = msaa_4x;
+        constants.is_depth = is_depth;
+        constants.tile_first = 0;
+        constants.tile_count = 4;
+        constants.scale_x = scale;
+        constants.scale_y = scale;
+        constants.width = (msaa_4x ? 80 : 160) * scale;
+        constants.row_end = (msaa_4x ? 16 : 32) * scale;
+        std::vector<uint32_t> zeros(kSamples);
+        auto hits = gpu.Buffer(kSamples * 4, wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc |
+                                                   wgpu::BufferUsage::CopyDst,
+                               zeros.data());
+        std::vector<wgpu::BindGroupEntry> entries(1);
+        entries[0].binding = 2;
+        entries[0].buffer = hits;
+        run(coverage_pipeline, constants, entries, constants.width / 8, constants.row_end / 8);
+        auto bytes = gpu.Read(hits, kSamples * 4);
+        std::vector<uint32_t> counts(kSamples);
+        std::memcpy(counts.data(), bytes.data(), bytes.size());
+        for (uint32_t sample = 0; sample < kSamples; ++sample) {
+          uint32_t tile = sample / (1280 * scale * scale);
+          uint32_t expected = tile >= 2046 || tile < 2 ? 1 : 0;
+          if (counts[sample] != expected) {
+            std::fprintf(stderr,
+                         "FAIL coverage scale %u msaa_4x %u depth %u: sample %u hit %u times\n",
+                         scale, msaa_4x, is_depth, sample, counts[sample]);
+            return 1;
+          }
         }
       }
     }
   }
-  std::printf("PASS: %zu format round trips, 1x/4x color/depth EDRAM coverage\n",
+  std::printf("PASS: %zu format round trips, 1x/4x color/depth EDRAM coverage at 1x/2x scale\n",
               std::size(cases));
   return 0;
 }

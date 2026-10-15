@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstring>
 #include <vector>
@@ -372,28 +373,74 @@ void ResolveEngine::WriteToGuest(const Readback& readback) {
     return;
   }
   const auto* host = static_cast<const uint8_t*>(readback.buffer.GetConstMappedRange());
-  bool is_16_16 = xenos::TextureFormat(info.copy_dest_info.copy_dest_format) ==
-                  xenos::TextureFormat::k_16_16;
+  auto format = xenos::TextureFormat(info.copy_dest_info.copy_dest_format);
+  bool is_16_16 = format == xenos::TextureFormat::k_16_16;
+  bool is_10_10_10_2 = format == xenos::TextureFormat::k_2_10_10_10 ||
+                       format == xenos::TextureFormat::k_2_10_10_10_AS_16_16_16_16;
+  bool is_32_float = format == xenos::TextureFormat::k_32_FLOAT;
   auto endian = xenos::Endian(info.copy_dest_info.copy_dest_endian);
   uint32_t pitch = info.copy_dest_coordinate_info.pitch_aligned_div_32 * 32;
   uint32_t start = info.copy_dest_extent_start - (info.copy_dest_base & 0x1FFFFFFF);
-  // At a render scale above 1x, the top-left host pixel of each guest pixel is used.
-  for (uint32_t y = 0; y < readback.height / readback.scale_y; ++y) {
-    for (uint32_t x = 0; x < readback.width / readback.scale_x; ++x) {
-      const uint8_t* texel = host + (y * readback.scale_y) * readback.row_pitch +
-                             (x * readback.scale_x) * readback.host_bytes;
+  // At a render scale above 1x, the host pixels of each guest pixel are
+  // averaged (each holds a differently positioned sample of the same guest
+  // pixel; a single one biases the game's luminance measurement).
+  uint32_t scale_x = readback.scale_x, scale_y = readback.scale_y;
+  for (uint32_t y = 0; y < readback.height / scale_y; ++y) {
+    for (uint32_t x = 0; x < readback.width / scale_x; ++x) {
       uint32_t value;
       if (is_16_16) {
+        // Integer data: no averaging.
+        const uint8_t* texel = host + (y * scale_y) * readback.row_pitch +
+                               (x * scale_x) * readback.host_bytes;
         float components[2];
         std::memcpy(components, texel, sizeof(components));
         value = (uint32_t(components[0]) & 0xFFFF) | (uint32_t(components[1]) << 16);
+      } else if (is_10_10_10_2) {
+        uint32_t sums[4] = {};
+        for (uint32_t sy = 0; sy < scale_y; ++sy) {
+          for (uint32_t sx = 0; sx < scale_x; ++sx) {
+            uint32_t texel_value;
+            std::memcpy(&texel_value, host + (y * scale_y + sy) * readback.row_pitch +
+                                          (x * scale_x + sx) * 4, 4);
+            sums[0] += texel_value & 0x3FF;
+            sums[1] += (texel_value >> 10) & 0x3FF;
+            sums[2] += (texel_value >> 20) & 0x3FF;
+            sums[3] += texel_value >> 30;
+          }
+        }
+        uint32_t n = scale_x * scale_y;
+        value = ((sums[0] + n / 2) / n) | (((sums[1] + n / 2) / n) << 10) |
+                (((sums[2] + n / 2) / n) << 20) | (((sums[3] + n / 2) / n) << 30);
+      } else if (is_32_float) {
+        float sum = 0.0f;
+        for (uint32_t sy = 0; sy < scale_y; ++sy) {
+          for (uint32_t sx = 0; sx < scale_x; ++sx) {
+            float texel_value;
+            std::memcpy(&texel_value, host + (y * scale_y + sy) * readback.row_pitch +
+                                          (x * scale_x + sx) * 4, 4);
+            sum += texel_value;
+          }
+        }
+        value = std::bit_cast<uint32_t>(sum / float(scale_x * scale_y));
       } else {
-        std::memcpy(&value, texel, 4);
+        uint32_t sums[4] = {};
+        for (uint32_t sy = 0; sy < scale_y; ++sy) {
+          const uint8_t* row = host + (y * scale_y + sy) * readback.row_pitch;
+          for (uint32_t sx = 0; sx < scale_x; ++sx) {
+            for (uint32_t c = 0; c < 4; ++c) {
+              sums[c] += row[(x * scale_x + sx) * 4 + c];
+            }
+          }
+        }
+        uint32_t n = scale_x * scale_y;
+        value = 0;
+        for (uint32_t c = 0; c < 4; ++c) {
+          value |= ((sums[c] + n / 2) / n) << (8 * c);
+        }
       }
       int32_t offset =
-          texture_util::GetTiledOffset2D(int32_t(readback.dest_x / readback.scale_x + x),
-                                         int32_t(readback.dest_y / readback.scale_y + y), pitch,
-                                         2) -
+          texture_util::GetTiledOffset2D(int32_t(readback.dest_x / scale_x + x),
+                                         int32_t(readback.dest_y / scale_y + y), pitch, 2) -
           int32_t(start);
       if (offset < 0 || uint32_t(offset) + 4 > info.copy_dest_extent_length) {
         continue;

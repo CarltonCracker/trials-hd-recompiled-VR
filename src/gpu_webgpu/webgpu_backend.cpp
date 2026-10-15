@@ -562,7 +562,9 @@ uint32_t PackFloatConstants(const RegisterFile& regs, const Shader& shader, uint
 wgpu::BindGroup WebGpuBackend::GetTextureBindGroup(const RegisterFile& regs,
                                                    const Shader& vertex_shader,
                                                    const Shader* pixel_shader,
-                                                   TextureLayoutSignature texture_signature) {
+                                                   TextureLayoutSignature texture_signature,
+                                                   uint32_t& resolution_scaled_out) {
+  resolution_scaled_out = 0;
   wgpu::BindGroup texture_bind_group = pipeline_cache_->empty_texture_bind_group();
   if (texture_signature.value) {
     std::vector<wgpu::BindGroupEntry> entries;
@@ -571,7 +573,12 @@ wgpu::BindGroup WebGpuBackend::GetTextureBindGroup(const RegisterFile& regs,
       auto slots = WgslShaderTranslator::GetTextureSlots(shader);
       for (uint32_t i = 0; i < slots.size(); ++i) {
         xenos::xe_gpu_texture_fetch_t fetch = regs.GetTextureFetch(slots[i].fetch_constant);
-        wgpu::TextureView view = texture_cache_->GetView(fetch, slots[i].is_cube);
+        bool resolution_scaled;
+        wgpu::TextureView view =
+            texture_cache_->GetView(fetch, slots[i].is_cube, &resolution_scaled);
+        if (resolution_scaled) {
+          resolution_scaled_out |= uint32_t(1) << slots[i].fetch_constant;
+        }
         wgpu::Sampler sampler = texture_cache_->GetSampler(
             fetch, shader.texture_bindings()[slots[i].first_binding].fetch_instr.attributes,
             shader.type() == xenos::ShaderType::kVertex);
@@ -661,8 +668,9 @@ bool WebGpuBackend::Draw(const DrawSnapshot& draw) {
   // Textures (loading may also submit).
   TextureLayoutSignature texture_signature =
       TextureLayoutSignature::Get(*vertex_shader, pixel_shader);
-  wgpu::BindGroup texture_bind_group =
-      GetTextureBindGroup(regs, *vertex_shader, pixel_shader, texture_signature);
+  uint32_t textures_resolution_scaled;
+  wgpu::BindGroup texture_bind_group = GetTextureBindGroup(
+      regs, *vertex_shader, pixel_shader, texture_signature, textures_resolution_scaled);
   frame_recorder_->ReserveUniforms(4 * 4096);
 
   PrimitiveProcessor::ProcessingResult primitive;
@@ -832,6 +840,9 @@ bool WebGpuBackend::Draw(const DrawSnapshot& draw) {
   system.vertex_base_index = regs.Get<int32_t>(XE_GPU_REG_VGT_INDX_OFFSET);
   system.vertex_index_min = regs.Get<uint32_t>(XE_GPU_REG_VGT_MIN_VTX_INDX);
   system.vertex_index_max = regs.Get<uint32_t>(XE_GPU_REG_VGT_MAX_VTX_INDX);
+  system.resolution_scale_inv[0] = 1.0f / float(render_target_cache_->scale_x());
+  system.resolution_scale_inv[1] = 1.0f / float(render_target_cache_->scale_y());
+  system.textures_resolution_scaled = textures_resolution_scaled;
   draw_util::ViewportInfo viewport;
   draw_util::GetHostViewportInfo(regs, render_target_cache_->scale_x(),
                                  render_target_cache_->scale_y(), true, targets.width,
@@ -1051,8 +1062,12 @@ void WebGpuBackend::MemExport(const DrawSnapshot& draw) {
   system.vertex_index_max = regs.Get<uint32_t>(XE_GPU_REG_VGT_MAX_VTX_INDX);
   system.memexport_vertex_count = count;
   TextureLayoutSignature texture_signature = TextureLayoutSignature::Get(vertex_shader, nullptr);
-  wgpu::BindGroup texture_bind_group =
-      GetTextureBindGroup(regs, vertex_shader, nullptr, texture_signature);
+  uint32_t textures_resolution_scaled;
+  wgpu::BindGroup texture_bind_group = GetTextureBindGroup(
+      regs, vertex_shader, nullptr, texture_signature, textures_resolution_scaled);
+  system.textures_resolution_scaled = textures_resolution_scaled;
+  system.resolution_scale_inv[0] = 1.0f / float(render_target_cache_->scale_x());
+  system.resolution_scale_inv[1] = 1.0f / float(render_target_cache_->scale_y());
   WgslShaderTranslator::Modification modification;
   modification.dynamic_addressable_register_count = vertex_shader.GetDynamicAddressableRegisterCount(
       regs.Get<reg::SQ_PROGRAM_CNTL>().vs_num_reg);

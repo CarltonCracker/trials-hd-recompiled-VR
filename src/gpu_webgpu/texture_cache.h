@@ -47,7 +47,10 @@ class TextureCache {
   // View for a texture fetch constant (2D or cube), loading or reloading the
   // texture if needed. Never null: missing or unsupported textures get a
   // black placeholder.
-  wgpu::TextureView GetView(const xenos::xe_gpu_texture_fetch_t& fetch, bool is_cube);
+  // resolution_scaled_out: set if the view is a resolve at the draw resolution
+  // scale (above 1x).
+  wgpu::TextureView GetView(const xenos::xe_gpu_texture_fetch_t& fetch, bool is_cube,
+                            bool* resolution_scaled_out = nullptr);
 
   wgpu::Sampler GetSampler(const xenos::xe_gpu_texture_fetch_t& fetch,
                            const ParsedTextureFetchInstruction::Attributes& overrides,

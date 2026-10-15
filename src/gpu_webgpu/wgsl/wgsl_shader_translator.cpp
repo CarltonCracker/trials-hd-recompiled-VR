@@ -259,6 +259,9 @@ void WgslShaderTranslator::EmitDeclarations(std::string& out) const {
   ndc_offset: vec4f,
   color_output_scale: vec4f,
   memexport_vertex_count: u32,
+  resolution_scale_inv_x: f32,
+  resolution_scale_inv_y: f32,
+  textures_resolution_scaled: u32,
 }
 )";
   out += fmt::format("@group({}) @binding({}) var<uniform> xe_system: XeSystem;\n",
@@ -331,6 +334,11 @@ fn xe_texture_postprocess(value: vec4f, fetch: u32) -> vec4f {
     }
   }
   return r;
+}
+fn xe_texture_offset_scale(fetch: u32) -> vec2f {
+  return select(vec2f(1.0),
+                vec2f(xe_system.resolution_scale_inv_x, xe_system.resolution_scale_inv_y),
+                (xe_system.textures_resolution_scaled & (1u << fetch)) != 0u);
 }
 fn xe_texture_size(fetch: u32) -> vec2f {
   let word_2 = xe_fetch_word(fetch * 6u + 2u);
@@ -589,8 +597,9 @@ void WgslShaderTranslator::EmitPixelShaderEntryPoint(std::string& out) const {
     // X: pixel X, back-facing in the sign bit. Y: pixel Y, point in the sign
     // bit. Z, W: point coordinates (not supported: 0).
     out += "  {\n";
-    out += "    var param_x = abs(floor(xe_in.frag_coord.x));\n";
-    out += "    let param_y = abs(floor(xe_in.frag_coord.y));\n";
+    // Guest pixels: host pixels divided by the draw resolution scale.
+    out += "    var param_x = abs(floor(xe_in.frag_coord.x) * xe_system.resolution_scale_inv_x);\n";
+    out += "    let param_y = abs(floor(xe_in.frag_coord.y) * xe_system.resolution_scale_inv_y);\n";
     out +=
         "    if ((xe_system.flags & 32u) != 0u && !xe_in.front_facing) { param_x = -param_x; }\n";
     out += fmt::format("    xe_r[{}] = vec4f(param_x, {}param_y, 0.0, 0.0);\n", param_gen_register,

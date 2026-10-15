@@ -67,7 +67,8 @@ class WebGpuBackend {
   void MemExport(const DrawSnapshot& draw);
   wgpu::BindGroup GetTextureBindGroup(const RegisterFile& regs, const Shader& vertex_shader,
                                       const Shader* pixel_shader,
-                                      TextureLayoutSignature texture_signature);
+                                      TextureLayoutSignature texture_signature,
+                                      uint32_t& resolution_scaled_out);
   void EnsureDumpOpen(uint32_t frame_index);
   void DumpDraw(const DrawSnapshot& draw);
   void DumpResolve(const ResolveSnapshot& resolve);

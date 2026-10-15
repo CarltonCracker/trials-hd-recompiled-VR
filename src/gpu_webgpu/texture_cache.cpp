@@ -258,7 +258,11 @@ wgpu::Texture TextureCache::GetOrCreateResolveAlias(uint32_t address, wgpu::Text
   return alias.texture;
 }
 
-wgpu::TextureView TextureCache::GetView(const xenos::xe_gpu_texture_fetch_t& fetch, bool is_cube) {
+wgpu::TextureView TextureCache::GetView(const xenos::xe_gpu_texture_fetch_t& fetch, bool is_cube,
+                                        bool* resolution_scaled_out) {
+  if (resolution_scaled_out) {
+    *resolution_scaled_out = false;
+  }
   wgpu::TextureView& placeholder = is_cube ? black_cube_ : black_2d_;
   if (fetch.type != xenos::FetchConstantType::kTexture) {
     return placeholder;
@@ -272,6 +276,9 @@ wgpu::TextureView TextureCache::GetView(const xenos::xe_gpu_texture_fetch_t& fet
     auto found = resolve_aliases_.find((fetch.base_address << 12) & 0x1FFFFFFF);
     if (found != resolve_aliases_.end() && !found->second.dirty) {
       ResolveAlias& alias = found->second;
+      if (resolution_scaled_out) {
+        *resolution_scaled_out = alias.scale_x > 1 || alias.scale_y > 1;
+      }
       uint32_t width = (width_minus_1 + 1) * alias.scale_x;
       uint32_t height = (height_minus_1 + 1) * alias.scale_y;
       if (width == alias.width && height == alias.height) { return alias.view; }
