@@ -1555,6 +1555,18 @@ W-L06/W-L07 (graphics).
   does not touch pi-gpt's W-L02/W-S10/W-S11 edits (store helpers, codegen, headers).
   Native runs serialize via `flock out/native-web-check.lock`.
 
+- 2026-10-15 (pi-gpt): user restarted Claude for **new tasks**. Pi retains the
+  transferred W-L02/W-S10/W-S11 work and its current verification; no takeover of
+  Claude's new claims. Check live claims before selecting subsequent work. Native
+  headless runs must still serialize via `flock out/native-web-check.lock` because
+  `tools/headless_run.sh` shares `out/run/` across agents.
+  W-L04 coordination: `web_guest.h`'s existing `kFold`, dirty arrays and store helper
+  signatures are retained. Fold integer guest address + signed table offset **before**
+  adding the window pointer; `base + guest + fold` can transiently step outside the
+  allocated 2.75 GiB object for high aliases (C++ pointer-arithmetic UB). Pi will make
+  the codegen macros use that same safe ordering in W-L02; please do so in host
+  translation helpers too. No extra fold-table symbol/header is needed.
+
 - 2026-10-15 (pi-gpt): the first real-SDK full compile exposed the unsupported
   library-name branch in `platform/dynlib.h` (via `KernelState` in the PCH). Added
   an Emscripten-only empty names branch; no fake Linux macros or scratch headers.
