@@ -5,7 +5,9 @@
 
 struct BlitConstants {
   source_offset: vec2i,
-  // 0: none, 1: 256-entry table (8-bit frontbuffers), 2: piecewise linear.
+  // Bits 0:1: gamma ramp - 0: none, 1: 256-entry table (8-bit frontbuffers),
+  // 2: piecewise linear. Bits 8:9, 10:11: leading columns, rows that copy the
+  // next one (the resolve's half-pixel offset fill at 2x/3x).
   gamma_mode: u32,
   luma_alpha: u32,
 }
@@ -29,14 +31,16 @@ fn apply_pwl(value_10b: u32, channel: u32) -> f32 {
 
 @fragment
 fn fs_main(@builtin(position) position: vec4f) -> @location(0) vec4f {
-  let coord = constants.source_offset + vec2i(position.xy);
+  let fill = vec2i(vec2u(constants.gamma_mode >> 8u, constants.gamma_mode >> 10u) & vec2u(3u));
+  let coord = constants.source_offset + max(vec2i(position.xy), fill);
+  let gamma_mode = constants.gamma_mode & 3u;
   var color = textureLoad(source, coord, 0).rgb;
-  if (constants.gamma_mode == 1u) {
+  if (gamma_mode == 1u) {
     let index = vec3u(saturate(color) * 255.0 + 0.5);
     color = vec3f(f32((gamma_ramp[index.r] >> 20u) & 0x3FFu) / 1023.0,
                   f32((gamma_ramp[index.g] >> 10u) & 0x3FFu) / 1023.0,
                   f32(gamma_ramp[index.b] & 0x3FFu) / 1023.0);
-  } else if (constants.gamma_mode == 2u) {
+  } else if (gamma_mode == 2u) {
     let value = vec3u(saturate(color) * 1023.0 + 0.5);
     color = vec3f(apply_pwl(value.r, 0u), apply_pwl(value.g, 1u), apply_pwl(value.b, 2u));
   }

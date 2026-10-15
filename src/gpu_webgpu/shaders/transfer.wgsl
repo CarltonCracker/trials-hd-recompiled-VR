@@ -69,10 +69,12 @@ fn depth_swap(t: TransferTarget, in_tile: vec2u) -> vec2u {
 
 // EDRAM location of a host sample of target t: x = absolute tile, y = sample
 // index within the (scaled) tile; x = 0xFFFFFFFF outside the transferred tiles.
+// At 4x, with the standard sample locations, sample index bit 0 is the
+// horizontal sample and bit 1 the vertical one (as in the Vulkan backend).
 fn edram_location(t: TransferTarget, pixel: vec2u, sample_index: u32) -> vec2u {
   var rt = pixel;
   if (t.msaa_4x != 0u) {
-    rt = (pixel << vec2u(1u)) + vec2u((sample_index >> 1u) & 1u, sample_index & 1u);
+    rt = (pixel << vec2u(1u)) + vec2u(sample_index & 1u, (sample_index >> 1u) & 1u);
   }
   let size = tile_size(t);
   let tile_xy = rt / size;
@@ -91,7 +93,7 @@ fn edram_source(t: TransferTarget, location: vec2u) -> vec3u {
   let in_tile = depth_swap(t, vec2u(location.y % size.x, location.y / size.x));
   let rt = vec2u(tile % t.pitch_tiles, tile / t.pitch_tiles) * size + in_tile;
   if (t.msaa_4x != 0u) {
-    return vec3u(rt >> vec2u(1u), ((rt.x & 1u) << 1u) | (rt.y & 1u));
+    return vec3u(rt >> vec2u(1u), ((rt.y & 1u) << 1u) | (rt.x & 1u));
   }
   return vec3u(rt, 0u);
 }

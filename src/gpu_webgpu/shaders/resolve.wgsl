@@ -13,7 +13,10 @@ struct ResolveConstants {
   // 0: clamp to 0...1 (unorm), 1: round to an integer (16-bit signed
   // integer), 2: round to an unsigned integer, 3: as is (float).
   mode: u32,
-  // Bits 0:3: samples to average; bit 4: swap red and blue.
+  // Bits 0:3: samples to average; bit 4: swap red and blue; bits 8:9, 10:11:
+  // host columns, rows at the left and top of the resolve area that copy the
+  // next one (resolution scaling with the half-pixel offset leaves them
+  // undrawn; the SDK's resolve_resolution_scale_fill_half_pixel_offset).
   flags: u32,
   padding: u32,
 }
@@ -31,7 +34,8 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4f
 }
 
 fn source_pixel(position: vec4f) -> vec2i {
-  return constants.source_offset + vec2i(position.xy) - constants.dest_offset;
+  let fill = vec2i(vec2u(constants.flags >> 8u, constants.flags >> 10u) & vec2u(3u));
+  return constants.source_offset + max(vec2i(position.xy) - constants.dest_offset, fill);
 }
 
 fn finish(value: vec4f) -> vec4f {
