@@ -1372,7 +1372,7 @@ Every task's "Done when" implicitly includes **`tools/check_native.sh check` pas
 | ID | Status | Tier | Task | Depends | Done when |
 | --- | --- | --- | --- | --- | --- |
 | W-S01 | claimed pi-gpt 2026-10-15 | S | Test page `tools/web/spikes/limits.html`: request the adapter, print `adapter.info`, all `adapter.limits` and `adapter.features`; run it in headless Chromium (11.1) with a 10-line CDP script that saves the console output. Record the values the renderer needs (9.2) in section 9.2. | — | Section 9.2 lists Chromium 154 / RX 6600 values for `maxBufferSize`, `maxStorageBufferBindingSize`, the 8 wanted features; question 14.1 answered |
-| W-S02 | todo | S | Feature-detect page `tools/web/spikes/wasm_features.html` using `WebAssembly.validate` on tiny modules: shared memory64, threads, simd128, relaxed SIMD, exception handling (exnref), JSPI (`WebAssembly.Suspending`), plus `crossOriginIsolated`. Run in Chromium here; write the matrix into 5.1. Add the result columns for Firefox and Safari as `unverified` until someone runs it there. | — | 5.1 table updated with "verified in Chromium 154" values |
+| W-S02 | claimed pi-gpt 2026-10-15 | S | Feature-detect page `tools/web/spikes/wasm_features.html` using `WebAssembly.validate` on tiny modules: shared memory64, threads, simd128, relaxed SIMD, exception handling (exnref), JSPI (`WebAssembly.Suspending`), plus `crossOriginIsolated`. Run in Chromium here; write the matrix into 5.1. Add the result columns for Firefox and Safari as `unverified` until someone runs it there. | — | 5.1 table updated with "verified in Chromium 154" values |
 | W-S03 | todo | S | Emscripten "hello pthreads + Memory64" page: `em++ --target=wasm64 -pthread -sPROXY_TO_PTHREAD -sPTHREAD_POOL_SIZE=48 -sINITIAL_MEMORY=3800mb -sMAXIMUM_MEMORY=8gb`; spawn 40 threads that each touch 16 MiB at addresses spread over 3 GiB and join; print timings. | — | Runs in Chromium; startup time and RSS (from `chrome://memory-internals` or `/proc` of the renderer process) recorded in 4.5 |
 | W-S04 | todo | S | emdawnwebgpu "triangle in an OffscreenCanvas on a pthread" spike: main transfers the canvas, a pthread creates the device, draws a triangle per `requestAnimationFrame` in the worker. | W-S03 | Screenshot via CDP shows the triangle; notes on any proxying needed |
 | W-S05 | todo | M | Same as W-S04 but the pthread runs an endless C++ loop that calls a JSPI-suspending yield (`emscripten_sleep(0)` with `-sJSPI`) after each frame, and uses `wgpu::Buffer::MapAsync` with `CallbackMode::AllowSpontaneous`/`AllowProcessEvents`. Answers question 14.2. Design note from W-L01 first. | W-S04, W-L01 | Frames present while the loop runs; map callbacks arrive; findings in 7.4 |
@@ -1426,6 +1426,11 @@ details of W-L04 to W-L09. The critical path is W-L01 → W-L02/W-L04 → W-L15 
 W-L06/W-L07 (graphics).
 
 ### 16.6 Notes log
+
+- 2026-10-15 (pi-gpt): claimed W-S02 per the user's request for a task independent
+  of Claude's W-L02/W-S10/W-S11. Scope: new feature-detection fixtures/page in
+  `tools/web/spikes/`, browser run, section 5.1 results. No SDK or generated-code edits.
+  The reviewed-codegen baseline/check already running also guards these web-only files.
 
 - 2026-10-15 (pi-gpt): W-S01 browser measurement passed (`b2b504e`), but the first
   native guard caught Claude's concurrent W-L02 regeneration: generated fingerprint
