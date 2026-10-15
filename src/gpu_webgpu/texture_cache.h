@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <memory>
 #include <unordered_map>
+#include <vector>
 
 #include <webgpu/webgpu_cpp.h>
 
@@ -99,10 +100,11 @@ class TextureCache {
     wgpu::TextureView view_2d;
     wgpu::TextureView view_cube;
     std::atomic<bool> dirty{true};
-    bool watched = false;
-    // Guest data hash of the last load.
+    // Chunks whose watch fired (and needs re-registering); see LoadTexture.
+    std::atomic<uint64_t> dirty_chunks{~uint64_t(0)};
+    // Guest data hashes per chunk at the last load.
     bool loaded = false;
-    uint64_t content_hash = 0;
+    std::vector<uint64_t> chunk_hashes;
     uint32_t data_start = 0;
     uint32_t data_length = 0;
   };

@@ -206,7 +206,7 @@ void TextureCache::WatchCallback(const std::unique_lock<std::recursive_mutex>& g
                                  bool invalidated_by_gpu) {
   // Guest thread, inside the global critical region: no WebGPU calls.
   auto* texture = static_cast<Texture*>(data);
-  texture->watched = false;
+  texture->dirty_chunks.fetch_or(uint64_t(1) << argument, std::memory_order_relaxed);
   texture->dirty.store(true, std::memory_order_release);
 }
 
@@ -400,35 +400,47 @@ bool TextureCache::LoadTexture(Texture& texture) {
   if (key.mip_page && layout.mips_total_extent_bytes) {
     shared_memory_.RequestRange(mip_address, layout.mips_total_extent_bytes);
   }
+  // Watches and hashes per chunk (256 KB, the SDK's write-fault widening
+  // block, or larger for big textures to stay within 64 chunks): CPU writes
+  // next to a texture invalidate its edge chunks every frame, so only fired
+  // chunks are rehashed, and the texture reloads only if one changed.
+  uint32_t start = key.base_page ? base_address : mip_address;
+  uint32_t end = key.base_page ? base_address + layout.base.level_data_extent_bytes : start;
+  if (key.mip_page && layout.mips_total_extent_bytes) {
+    start = std::min(start, mip_address);
+    end = std::max(end, mip_address + layout.mips_total_extent_bytes);
+  }
+  uint32_t chunk_shift = 18;
+  while (((end - 1) >> chunk_shift) - (start >> chunk_shift) >= 64) {
+    ++chunk_shift;
+  }
+  uint32_t chunk_first = start >> chunk_shift;
+  uint32_t chunk_count = ((end - 1) >> chunk_shift) - chunk_first + 1;
   // Clear before reading so a write during the upload is not lost.
   texture.dirty.store(false, std::memory_order_release);
-  if (!texture.watched) {
-    uint32_t start = key.base_page ? base_address : mip_address;
-    uint32_t end = key.base_page ? base_address + layout.base.level_data_extent_bytes : start;
-    if (key.mip_page && layout.mips_total_extent_bytes) {
-      start = std::min(start, mip_address);
-      end = std::max(end, mip_address + layout.mips_total_extent_bytes);
-    }
-    shared_memory_.WatchMemoryRange(start, end - start, WatchCallback, this, &texture, 0);
-    texture.watched = true;
+  uint64_t fired = texture.dirty_chunks.exchange(0, std::memory_order_acq_rel);
+  if (texture.chunk_hashes.size() != chunk_count) {
+    texture.chunk_hashes.assign(chunk_count, 0);
+    fired = ~uint64_t(0);
   }
-
-  // CPU writes near a texture invalidate it too (the SDK widens each write
-  // fault to its 256 KB block), so reload only if the guest data changed.
   const uint8_t* guest = memory_.TranslatePhysical<const uint8_t*>(0);
-  uint64_t content_hash = 0;
-  if (key.base_page) {
-    content_hash = XXH3_64bits(guest + base_address, layout.base.level_data_extent_bytes);
+  bool changed = !texture.loaded;
+  for (uint32_t i = 0; i < chunk_count; ++i) {
+    if (!(fired & (uint64_t(1) << i))) {
+      continue;
+    }
+    uint32_t chunk_start = std::max(start, (chunk_first + i) << chunk_shift);
+    uint32_t chunk_end = std::min(end, (chunk_first + i + 1) << chunk_shift);
+    shared_memory_.WatchMemoryRange(chunk_start, chunk_end - chunk_start, WatchCallback, this,
+                                    &texture, i);
+    uint64_t hash = XXH3_64bits(guest + chunk_start, chunk_end - chunk_start);
+    changed |= hash != texture.chunk_hashes[i];
+    texture.chunk_hashes[i] = hash;
   }
-  if (key.mip_page && layout.mips_total_extent_bytes) {
-    content_hash = XXH3_64bits_withSeed(guest + mip_address, layout.mips_total_extent_bytes,
-                                        content_hash);
-  }
-  if (texture.loaded && texture.content_hash == content_hash) {
+  if (!changed) {
     return true;
   }
   texture.loaded = true;
-  texture.content_hash = content_hash;
 
   uint32_t bytes_per_block = info->bytes_per_block();
   uint32_t bytes_per_block_log2 = rex::log2_floor(bytes_per_block);
