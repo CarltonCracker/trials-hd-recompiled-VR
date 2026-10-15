@@ -496,6 +496,15 @@ on the ring buffer and on `WAIT_REG_MEM`. Two ways to fit it:
 Asyncify (`-sASYNCIFY`) also works but instruments every function that may suspend and is
 costly on 37 MiB of code; avoid it.
 
+W-S05's concrete probe reuses `tools/web/spikes/gpu_triangle.cpp` with
+`-DTRIALS_WEB_SPIKE_JSPI=1 -sJSPI` added to the W-S04 command (9.3), output
+`out/web-spikes/gpu_jspi.html`. Its proxied-main pthread waits for startup callbacks
+with `emscripten_sleep(0)`, then stays in an endless C++ frame/sleep loop (no worker
+rAF). Two buffer readbacks assert the values 42/43, using `AllowSpontaneous` and
+`AllowProcessEvents` respectively; the loop calls `instance.ProcessEvents()`.
+The background changes every 300 frames so two CDP screenshots can prove actual
+canvas presentation progresses, rather than merely counting submitted commands.
+
 ### 7.5 Rendering
 
 The renderer's command-processor half already runs on one thread. On the web, the
@@ -1522,6 +1531,11 @@ details of W-L04 to W-L09. The critical path is W-L01 → W-L02/W-L04 → W-L15 
 W-L06/W-L07 (graphics).
 
 ### 16.6 Notes log
+
+- 2026-10-15 (pi-gpt): user explicitly requested takeover of Claude's unfinished
+  work (Claude exhausted usage) **after W-S05**. Next: inspect/preserve its current
+  W-L02/W-S10/W-S11 edits, transfer those claims here, finish verification and export
+  the SDK patch. This overrides the usual three-day stale-claim wait, not any test gate.
 
 - 2026-10-15 (pi-gpt): **W-S04 done** (`c1cc170`, findings `143dccc`). Emdawnwebgpu
   wasm64 triangle presents through the worker-owned OffscreenCanvas in Chromium 154;
