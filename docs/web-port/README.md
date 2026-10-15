@@ -63,11 +63,11 @@ Decisions (each is justified in section 7; change them only with a Notes-log ent
 | # | Decision | Why (short) |
 | --- | --- | --- |
 | D1 | **wasm64 (Memory64) first**, wasm32 kept as a measured fallback | The guest needs a 3 GiB window plus ~1 GiB host heap (4.4); wasm32 caps at 4 GiB total. The SDK assumes 64-bit host pointers everywhere. Shared Memory64 + threads already works in Chromium (5.6). |
-| D2 | **Guest window = virtual `0x00000000–0x9FFFFFFF` + physical 512 MiB, folded**: guest addresses ≥ `0xA0000000` translate to the physical block in the access macro | Wasm has no page aliasing; the codegen already routes every access through `REX_PHYS_HOST_OFFSET` (3.3). 3 GiB of linear memory instead of 4.5. |
+| D2 | **Guest window of 2.75 GiB, aliases folded by a 256-entry table** (`addr >> 24`): physical views, `0x7F…` and `0x9…` map onto their native targets (7.9.2) | Wasm has no page aliasing; the codegen already routes every access through `REX_PHYS_HOST_OFFSET` (3.3); one load + add per access. |
 | D3 | **GPU-visible write tracking from codegen**, not page protection: physical-range stores set a bit in a 16 KiB dirty bitmap | No `mprotect`/`SIGSEGV` in wasm. The physical-range branch exists anyway for D2. |
 | D4 | **Real pthreads** for guest threads (36 host threads measured), `PROXY_TO_PTHREAD`, browser main thread kept free | Guest code blocks constantly; `Atomics.wait` is forbidden on the main thread. |
-| D5 | **One GPU worker owns every WebGPU object**: command processor, presenter, ImGui drawing, via `OffscreenCanvas` | WebGPU objects belong to the thread that created them; they cannot be shared across workers. |
-| D6 | **The GPU worker yields to its event loop every frame** (JSPI suspend at swap and at GPU waits; resumable command-processor loop as fallback) | Browser WebGPU only delivers `mapAsync`/device callbacks and presents the canvas when the worker returns to its event loop. |
+| D5 | **One GPU worker owns every WebGPU object**: the command-processor `XHostThread` gets the `OffscreenCanvas` and also paints the presenter and ImGui (new paint mode, 7.9.7) | WebGPU objects belong to the thread that created them; the command processor must stay an `XHostThread` because it runs guest interrupt callbacks. |
+| D6 | **The GPU worker yields to its event loop at swaps and waits** through one `YieldToEventLoop()` (JSPI; Asyncify limited to the GPU worker's stack as fallback; 7.9.5) | Browser WebGPU only delivers `mapAsync`/device callbacks and presents the canvas when the worker returns to its event loop. |
 | D7 | **Same renderer source**, `#if __EMSCRIPTEN__` only where Dawn-native APIs are used; `emdawnwebgpu` port | One renderer for native and web (the plan since the renderer doc, section 13). |
 | D8 | **Static GPU plugin** (no `dlopen`), Vulkan plugin not built | Wasm side modules are slow and complex; the browser has only WebGPU. |
 | D9 | **Game data imported once into OPFS** from the user's own package or folder, read through WasmFS's OPFS backend | 206 MiB of data (4.6); synchronous file I/O from pthreads; persists across visits. |
@@ -382,6 +382,9 @@ can coexist behind `REX_WEB_MEMORY_MODEL`.
 
 ### 7.2 Translation macro (option A)
 
+*Superseded by the design note's fold table (7.9.2), which also covers the `0x7F…` and
+`0x9…` aliases; kept for the reasoning.*
+
 ```cpp
 // __EMSCRIPTEN__ only. base points at guest address 0 in linear memory.
 // Physical block starts at base + 0xA0000000.
@@ -532,6 +535,343 @@ Tasks that add only new web-only files need no macOS check.
 
 **`main` branch.** Web-port code is not ported to `main` until the user asks; until then
 `main`'s Linux/macOS builds cannot be affected at all.
+
+### 7.9 Web platform design note (W-L01, 2026-10-15)
+
+The binding interface specification for every other web task. Read from code where a
+file is named; change it only with a Notes-log entry. "Web" below means
+`REX_PLATFORM_EMSCRIPTEN` (defined in `rex/platform.h` only when `__EMSCRIPTEN__` is set).
+
+#### 7.9.1 Platform layer and file layout
+
+| Native file (`thirdparty/rexglue-sdk/src/core/`) | Web file | Content |
+| --- | --- | --- |
+| `memory_posix.cpp` | `memory_emscripten.cpp` | `page_size()` 4096, `allocation_granularity()` 4096, `AllocFixed`/`DeallocFixed`/`Protect`/`QueryProtect` bookkeeping (7.9.2), file mappings over one linear-memory window |
+| `mapped_memory_posix.cpp` | `mapped_memory_emscripten.cpp` | `MappedMemory` reads the file into a heap buffer (and writes back on `Close` when writable) |
+| `exception_handler_posix.cpp`, `seh_posix.cpp` | `exception_handler_emscripten.cpp` | `Install`/`Uninstall` no-ops |
+| `fiber_posix.cpp` | `fiber_emscripten.cpp` | Fatal "not supported" unless W-S08 finds fibers in use |
+| `dynlib_posix.cpp` | `dynlib_emscripten.cpp` | `Load` fails; plugins come from the static registry (7.9.10) |
+| `threading_posix.cpp` | **same file**, `#if REX_PLATFORM_EMSCRIPTEN` blocks | Timers on one timer thread instead of `timer_create`; affinity/priority no-ops; no signal-based thread suspension (fatal if used) |
+| `socket_posix.cpp` | `socket_emscripten.cpp` | All calls fail with "network unavailable" |
+| `system_posix.cpp`, `dbg_posix.cpp`, `filesystem_posix.cpp`, `clock_posix.cpp`, `atomic_posix.cpp`, `platform/*_posix.cpp` | same files | Compile under Emscripten (POSIX enough); fix individual calls with `#if` |
+
+`src/core/CMakeLists.txt` selects the `_emscripten` files with `if(EMSCRIPTEN)` placed
+**before** the existing `if(WIN32)`/`else()` blocks' sources are added (native lists
+unchanged). App-side web code lives in `src/web/`; the SDK's UI/input/audio web
+backends in `thirdparty/rexglue-sdk/src/{ui,input,audio}/web/` (new directories, built only
+with `EMSCRIPTEN`).
+
+#### 7.9.2 Memory model
+
+**Linear-memory window** (one `aligned_alloc(65536, 0xB0000000)` at startup, never freed):
+
+| Window offset | Contents | Guest addresses that land there |
+| --- | --- | --- |
+| `0x00000000–0x7EFFFFFF` | virtual 4 KiB + 64 KiB heaps | `0x00000000–0x7EFFFFFF` |
+| `0x7F000000–0x7FFFFFFF` | unused (16 MiB; guest `0x7F…` is folded to physical) | — |
+| `0x80000000–0x8FFFFFFF` | XEX heaps | `0x80000000–0x8FFFFFFF` **and** `0x90000000–0x9FFFFFFF` (native view table maps both to the same file offset) |
+| `0x90000000–0xAFFFFFFF` | physical memory, 512 MiB (`physical_membase_ = window + 0x90000000`) | `0xA0000000–0xBFFFFFFF`, `0xC0000000–0xDFFFFFFF`, `0xE0000000–0xFFFFFFFF` (+0x1000), `0x7F000000–0x7FFFFFFF` |
+
+Total 2.75 GiB. The aliases are exactly the native view table (`map_info` in
+`src/system/xmemory.cpp`): `0x7F000000` → physical 0, `0x90000000` → `0x80000000`,
+`0xA0/0xC0000000` → physical 0, `0xE0000000` → physical `0x1000`.
+
+**Fold table.** Every alias boundary is a multiple of 16 MiB, so translation is one table
+lookup by `addr >> 24`:
+
+```cpp
+// rex/memory/web_fold.h (web only). host = window + addr + rex_web_fold[addr >> 24].
+extern "C" const int64_t rex_web_fold[256];
+//   [0x00..0x7E] = 0
+//   [0x7F]       = +0x11000000             (0x7F000000 -> window 0x90000000)
+//   [0x80..0x8F] = 0
+//   [0x90..0x9F] = -0x10000000             (0x9xxxxxxx -> 0x8xxxxxxx)
+//   [0xA0..0xBF] = -0x10000000             (0xAxxxxxxx -> window 0x90000000 + low 29 bits)
+//   [0xC0..0xDF] = -0x30000000
+//   [0xE0..0xFF] = -0x50000000 + 0x1000
+```
+
+Codegen (W-L02) emits, for the web only:
+
+```cpp
+#if defined(__EMSCRIPTEN__)
+#include <rex/memory/web_fold.h>
+#define REX_PHYS_HOST_OFFSET(addr) rex_web_fold[(u32)(addr) >> 24]
+#endif
+```
+
+so `REX_RAW_ADDR`, `REX_LOAD_*` and `REX_STORE_*` keep their native text. The `base`
+argument of every recompiled function is the window start (as `virtual_membase_` is
+natively).
+
+**`Memory` changes (W-L04):**
+
+- `BaseHeap::host_address_offset_` becomes `int64_t` on the web only
+  (`using HostAddressOffset = std::conditional_t<REX_PLATFORM_EMSCRIPTEN, int64_t, uint32_t>`),
+  set to `rex_web_fold[heap_base >> 24]` for every heap. `TranslateRelative`,
+  `TranslateVirtual` and `HostToGuestVirtual` then work unchanged in shape.
+  `TranslateVirtual` on the web uses the fold table directly (it also covers `0x7F…`,
+  which belongs to no heap).
+- `HostToGuestVirtual(host)`: window offsets `0x90000000–0xAFFFFFFF` return the
+  `0xA0000000` alias (only used by fault handling and logging).
+- `Memory::Initialize` on the web: no `CreateFileMappingHandle`/`MapViews`; allocate the
+  window, set `virtual_membase_` and `physical_membase_`, initialize heaps as natively,
+  skip `MMIOHandler::Install`'s exception handler (7.9.4).
+- Page protection is bookkeeping: heaps keep their page tables (protect bits, commit
+  state) for guest-visible `NtQueryVirtualMemory`, but nothing traps. `kMemoryProtectNoAccess`
+  pages stay readable on the web (no fault); this only matters for buggy guests.
+- Decommit/release zero the pages (`memset`) where native would discard them, because
+  the guest expects zero-filled memory on recommit.
+- Emscripten link: `-sINITIAL_MEMORY=3328mb` (window 2.75 GiB + 576 MiB host start),
+  `-sMAXIMUM_MEMORY=8gb`, `-sALLOW_MEMORY_GROWTH=1` for the host heap.
+
+#### 7.9.3 Write tracking (dirty bitmap)
+
+```cpp
+// rex/memory/web_dirty.h (web only)
+namespace rex::memory::web {
+inline constexpr uint32_t kPageShift = 12;                    // 4 KiB pages
+inline constexpr uint32_t kPageCount = 0x20000000 >> 12;      // 131,072 physical pages
+extern std::atomic<uint64_t> g_dirty[kPageCount / 64];        // 16 KiB, 1 bit per page
+extern std::atomic<uint64_t> g_dirty_summary[kPageCount / 4096]; // 32 words, 1 bit per 64 words
+extern uint8_t* g_physical_base;                              // window + 0x90000000
+
+// Called after a write of `size` bytes at host pointer p (any guest address form).
+inline void MarkHostWrite(const uint8_t* p, uint32_t size) {
+  uint64_t d = uint64_t(p - g_physical_base);
+  if (d >= 0x20000000) return;                                // not physical: nothing to track
+  for (uint64_t page = d >> 12, last = (d + size - 1) >> 12; page <= last; ++page) {
+    uint64_t bit = 1ull << (page & 63);
+    auto& word = g_dirty[page >> 6];
+    if (!(word.load(std::memory_order_relaxed) & bit)) {      // RMW once per page per delivery
+      word.fetch_or(bit, std::memory_order_release);
+      g_dirty_summary[page >> 12].fetch_or(1ull << ((page >> 6) & 63), std::memory_order_release);
+    }
+  }
+}
+// Host-side writers (kernel, CRT hooks, audio): same, by guest address.
+void MarkGuestWrite(uint32_t guest_address, uint32_t size);
+}  // namespace rex::memory::web
+```
+
+**Every guest store form marks after the write** (marking first could let the GPU thread
+clear the bit and upload old data before the write lands). Forms in the generated code
+(measured 2026-10-15 over `generated/default/*.cpp`):
+
+| Form | Count | Web emission (W-L02) |
+| --- | --- | --- |
+| `REX_STORE_U8/16/32/64(x, y)` | (part of 448,775 accesses) | `rex_web_store_uN(REX_RAW_ADDR(x), y)`: inline store + `MarkHostWrite` |
+| `REX_MM_STORE_*` | 28 | non-MMIO branch as above |
+| `simde_mm_store_si128((simde__m128i*)REX_RAW_ADDR(ea), v)` (`stvx`, `stvlx`/`stvrx` paths) | ≈ 5,700 | `rex_web_store128(REX_RAW_ADDR(ea), v)` |
+| `__sync_bool_compare_and_swap(...REX_RAW_ADDR(ea)...)` (`stwcx.`, `stdcx.`) | 285 | CAS, then mark when it succeeded |
+| `memset((void*)REX_RAW_ADDR(ea), 0, 32/128)` (`dcbz`, `dcbz128`) | 86 | memset + mark |
+
+W-L02 must grep the codegen builders for any other raw write and add it here.
+
+**Host writers** call `MarkGuestWrite` after writing guest memory (list from W-S09): file
+reads into guest buffers, `src/crt_hooks.cpp` `memcpy`/`memset` hooks, XMA output, kernel
+`Rtl*` copy/fill helpers, `Memory::Zero/Fill/Copy`, the GPU front-end's own writes that the
+CPU must not re-upload are **not** marked (as natively).
+
+**Delivery.** Natively, a fault on a watched page calls the registered
+`PhysicalMemoryInvalidationCallback`s (`Memory::RegisterPhysicalMemoryInvalidationCallback`,
+used by `SharedMemory` and the primitive processor) and unprotects the page. On the web:
+
+```cpp
+// Memory (web): scans g_dirty_summary (32 words), then the marked words; for each run of
+// dirty pages that is also "watched" (page flag set by EnableAccessCallbacks), calls the
+// invalidation callbacks exactly as the fault path would (start, length, exact_range=false),
+// clears the watched flag (= native unprotect), and clears the dirty bits it consumed.
+void Memory::DeliverPhysicalWrites();
+```
+
+- Called by the GPU front-end **before it reads guest memory**: at the start of
+  `CommandProcessor::IssueDraw`, `IssueCopy`, and `SharedMemory::RequestRanges` (cheap when
+  nothing is dirty: 32 relaxed loads). Ordering: the guest writes data, then writes the
+  ring-buffer write pointer (an atomic store); the GPU thread reads the write pointer
+  (atomic load) before executing the packets, so the data writes and their marks happen
+  before the delivery that precedes the draw.
+- Unwatched dirty pages are just cleared.
+- `enable_data_providers` (read-side callbacks) is not supported on the web; assert it is
+  never requested (W-L05 confirms).
+- Debug mode (`--web_dirty_verify`, W-L05): hash each watched 256 KiB chunk at watch time
+  and at delivery; a changed hash without a dirty bit is a fatal "missed writer" error.
+
+#### 7.9.4 MMIO
+
+`MMIOHandler::Install` keeps its range table; on the web it skips
+`arch::ExceptionHandler::Install` (the SDK comment there already says MMIO is handled by
+the `REX_MM_*` macros and the fault handler is only for write tracking). W-S07 proves the
+28 `REX_MM_*` sites cover every MMIO access. In debug web builds, `REX_LOAD_*`/`REX_STORE_*`
+assert `!REX_IS_MMIO_ADDR(addr)` (cost only in debug).
+
+#### 7.9.5 Threads and the GPU worker
+
+| Thread | Native | Web |
+| --- | --- | --- |
+| Browser main thread | — | JS shell: canvas, input, audio context, import UI. Never runs wasm code except tiny exported getters. |
+| App main (`PROXY_TO_PTHREAD`) | `main()` + SDL UI loop | `main()` + `WebWindowedAppContext` loop: `CallInUIThread` queue, app lifecycle. **Does not paint.** |
+| Command processor (`XHostThread`, "GPU Commands") | records/submits GPU work | **The GPU worker**: owns the `OffscreenCanvas`, the WebGPU device, presenter painting, ImGui drawing, and receives window input events |
+| Guest `XThread`s, kernel dispatch, VSync, audio, XMA, disk | pthreads | pthreads (pool of 48) |
+| Timer thread | (POSIX timers) | one pthread running guest timers |
+
+The command processor must stay an `XHostThread`: it runs guest interrupt callbacks itself
+(`GraphicsSystem::DispatchInterruptCallback` uses `XThread::GetCurrentThread()`).
+
+**Canvas transfer.** The app sets `pthread_attr` transferred canvases (Emscripten
+`emscripten_pthread_attr_settransferredcanvases(&attr, "#canvas")`) for the command
+processor thread only. The web threading layer exposes
+`rex::thread::web::SetTransferredCanvasesForNextThread(const char*)`, which
+`WebGpuGraphicsSystem::Setup` calls right before the SDK creates the worker thread.
+
+**Yielding.** One function, used at every point where the GPU worker would wait:
+
+```cpp
+// rex/thread/web_yield.h. Returns to the worker's event loop (WebGPU callbacks run, the
+// OffscreenCanvas presents), then resumes. timeout_ms = 0: yield once.
+void rex::thread::web::YieldToEventLoop(uint32_t timeout_ms);
+```
+
+- Implementation A (default): `-sJSPI`; `YieldToEventLoop` is `emscripten_sleep(timeout)`,
+  a JSPI-suspending import. Needs JSPI on pthreads (W-S05).
+- Implementation B (fallback): `-sASYNCIFY` with `-sASYNCIFY_ONLY=[...]` listing only the
+  functions on the GPU worker's stack between its entry and the yield calls (XHostThread
+  entry → `CommandProcessor::WorkerThreadMain` → `ExecutePrimaryBuffer` → packet handlers
+  that wait). Guest code never yields, so it is not instrumented.
+- Call sites (W-L06): `CommandProcessor::WorkerThreadMain`'s idle wait (replaces the
+  5 ms `rex::thread::Wait` with `YieldToEventLoop(1)` after polling the write pointer and
+  the UI-paint flag); the `WAIT_REG_MEM`/`WAIT_REG_EQ` spin loops (yield between polls);
+  after `IssueSwap` has painted (7.9.7).
+
+**Window input on the GPU worker.** The web `Window` (`ui/web/window_web.cpp`) queues input
+events from the input ring (7.9.6) and dispatches them to listeners (ImGui drawer, app
+hotkeys, keyboard input driver) **on the GPU worker**, right before painting. All UI
+drawer code therefore runs on one thread, as natively on the UI thread.
+
+#### 7.9.6 Shared-memory layouts (main thread JS ↔ wasm)
+
+Both blocks are allocated by wasm (`aligned_alloc(64, ...)`) and their addresses exported
+(`trials_hd_web_input_block()`, `trials_hd_web_audio_ring()`); JS views them through
+`wasmMemory.buffer` (a `SharedArrayBuffer`). Little-endian, `BigInt` for 64-bit offsets.
+
+```cpp
+struct WebPadState {            // standard Gamepad mapping
+  uint32_t connected;           // 0/1
+  uint32_t buttons;             // bit i = buttons[i].pressed, i = 0..16
+  float axes[4];                // LX, LY, RX, RY in -1..1
+  float triggers[2];            // buttons[6].value, buttons[7].value
+};
+struct WebInputEvent {          // 16 bytes
+  uint32_t type;                // 1 key down, 2 key up, 3 pointer move, 4 pointer down,
+                                // 5 pointer up, 6 wheel, 7 text (code = UTF-32), 8 focus, 9 blur
+  uint32_t code;                // SDL scancode (keys), button (pointer), char (text)
+  int32_t x, y;                 // canvas pixels (pointer), wheel deltas * 120
+};
+struct WebInputBlock {
+  std::atomic<uint32_t> pad_seq;        // seqlock: JS increments to odd, writes, increments to even
+  uint32_t pad_count;
+  WebPadState pads[4];
+  std::atomic<uint32_t> event_head;     // written by JS
+  std::atomic<uint32_t> event_tail;     // written by wasm (GPU worker)
+  WebInputEvent events[256];            // ring
+  uint32_t canvas_width, canvas_height; // device pixels
+  float device_pixel_ratio;
+  uint32_t visible;                     // document.visibilityState == "visible"
+};
+
+struct WebAudioRing {
+  std::atomic<uint32_t> write_frame;    // producer: web audio driver (pthread)
+  std::atomic<uint32_t> read_frame;     // consumer: AudioWorklet
+  uint32_t capacity_frames;             // 8192
+  uint32_t sample_rate;                 // AudioContext.sampleRate (48000 typical)
+  uint32_t channels;                    // 2
+  std::atomic<uint32_t> underruns;
+  float samples[8192 * 2];              // interleaved
+};
+```
+
+JS sides: `web/input.js` (W-S18) fills `WebInputBlock` from `keydown`/`keyup`
+(`KeyboardEvent.code` → SDL scancode table), pointer/wheel events on the canvas, and
+`navigator.getGamepads()` once per `requestAnimationFrame`. `web/audio_worklet.js` (W-L12)
+reads `WebAudioRing`.
+
+#### 7.9.7 Renderer on the web
+
+- `WebGpuProvider` (web): `wgpu::CreateInstance(nullptr)`, `RequestAdapter` /
+  `RequestDevice` with `CallbackMode::AllowSpontaneous` and a `YieldToEventLoop` loop until
+  the callback fired (startup only). Required limits: request
+  `maxStorageBufferBindingSize`/`maxBufferSize` ≥ 512 MiB if the adapter offers it, else
+  W-L09's split mirror. Features: as native minus `Unorm16TextureFormats` (use
+  `texture-formats-tier1`), minus Dawn toggles and backend validation.
+- Surface: `wgpu::EmscriptenSurfaceSourceCanvasHTMLSelector{"#canvas"}` on the GPU worker
+  (the transferred canvas is addressable by its selector there).
+- **Presenter paint mode** `kGuestOutputThreadWithUI` (new, web only, SDK
+  `ui/presenter.cpp`): the guest-output (GPU worker) thread paints guest output **and** UI
+  drawers. `IssueSwap` → `RefreshGuestOutput` → `PaintAndPresent(true)` on the GPU worker,
+  then `YieldToEventLoop(0)` so the browser presents. When no swap happens for 50 ms but a
+  UI paint was requested (settings menu open while paused), the idle loop paints UI-only.
+- `device_mutex()` stays (uncontended on the web).
+- Error scopes and the `WaitAny` calls listed in 9.1 become `AllowSpontaneous` callbacks;
+  test captures complete asynchronously and write the PNG from the callback.
+
+#### 7.9.8 Files
+
+- WasmFS with the OPFS backend mounted at `/opfs`. Layout:
+  `/opfs/trials_hd/assets/` (game data, including `default.xex` and
+  `package_license.toml`), `/opfs/trials_hd/home/` (`HOME`/`XDG_DATA_HOME` for saves and
+  profiles), `/opfs/trials_hd/trials_hd.toml` (settings; `GetExecutableFolder()` returns
+  `/opfs/trials_hd` on the web), `/opfs/trials_hd/cache/` (shader storage).
+- Startup arguments come from the page URL query (`?log_level=info&draw_resolution_scale_x=2`)
+  plus `--game_data_root=/opfs/trials_hd/assets`.
+- Import (W-L10): a dedicated wasm entry `trials_hd_import(path_or_handle)` runs in a worker
+  with the C++ STFS extractor (W-S13); progress goes to the page through a shared counter.
+
+#### 7.9.9 Audio
+
+`audio/web/web_audio_driver.cpp` implements the SDK `AudioDriver` interface (as
+`sdl_audio_driver` does): `SubmitFrame` converts to float and writes into `WebAudioRing`,
+blocking (condition wait with timeout) when the ring is full, which paces the audio
+worker like the SDL callback does natively. The page creates the `AudioContext` on the
+first user gesture and posts the ring's buffer and offset to the worklet.
+
+#### 7.9.10 Static GPU plugin
+
+```cpp
+// rex/system/gpu_plugin.h (all platforms; used only on the web)
+void RegisterStaticGpuPlugin(std::string_view name, GpuAbiVersionFn abi, GpuCreateFn create);
+```
+
+`LoadGpuPlugin` on the web looks the name up in that registry instead of loading a file.
+The renderer, built as a static library when `TRIALSHD_WEB`, exposes
+`rex_gpu_webgpu_register()` (calls `RegisterStaticGpuPlugin("webgpu", ...)`), and
+`src/web/web_main.cpp` calls it before `ReXApp` setup (no static-initializer tricks; the
+linker would drop them). The Vulkan plugin is not built for the web.
+
+#### 7.9.11 Build layout
+
+- `CMakeLists.txt`: `option(TRIALSHD_WEB ... OFF)`; `if(TRIALSHD_WEB AND NOT EMSCRIPTEN)
+  message(FATAL_ERROR ...)`; with `TRIALSHD_WEB`, `TRIALSHD_WEBGPU` builds
+  `rexgpu-webgpu` as `STATIC` and skips Dawn (`--use-port=emdawnwebgpu` instead).
+- Preset `web-wasm64-release` (binary dir `out/build/web-wasm64-release`); flags in 10.2.
+- New directories: `src/web/` (app web glue, `web_main.cpp`), `web/` (`shell.html`,
+  `input.js`, `audio_worklet.js`, `import.js`), `tools/web/` (`serve.py`, `cdp.py`,
+  `spikes/`), and the SDK's `*/web/` backends.
+
+#### 7.9.12 Interface ownership
+
+| Interface | Defined in | Implemented by task |
+| --- | --- | --- |
+| `REX_PLATFORM_EMSCRIPTEN`, header fixes | `rex/platform.h` etc. | W-S10, W-S11 |
+| Fold table, `rex_web_*` store helpers, `setFromMaskPs/Epi8` | `rex/memory/web_fold.h`, codegen | W-L02 |
+| Window, heaps, `MarkGuestWrite`, `DeliverPhysicalWrites`, dirty bitmap | `rex/memory/web_dirty.h`, `xmemory.cpp`, `memory_emscripten.cpp` | W-L04 |
+| Consumers of delivery, verify mode | `shared_memory.cpp`, `primitive_processor.cpp`, renderer | W-L05 |
+| `YieldToEventLoop`, transferred canvas, timer thread | `rex/thread/web_yield.h`, `threading_posix.cpp` | W-L06, W-L15 |
+| `kGuestOutputThreadWithUI`, web `Window`, `WebWindowedAppContext` | SDK `ui/` | W-L06, W-L08 |
+| Renderer web paths | `src/gpu_webgpu/` | W-L07, W-L09 |
+| `WebInputBlock`, `input.js` | `src/web/web_input.h`, `web/input.js` | W-L08, W-S18 |
+| `WebAudioRing`, worklet, web audio driver | `src/web/web_audio.h`, SDK `audio/web/` | W-L12 |
+| OPFS layout, import entry | `src/web/web_files.*`, `web/import.js` | W-L10 |
+| `RegisterStaticGpuPlugin` | `rex/system/gpu_plugin.h` | W-L15 |
 
 ---
 
@@ -1014,7 +1354,7 @@ Every task's "Done when" implicitly includes **`tools/check_native.sh check` pas
 | W-S11 | todo | S | wasm `FPSCRPlatform` (section 6 item 2): shadow register for `getcsr`/`setcsr`, no-op flush; log (debug builds) when a guest rounding mode other than nearest is set. Also log natively which rounding modes the 5 `storeFromGuest` sites set during rides. | W-S10 | Natively: modes listed in 14.6; wasm: header compiles |
 | W-S12 | todo | S | Browser WebGPU draw-cost benchmark page: 1,500 draws/frame with per-draw `setBindGroup` (dynamic offsets) and `setPipeline` changes like the renderer (renderer doc 7.5); report ms/frame in Chromium here vs the same program natively with Dawn (`tools/webgpu_smoke` can host the native half). | W-S04 | Table in 9.6 |
 | W-S13 | todo | S | Port `tools/stfs_extract.py` to C++ (`tools/stfs_extract/stfs_extract.cpp`, library + CLI), byte-identical output on the user's package. | — | `cmp -r` of both extractions is empty; CLI added to native CMake as an optional tool |
-| W-S14 | todo | S | `tools/web/serve.py`: static server on `127.0.0.1:8080` with COOP/COEP/CORP headers, `application/wasm`, brotli/gzip pre-compressed files, no directory listing outside the build folder. | — | `curl -I` shows the headers; a test page reports `crossOriginIsolated === true` |
+| W-S14 | claimed pi-gpt 2026-10-15 | S | `tools/web/serve.py`: static server on `127.0.0.1:8080` with COOP/COEP/CORP headers, `application/wasm`, brotli/gzip pre-compressed files, no directory listing outside the build folder. | — | `curl -I` shows the headers; a test page reports `crossOriginIsolated === true` |
 | W-S15 | todo | S | `tools/web/cdp.py`: minimal CDP client (stdlib + `websockets` from `.venv`): launch Chromium with 11.1 flags, open URL, stream console to a file, `evaluate` JS, screenshot, and run `tests/headless/*.txt` commands through a page hook. | W-S14 | Runs a demo script against W-S04's page and saves a screenshot |
 | W-S16 | todo | M | Pipeline warm-up: on startup, read the OPFS shader storage and create pipelines with `createRenderPipelineAsync` before the menu appears (design note from W-L10). | W-L10 | First menu frame has no shader-compile stalls > 50 ms in the console timing log |
 | W-S17 | todo | S | Web section for the README (dev): build steps (10.1), the localhost-only rule (D12), browser requirements, import steps. No public hosting instructions. | WM2 | README section reviewed by a large model |
@@ -1024,7 +1364,7 @@ Every task's "Done when" implicitly includes **`tools/check_native.sh check` pas
 
 | ID | Status | Task | Depends | Read first | Done when |
 | --- | --- | --- | --- | --- | --- |
-| W-L01 | claimed claude-opus-5.5 2026-10-15 | **Web platform design note.** Turn sections 7–9 into concrete interfaces: the `REX_PLATFORM_EMSCRIPTEN` layer, the memory-model macro and helpers (7.2, 8.1), the dirty-bitmap API (8.3), the SAB layouts for input and audio, the GPU-worker yield points (7.4), the ImGui draw-list mailbox (9.4). Write it into this document. | — | 3, 7, 8, 9 | Design note merged; W-S05, W-S16, W-S18 unblocked |
+| W-L01 | done 2026-10-15 (section 7.9) | **Web platform design note.** Turn sections 7–9 into concrete interfaces: the `REX_PLATFORM_EMSCRIPTEN` layer, the memory-model macro and helpers (7.2, 8.1), the dirty-bitmap API (8.3), the SAB layouts for input and audio, the GPU-worker yield points (7.4), the ImGui draw-list mailbox (9.4). Write it into this document. | — | 3, 7, 8, 9 | Design note merged; W-S05, W-S16, W-S18 unblocked |
 | W-L02 | todo | **Codegen changes.** Emit `setFromMaskPs`/`setFromMaskEpi8` (section 6 item 5) for all targets; emit the web memory macros (`REX_PHYS_HOST_OFFSET` replacement and the dirty-marking store) under `__EMSCRIPTEN__`; keep native output identical apart from the renamed method. | W-L01 | `src/codegen/builders/{memory,vector,context}.cpp`, 3.3 | Native build boots, golden scenes unchanged; all 107 files compile with `em++` without the spike's scratch headers |
 | W-L03 | todo | **Memory-model cost.** Build a micro-benchmark from real generated functions (a physics-heavy one and a VMX-heavy one, driven with captured inputs) for native, wasm32 and wasm64; then compare the full game's busiest guest threads once WM1 runs. Decide A vs B (7.1) with numbers. | W-S03, W-S10, W-S11 | 7.1, 7.2 | Table of ns/call in 7.1; decision recorded in 1 (D1) |
 | W-L04 | todo | **Runtime memory for the web** (`xmemory.cpp`, `memory_posix.cpp` → `memory_emscripten.cpp`): one linear-memory window, folded physical views, bookkeeping-only protection, `MarkPhysicalWritten`, the dirty bitmap and write epochs; `TranslateVirtual`/`TranslatePhysical`/`GetPhysicalAddress` consistent with the macro. | W-L01 | 3.4, 8.1, 8.3 | Unit test (native-hosted with the web memory model compiled in): guest writes through all three views land in the same physical bytes; bitmap bits match the writes |
@@ -1057,6 +1397,22 @@ W-L06/W-L07 (graphics).
 
 ### 16.6 Notes log
 
+- 2026-10-15 (pi-gpt): claimed W-S14 (localhost server); next work will be W-S15
+  and browser spikes if unclaimed. Staying in `tools/web/` and this document to avoid
+  Claude's W-L01 work. Native guard uses `out/native_baseline_pi`; serialize native
+  headless runs with `flock out/native-web-check.lock` (the runner shares `out/run`).
+
+- 2026-10-15 (claude-opus-5.5): **W-L01 done** — design note in 7.9. Findings while writing
+  it (read from code): each SDK heap already adds a per-heap `host_address_offset` in
+  `TranslateVirtual`, so the fold is that offset made signed on the web; the native view
+  table also aliases `0x9…` → `0x8…` and `0x7F…` → physical, so the window is 2.75 GiB;
+  the command processor runs guest interrupt callbacks (`DispatchInterruptCallback`), so
+  it stays an `XHostThread` and becomes the GPU worker; the presenter's existing
+  guest-thread paint mode excludes UI drawers, so the web needs `kGuestOutputThreadWithUI`;
+  `MMIOHandler::Install` documents that MMIO goes through `REX_MM_*` and the fault handler
+  only serves write tracking; generated code also writes through raw pointers (≈5,700
+  vector stores, 285 CAS, 86 `dcbz` memsets), all listed in 7.9.3. Unblocked: W-S05,
+  W-S16 (needs W-L10), W-S18 (needs W-L08), W-L02, W-L04, W-L08, W-L10, W-L12.
 - 2026-10-15 (claude-opus-5.5): added D14 and section 7.8 (isolation from the native
   builds) and `tools/check_native.sh` (baseline/check). Ran baseline + check on an unchanged
   tree: PASSED (WebGPU worst 40.5 dB, Vulkan 44.9 dB); negative test with a tampered
