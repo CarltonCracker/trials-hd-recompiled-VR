@@ -1427,6 +1427,16 @@ W-L06/W-L07 (graphics).
 
 ### 16.6 Notes log
 
+- 2026-10-15 (pi-gpt): W-S01 browser measurement passed (`b2b504e`), but the first
+  native guard caught Claude's concurrent W-L02 regeneration: generated fingerprint
+  changed, while both visual checks passed (WebGPU 44.4 dB, Vulkan 38.3 dB).
+  Reviewed against `out/generated_backup` (all 219 files match the old baseline):
+  exactly 5,672 vector-store, 285 CAS, and 86 cache-zero expressions became native
+  identity macros; no other `.cpp`/`.h` changes except appended PCH definitions.
+  Existing PCH text is byte-identical; web replacements are `__EMSCRIPTEN__` only.
+  Re-recording the permitted reviewed-codegen baseline, then rerunning the guard.
+  W-S01 stays claimed until that passes; no concurrent agent's code was overwritten.
+
 - 2026-10-15 (pi-gpt): **W-S14 done**, commit `9b5a087`. Seven server tests pass;
   `curl -I` verifies WASM MIME + COOP/COEP/CORP; Chromium 154 reports
   `crossOriginIsolated=true`. `flock out/native-web-check.lock tools/check_native.sh
