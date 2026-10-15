@@ -88,6 +88,13 @@ Select the WebGPU renderer at launch with:
 ./out/build/linux-amd64-relwithdebinfo/trials_hd --gpu_plugin=webgpu
 ```
 If WebGPU device initialization fails, `trials_hd` automatically falls back to `xenos` (Vulkan).
+The renderer can also be chosen in the F1 settings menu (applies after a restart).
+
+It renders the whole game, including GPU particles, at any `draw_resolution_scale`.
+Debugging and profiling switches: `--webgpu_validation=true` (Dawn validation, slower),
+`--webgpu_debug_labels=true` (pass and draw labels for RenderDoc), and
+`--webgpu_profile=true` (GPU time per pass category and the 10 most expensive passes, logged
+once a second).
 
 ## 3. Run
 

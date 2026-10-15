@@ -1911,7 +1911,7 @@ debugging. Several can run in parallel once L-01 to L-03 exist.
 | L-13 | todo (partial 2026-10-15: async luminance readback, scaled readback averaging; occlusion queries open) | **Queries, fences, readbacks.** Occlusion query results (after RE of how Trials uses them), async luminance readback, sync modes for testing. | L-09, L-12 | 8.10, `ExecutePacketType3_EVENT_WRITE_ZPD` | exposure behaves like the Vulkan build; no stalls |
 | L-14 | todo (partial 2026-10-15: 60/120 FPS caps pass check_fps_log; windowed present verified on RTX 2070 under Xvfb; fullscreen/resize not tested) | **Presenter completion.** Gamma ramp (S-20), FPS pacing and FPS-unlock interplay, present modes, resize, fullscreen, headless capture parity with the Vulkan presenter. | L-02, S-20 | 8.11 | `tests/check_fps_log.py` passes at 60, 120 and uncapped |
 | L-15 | todo | **Parity loop (M6).** Run the golden scenes, find the worst diff, trace it to a draw with S-26 dumps and RenderDoc, fix, repeat. Owns the per-scene thresholds. | L-04*, L-08–L-13, S-32 | 11 | all golden scenes pass |
-| L-16 | todo (partial 2026-10-15: 720p uncapped riding 174 FPS, 2x 71 FPS on RX 6600; see notes log) | **Performance to 240 FPS (M7).** Profile CPU and GPU against the 7.5 budget; remove per-draw allocations and locks; bind-group caching; Dawn toggles; shadow-map resolution setting; dummy-draw skip. | L-15, S-15, S-28 | 7.5 | 7.5 budget table filled with measured numbers; ≥ 2× today's 1440p FPS |
+| L-16 | todo (partial 2026-10-15: 720p uncapped riding ~192 FPS, 2x 72 FPS on RX 6600; see notes log) | **Performance to 240 FPS (M7).** Profile CPU and GPU against the 7.5 budget; remove per-draw allocations and locks; bind-group caching; Dawn toggles; shadow-map resolution setting; dummy-draw skip. | L-15, S-15, S-28 | 7.5 | 7.5 budget table filled with measured numbers; ≥ 2× today's 1440p FPS |
 | L-17 | todo | **D3D front-end (M7b).** Hook draws, resolve, present and the commit functions (section 6); fill `DrawSnapshot` from the device register shadow; stop the guest building PM4 for draws while keeping fences, interrupts and swap timing correct. | L-16, S-09 | 6, 7.2, `src/fps_unlock.cpp` (hook style), `src/gpu_wait.cpp` | identical golden-scene results; CP decode time gone; 240 FPS target re-measured |
 | L-18 | todo | **macOS (M9).** Dawn Metal build on Apple Silicon, `CAMetalLayer` surface, `.dylib` staging, feature fallbacks, parity on golden scenes, thermal-friendly defaults. | L-15 | 10.5 | golden scenes pass on a Mac |
 | L-19 | todo | **Game-specific layer.** Validate and enable the dummy-draw skip; investigate ultrawide and true 1080p (camera and HUD reverse engineering, building on `src/render_pose.h`). | L-15 | 8.13 | documented findings; optional features behind settings |
@@ -2534,3 +2534,11 @@ finding: `YYYY-MM-DD <agent> <task ID>: what changed; evidence; what is left`.
   - Note: another agent's uncommitted `src/exit_button.cpp` in the shared tree caused guest
     access violations at boot in 3 runs (both renderers); tests used an executable relinked
     without it.
+- 2026-10-15 claude-opus-5.5 L-16 (continued): round-trip transfer skipping (targets track
+  content versions and copy origins; giving tiles back to an unchanged origin is free),
+  per-register dirty bits removed (unused, ~4% of the CP thread), texture bind groups reused
+  by shaders + fetch constants while the texture cache epoch is unchanged. 720p riding
+  184 → ~192 FPS (min > 120), GPU 71–85% busy, CP thread ~80%. 2x 72 FPS (Vulkan 76.5).
+  Hello World and The Breakdown parity: 37–48 dB except timing-dependent frames.
+  Remaining CP cost: Dawn submit recording ~17%, SDK register writes ~9%, shared-memory
+  requests ~7%, transfers ~6%.
