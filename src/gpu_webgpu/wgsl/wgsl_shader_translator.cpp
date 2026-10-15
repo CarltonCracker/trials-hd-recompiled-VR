@@ -15,6 +15,112 @@ namespace rex::graphics::webgpu {
 
 namespace {
 constexpr char kComponentChars[] = {'x', 'y', 'z', 'w'};
+
+// Memory export of the written eM# selected by `mask`, following
+// SpirvShaderTranslator::ExportToMemory: eA holds the stream (base address in
+// dwords, eM0's index, format info, element count) as integers in floats.
+// shortcut: 8- and 16-bit-per-element formats (sub-dword stores) are skipped.
+constexpr char kMemExportFunctions[] = R"(
+fn xe_memexport_int(v: vec4f, widths: vec4u, is_signed: bool, is_norm: bool) -> u32 {
+  var packed = 0u;
+  var offset = 0u;
+  for (var i = 0u; i < 4u; i++) {
+    let width = widths[i];
+    if (width == 0u) {
+      break;
+    }
+    var x = select(v[i], 0.0, v[i] != v[i]);
+    var bits: u32;
+    if (is_signed) {
+      if (is_norm) {
+        x = clamp(x, -1.0, 1.0) * f32((1u << (width - 1u)) - 1u);
+      }
+      bits = bitcast<u32>(i32(x + select(0.5, -0.5, x < 0.0)));
+    } else {
+      if (is_norm) {
+        x = clamp(x, 0.0, 1.0) * f32((1u << width) - 1u);
+      }
+      bits = u32(max(x + 0.5, 0.0));
+    }
+    packed = insertBits(packed, bits, offset, width);
+    offset += width;
+  }
+  return packed;
+}
+
+fn xe_memexport_swap(v: vec4u, endian: u32) -> vec4u {
+  switch (endian) {
+    case 4u: {
+      let s = xe_endian_swap4(v, 2u);
+      return s.yxwz;
+    }
+    case 5u: {
+      let s = xe_endian_swap4(v, 2u);
+      return s.wzyx;
+    }
+    default: {
+      return xe_endian_swap4(v, endian);
+    }
+  }
+}
+
+fn xe_memexport(mask: u32) {
+  let eA = bitcast<vec4u>(xe_eA);
+  if (any((eA >> vec4u(30u, 23u, 23u, 23u)) != vec4u(1u, 0x96u, 0x96u, 0x96u))) {
+    return;
+  }
+  let format_info = eA.z;
+  let is_signed = (format_info & (1u << 16u)) != 0u;
+  let is_norm = (format_info & (1u << 17u)) == 0u;
+  let format = extractBits(format_info, 8u, 6u);
+  let endian = format_info & 7u;
+  let eM0_index = eA.y & 0x7FFFFFu;
+  let count = eA.w & 0x7FFFFFu;
+  // Dwords per element (0: unsupported).
+  var dwords = 1u;
+  switch (format) {
+    case 6u, 14u, 50u, 7u, 54u, 16u, 55u, 17u, 56u, 25u, 31u, 36u: {}
+    case 26u, 32u, 37u: { dwords = 2u; }
+    case 38u: { dwords = 4u; }
+    default: { return; }
+  }
+  let base = (eA.x << 2u) >> 2u;
+  for (var i = 0u; i < 5u; i++) {
+    if ((mask & xe_eM_written & (1u << i)) == 0u || eM0_index + i >= count) {
+      continue;
+    }
+    var v = xe_eM[i];
+    if ((format_info & (1u << 19u)) != 0u) {
+      v = v.zyxw;
+    }
+    var packed = vec4u(0u);
+    switch (format) {
+      case 6u, 14u, 50u: { packed.x = xe_memexport_int(v, vec4u(8u), is_signed, is_norm); }
+      case 7u, 54u: { packed.x = xe_memexport_int(v, vec4u(10u, 10u, 10u, 2u), is_signed, is_norm); }
+      case 16u, 55u: { packed.x = xe_memexport_int(v, vec4u(11u, 11u, 10u, 0u), is_signed, is_norm); }
+      case 17u, 56u: { packed.x = xe_memexport_int(v, vec4u(10u, 11u, 11u, 0u), is_signed, is_norm); }
+      case 25u: { packed.x = xe_memexport_int(v, vec4u(16u, 16u, 0u, 0u), is_signed, is_norm); }
+      case 26u: {
+        packed.x = xe_memexport_int(v.xyxy, vec4u(16u, 16u, 0u, 0u), is_signed, is_norm);
+        packed.y = xe_memexport_int(v.zwzw, vec4u(16u, 16u, 0u, 0u), is_signed, is_norm);
+      }
+      case 31u: { packed.x = pack2x16float(select(v.xy, vec2f(0.0), v.xy != v.xy)); }
+      case 32u: {
+        let f = select(v, vec4f(0.0), v != v);
+        packed = vec4u(pack2x16float(f.xy), pack2x16float(f.zw), 0u, 0u);
+      }
+      default: { packed = bitcast<vec4u>(v); }
+    }
+    packed = xe_memexport_swap(packed, endian);
+    let address = base + (eM0_index + i) * dwords;
+    for (var d = 0u; d < dwords; d++) {
+      if (address + d < arrayLength(&xe_shared_memory)) {
+        xe_shared_memory[address + d] = packed[d];
+      }
+    }
+  }
+}
+)";
 }  // namespace
 
 uint64_t WgslShaderTranslator::GetDefaultVertexShaderModification(
@@ -152,6 +258,7 @@ void WgslShaderTranslator::EmitDeclarations(std::string& out) const {
   ndc_scale: vec4f,
   ndc_offset: vec4f,
   color_output_scale: vec4f,
+  memexport_vertex_count: u32,
 }
 )";
   out += fmt::format("@group({}) @binding({}) var<uniform> xe_system: XeSystem;\n",
@@ -167,8 +274,9 @@ void WgslShaderTranslator::EmitDeclarations(std::string& out) const {
                      wgsl_binding::kGroupDraw, wgsl_binding::kFetchConstants);
   if (is_vertex_shader()) {
     out += fmt::format(
-        "@group({}) @binding({}) var<storage, read> xe_shared_memory: array<u32>;\n",
-        wgsl_binding::kGroupSharedMemory, wgsl_binding::kSharedMemory);
+        "@group({}) @binding({}) var<storage, {}> xe_shared_memory: array<u32>;\n",
+        wgsl_binding::kGroupSharedMemory, wgsl_binding::kSharedMemory,
+        modification().memexport_compute ? "read_write" : "read");
   }
   std::vector<TextureSlot> slots = GetTextureSlots(shader);
   for (uint32_t i = 0; i < slots.size(); ++i) {
@@ -289,6 +397,10 @@ fn xe_fetch_word(index: u32) -> u32 {
     out += "var<private> xe_out_point_misc: vec4f;\n";
     out += "var<private> xe_eA: vec4f;\n";
     out += "var<private> xe_eM: array<vec4f, 5>;\n";
+    out += "var<private> xe_eM_written: u32;\n";
+    if (modification().memexport_compute) {
+      out += kMemExportFunctions;
+    }
   } else {
     out += "var<private> xe_out_color: array<vec4f, 4>;\n";
     out += "var<private> xe_out_depth: f32;\n";
@@ -357,12 +469,28 @@ fn xe_run_vertex(index: u32) {
   xe_out_position = vec4f(0.0);
   xe_out_interpolators = array<vec4f, 16>();
   xe_out_point_misc = vec4f(0.0);
+  xe_eA = vec4f(0.0);
+  xe_eM = array<vec4f, 5>();
+  xe_eM_written = 0u;
 )";
   if (register_count()) {
     out += "  xe_r[0].x = f32(index);\n";
   }
   out += "  xe_main_body();\n}\n\n";
 
+  if (modification.memexport_compute) {
+    out += fmt::format(R"(@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) xe_id: vec3u) {{
+  if (xe_id.x >= xe_system.memexport_vertex_count) {{
+    return;
+  }}
+  xe_run_vertex(xe_vertex_index(xe_id.x));
+  xe_memexport({}u);
+}}
+)",
+                       current_shader().memexport_eM_potentially_written_before_end());
+    return;
+  }
   out += "@vertex\nfn main(@builtin(vertex_index) xe_vertex_index_in: u32) -> XeVertexOut {\n";
   out += "  var xe_output: XeVertexOut;\n";
   if (!rectangle_list) {
@@ -647,8 +775,16 @@ void WgslShaderTranslator::ProcessJumpInstruction(const ParsedJumpInstruction& i
 
 void WgslShaderTranslator::ProcessAllocInstruction(const ParsedAllocInstruction& instr,
                                                    uint8_t export_eM) {
-  // Memory export (eA/eM# writes) is emitted by the memexport compute path
-  // (task L-04g); for drawing, the exports are dropped.
+  // Memory export only in the compute variant; for drawing, the exports are
+  // dropped (they ran in the compute dispatch before the draw).
+  if (!export_eM || !is_vertex_shader() || !modification().memexport_compute) {
+    return;
+  }
+  EndPredicate();
+  EndExecCondition();
+  Line(fmt::format("xe_memexport({}u);", export_eM));
+  Line("xe_eM_written = 0u;");
+  Line("xe_eM = array<vec4f, 5>();");
 }
 
 std::string WgslShaderTranslator::StorageIndex(InstructionStorageAddressingMode mode,
@@ -764,6 +900,7 @@ void WgslShaderTranslator::StoreResult(const InstructionResult& result, const st
         return;
       }
       target = fmt::format("xe_eM[{}]", result.storage_index);
+      Line(fmt::format("xe_eM_written |= {}u;", 1u << result.storage_index));
       break;
     case InstructionStorageTarget::kColor:
       if (is_vertex_shader()) {

@@ -13,6 +13,7 @@
 #include <webgpu/webgpu_cpp.h>
 
 #include "draw_snapshot.h"
+#include "pipeline_cache.h"
 
 namespace rex::memory {
 class Memory;
@@ -62,6 +63,11 @@ class WebGpuBackend {
 
  private:
   bool IsTracedFrame(uint32_t frame_index) const;
+  // Runs a memory-exporting vertex shader as compute (L-04g).
+  void MemExport(const DrawSnapshot& draw);
+  wgpu::BindGroup GetTextureBindGroup(const RegisterFile& regs, const Shader& vertex_shader,
+                                      const Shader* pixel_shader,
+                                      TextureLayoutSignature texture_signature);
   void EnsureDumpOpen(uint32_t frame_index);
   void DumpDraw(const DrawSnapshot& draw);
   void DumpResolve(const ResolveSnapshot& resolve);
@@ -84,6 +90,7 @@ class WebGpuBackend {
   std::unique_ptr<DrawExtentEstimator> draw_extent_estimator_;
   wgpu::BindGroup draw_bind_group_;
   wgpu::BindGroup shared_memory_bind_group_;
+  wgpu::BindGroup shared_memory_rw_bind_group_;
   uint32_t skipped_draws_ = 0;
 };
 

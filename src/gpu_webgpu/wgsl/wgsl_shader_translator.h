@@ -57,7 +57,9 @@ struct WgslSystemConstants {
   // Per color target: multiplier applied to the shader output (exponent bias
   // times the host format's range scale).
   float color_output_scale[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-  uint32_t padding[44] = {};
+  // Memory export compute variant: guest vertices to run.
+  uint32_t memexport_vertex_count = 0;
+  uint32_t padding[43] = {};
 };
 static_assert(sizeof(WgslSystemConstants) == 256);
 
@@ -79,6 +81,10 @@ class WgslShaderTranslator : public ShaderTranslator {
       uint32_t param_gen_point : 1;
       // Pixel shaders: color targets bound in the pipeline (outputs declared).
       uint32_t color_targets : 4;
+      // Vertex shaders with memory export: a compute entry point running the
+      // shader once per guest vertex and writing eM# to shared memory, since
+      // WebGPU vertex shaders can't write storage (L-04g).
+      uint32_t memexport_compute : 1;
     };
   };
   static_assert(sizeof(Modification) == sizeof(uint64_t));

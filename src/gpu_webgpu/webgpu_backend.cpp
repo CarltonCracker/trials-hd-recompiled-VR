@@ -130,6 +130,7 @@ WebGpuBackend::~WebGpuBackend() {
   }
   draw_bind_group_ = nullptr;
   shared_memory_bind_group_ = nullptr;
+  shared_memory_rw_bind_group_ = nullptr;
   State().texture_bind_groups.clear();
   resolve_engine_.reset();
   texture_cache_.reset();
@@ -238,6 +239,9 @@ bool WebGpuBackend::Initialize(memory::Memory& memory, const RegisterFile& regis
   shared_desc.entryCount = 1;
   shared_desc.entries = &shared_entry;
   shared_memory_bind_group_ = device.CreateBindGroup(&shared_desc);
+  shared_desc.label = "shared memory (writable)";
+  shared_desc.layout = pipeline_cache_->shared_memory_rw_bind_group_layout();
+  shared_memory_rw_bind_group_ = device.CreateBindGroup(&shared_desc);
 
   // Frontbuffer blit.
   BlitResources& blit = State().blit;
@@ -520,57 +524,10 @@ uint32_t PackFloatConstants(const RegisterFile& regs, const Shader& shader, uint
 
 }  // namespace
 
-bool WebGpuBackend::Draw(const DrawSnapshot& draw) {
-  const RegisterFile& regs = *draw.regs;
-  if (IsTracedFrame(draw.frame_index)) {
-    REXGPU_INFO(
-        "webgpu trace: frame {} draw {}: prim {} count {} indexed {} (fmt {} endian {} base "
-        "0x{:08X}) vs {:016X} ps {:016X} dirty 0x{:02X} surface_info 0x{:08X} color_info "
-        "0x{:08X} depth_info 0x{:08X}",
-        draw.frame_index, draw.draw_index, uint32_t(draw.primitive_type), draw.index_count,
-        draw.indexed, uint32_t(draw.index_buffer.format), uint32_t(draw.index_buffer.endianness),
-        draw.index_buffer.guest_base, ShaderHash(draw.vertex_shader),
-        ShaderHash(draw.pixel_shader), draw.dirty, regs.values[XE_GPU_REG_RB_SURFACE_INFO],
-        regs.values[XE_GPU_REG_RB_COLOR_INFO], regs.values[XE_GPU_REG_RB_DEPTH_INFO]);
-  }
-  DumpDraw(draw);
-  std::lock_guard lock(provider_.device_mutex());
-  if (!shared_memory_) {
-    return false;
-  }
-  xenos::EdramMode edram_mode = regs.Get<reg::RB_MODECONTROL>().edram_mode;
-  if (edram_mode != xenos::EdramMode::kColorDepth && edram_mode != xenos::EdramMode::kDepthOnly) {
-    return true;
-  }
-  Shader* vertex_shader = draw.vertex_shader;
-  if (!vertex_shader) {
-    return false;
-  }
-  bool primitive_polygonal = draw_util::IsPrimitivePolygonal(regs);
-  if (!draw_util::IsRasterizationPotentiallyDone(regs, primitive_polygonal)) {
-    // Memory export only (L-04g) or nothing visible.
-    return true;
-  }
-  Shader* pixel_shader = draw.pixel_shader;
-  if (edram_mode == xenos::EdramMode::kDepthOnly ||
-      (pixel_shader &&
-       !draw_util::IsPixelShaderNeededWithRasterization(*pixel_shader, regs))) {
-    pixel_shader = nullptr;
-  }
-
-  // Guest memory read by the vertex shader. Anything that may submit (and
-  // so flush staged uniforms and indices) happens before this draw stages
-  // its own data.
-  for (const Shader::VertexBinding& binding : vertex_shader->vertex_bindings()) {
-    xenos::xe_gpu_vertex_fetch_t fetch = regs.GetVertexFetch(binding.fetch_constant);
-    if (fetch.type != xenos::FetchConstantType::kVertex || !fetch.size) {
-      continue;
-    }
-    shared_memory_->RequestRange(fetch.address << 2, fetch.size << 2);
-  }
-  // Textures (loading may also submit).
-  TextureLayoutSignature texture_signature =
-      TextureLayoutSignature::Get(*vertex_shader, pixel_shader);
+wgpu::BindGroup WebGpuBackend::GetTextureBindGroup(const RegisterFile& regs,
+                                                   const Shader& vertex_shader,
+                                                   const Shader* pixel_shader,
+                                                   TextureLayoutSignature texture_signature) {
   wgpu::BindGroup texture_bind_group = pipeline_cache_->empty_texture_bind_group();
   if (texture_signature.value) {
     std::vector<wgpu::BindGroupEntry> entries;
@@ -598,7 +555,7 @@ bool WebGpuBackend::Draw(const DrawSnapshot& draw) {
     if (pixel_shader) {
       add_stage(*pixel_shader, 0);
     }
-    add_stage(*vertex_shader, wgsl_binding::kVertexTextureBase);
+    add_stage(vertex_shader, wgsl_binding::kVertexTextureBase);
     auto& bind_groups = State().texture_bind_groups;
     auto it = bind_groups.find(bind_group_hash);
     if (it != bind_groups.end()) {
@@ -613,6 +570,64 @@ bool WebGpuBackend::Draw(const DrawSnapshot& draw) {
       bind_groups.emplace(bind_group_hash, texture_bind_group);
     }
   }
+  return texture_bind_group;
+}
+
+bool WebGpuBackend::Draw(const DrawSnapshot& draw) {
+  const RegisterFile& regs = *draw.regs;
+  if (IsTracedFrame(draw.frame_index)) {
+    REXGPU_INFO(
+        "webgpu trace: frame {} draw {}: prim {} count {} indexed {} (fmt {} endian {} base "
+        "0x{:08X}) vs {:016X} ps {:016X} dirty 0x{:02X} surface_info 0x{:08X} color_info "
+        "0x{:08X} depth_info 0x{:08X}",
+        draw.frame_index, draw.draw_index, uint32_t(draw.primitive_type), draw.index_count,
+        draw.indexed, uint32_t(draw.index_buffer.format), uint32_t(draw.index_buffer.endianness),
+        draw.index_buffer.guest_base, ShaderHash(draw.vertex_shader),
+        ShaderHash(draw.pixel_shader), draw.dirty, regs.values[XE_GPU_REG_RB_SURFACE_INFO],
+        regs.values[XE_GPU_REG_RB_COLOR_INFO], regs.values[XE_GPU_REG_RB_DEPTH_INFO]);
+  }
+  DumpDraw(draw);
+  std::lock_guard lock(provider_.device_mutex());
+  if (!shared_memory_) {
+    return false;
+  }
+  xenos::EdramMode edram_mode = regs.Get<reg::RB_MODECONTROL>().edram_mode;
+  if (edram_mode != xenos::EdramMode::kColorDepth && edram_mode != xenos::EdramMode::kDepthOnly) {
+    return true;
+  }
+  Shader* vertex_shader = draw.vertex_shader;
+  if (!vertex_shader) {
+    return false;
+  }
+  if (vertex_shader->memexport_eM_written()) {
+    MemExport(draw);
+  }
+  bool primitive_polygonal = draw_util::IsPrimitivePolygonal(regs);
+  if (!draw_util::IsRasterizationPotentiallyDone(regs, primitive_polygonal)) {
+    return true;  // Memory export only, or nothing visible.
+  }
+  Shader* pixel_shader = draw.pixel_shader;
+  if (edram_mode == xenos::EdramMode::kDepthOnly ||
+      (pixel_shader &&
+       !draw_util::IsPixelShaderNeededWithRasterization(*pixel_shader, regs))) {
+    pixel_shader = nullptr;
+  }
+
+  // Guest memory read by the vertex shader. Anything that may submit (and
+  // so flush staged uniforms and indices) happens before this draw stages
+  // its own data.
+  for (const Shader::VertexBinding& binding : vertex_shader->vertex_bindings()) {
+    xenos::xe_gpu_vertex_fetch_t fetch = regs.GetVertexFetch(binding.fetch_constant);
+    if (fetch.type != xenos::FetchConstantType::kVertex || !fetch.size) {
+      continue;
+    }
+    shared_memory_->RequestRange(fetch.address << 2, fetch.size << 2);
+  }
+  // Textures (loading may also submit).
+  TextureLayoutSignature texture_signature =
+      TextureLayoutSignature::Get(*vertex_shader, pixel_shader);
+  wgpu::BindGroup texture_bind_group =
+      GetTextureBindGroup(regs, *vertex_shader, pixel_shader, texture_signature);
   frame_recorder_->ReserveUniforms(4 * 4096);
 
   PrimitiveProcessor::ProcessingResult primitive;
@@ -925,6 +940,82 @@ bool WebGpuBackend::Draw(const DrawSnapshot& draw) {
       break;
   }
   return true;
+}
+
+void WebGpuBackend::MemExport(const DrawSnapshot& draw) {
+  const RegisterFile& regs = *draw.regs;
+  Shader& vertex_shader = *draw.vertex_shader;
+  uint32_t count = draw.index_count;
+  std::vector<draw_util::MemExportRange> ranges;
+  draw_util::AddMemExportRanges(regs, vertex_shader, ranges);
+  if (!count || ranges.empty()) {
+    return;
+  }
+  // Older CPU data first (the shader may not overwrite whole elements).
+  for (const draw_util::MemExportRange& range : ranges) {
+    shared_memory_->RequestRange(range.base_address_dwords << 2, range.size_bytes);
+  }
+  for (const Shader::VertexBinding& binding : vertex_shader.vertex_bindings()) {
+    xenos::xe_gpu_vertex_fetch_t fetch = regs.GetVertexFetch(binding.fetch_constant);
+    if (fetch.type == xenos::FetchConstantType::kVertex && fetch.size) {
+      shared_memory_->RequestRange(fetch.address << 2, fetch.size << 2);
+    }
+  }
+  WgslSystemConstants system;
+  if (draw.indexed) {
+    // The compute variant reads the guest indices itself.
+    bool is_32bit = draw.index_buffer.format == xenos::IndexFormat::kInt32;
+    shared_memory_->RequestRange(draw.index_buffer.guest_base, count << (is_32bit ? 2 : 1));
+    system.flags |= WgslSystemConstants::kVertexIndexLoad;
+    if (is_32bit) {
+      system.flags |= WgslSystemConstants::kVertexIndexLoad32Bit;
+    }
+    system.vertex_index_load_address = draw.index_buffer.guest_base;
+    system.vertex_index_endian = uint32_t(draw.index_buffer.endianness);
+  }
+  system.vertex_base_index = regs.Get<int32_t>(XE_GPU_REG_VGT_INDX_OFFSET);
+  system.vertex_index_min = regs.Get<uint32_t>(XE_GPU_REG_VGT_MIN_VTX_INDX);
+  system.vertex_index_max = regs.Get<uint32_t>(XE_GPU_REG_VGT_MAX_VTX_INDX);
+  system.memexport_vertex_count = count;
+  TextureLayoutSignature texture_signature = TextureLayoutSignature::Get(vertex_shader, nullptr);
+  wgpu::BindGroup texture_bind_group =
+      GetTextureBindGroup(regs, vertex_shader, nullptr, texture_signature);
+  WgslShaderTranslator::Modification modification;
+  modification.dynamic_addressable_register_count = vertex_shader.GetDynamicAddressableRegisterCount(
+      regs.Get<reg::SQ_PROGRAM_CNTL>().vs_num_reg);
+  modification.memexport_compute = 1;
+  wgpu::ComputePipeline pipeline =
+      pipeline_cache_->GetMemExportPipeline(vertex_shader, modification.value, texture_signature);
+  if (!pipeline) {
+    return;
+  }
+  frame_recorder_->ReserveUniforms(4 * 4096);
+  std::array<uint32_t, 5> offsets;
+  offsets[0] = frame_recorder_->UploadUniforms(&system, sizeof(system));
+  std::array<float, 1024> constants;
+  uint32_t constant_count =
+      PackFloatConstants(regs, vertex_shader, regs.Get<reg::SQ_VS_CONST>().base, constants);
+  offsets[1] = frame_recorder_->UploadUniforms(constants.data(), constant_count * 16);
+  offsets[2] = offsets[1];
+  offsets[3] = frame_recorder_->UploadUniforms(
+      &regs.values[XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031], 40 * sizeof(uint32_t));
+  offsets[4] = frame_recorder_->UploadUniforms(&regs.values[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0],
+                                               192 * sizeof(uint32_t));
+  frame_recorder_->EndRenderPass();
+  wgpu::ComputePassDescriptor pass_desc;
+  pass_desc.label = "guest memory export";
+  wgpu::ComputePassEncoder pass = frame_recorder_->encoder().BeginComputePass(&pass_desc);
+  pass.SetPipeline(pipeline);
+  pass.SetBindGroup(0, draw_bind_group_, offsets.size(), offsets.data());
+  pass.SetBindGroup(1, shared_memory_rw_bind_group_);
+  pass.SetBindGroup(2, texture_bind_group);
+  pass.DispatchWorkgroups((count + 63) / 64);
+  pass.End();
+  // The CPU copy is now stale; keep the GPU data (no readback, as with
+  // readback_memexport off in the Vulkan backend).
+  for (const draw_util::MemExportRange& range : ranges) {
+    shared_memory_->RangeWrittenByGpu(range.base_address_dwords << 2, range.size_bytes);
+  }
 }
 
 bool WebGpuBackend::Resolve(const ResolveSnapshot& resolve) {

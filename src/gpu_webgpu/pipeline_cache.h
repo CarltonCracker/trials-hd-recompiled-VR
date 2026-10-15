@@ -85,6 +85,12 @@ class PipelineCache {
   const wgpu::BindGroupLayout& shared_memory_bind_group_layout() const {
     return shared_memory_layout_;
   }
+  const wgpu::BindGroupLayout& shared_memory_rw_bind_group_layout() const {
+    return shared_memory_rw_layout_;
+  }
+  // The memory export compute variant of a vertex shader (L-04g).
+  wgpu::ComputePipeline GetMemExportPipeline(Shader& vertex_shader, uint64_t modification,
+                                             TextureLayoutSignature signature);
   const wgpu::BindGroupLayout& GetTextureBindGroupLayout(TextureLayoutSignature signature);
   const wgpu::BindGroup& empty_texture_bind_group() const { return empty_texture_group_; }
 
@@ -112,11 +118,14 @@ class PipelineCache {
 
   wgpu::BindGroupLayout draw_layout_;
   wgpu::BindGroupLayout shared_memory_layout_;
+  wgpu::BindGroupLayout shared_memory_rw_layout_;
+  std::unordered_map<ModuleKey, wgpu::ComputePipeline, ModuleKeyHash> memexport_pipelines_;
   wgpu::BindGroupLayout texture_layout_;
   wgpu::BindGroup empty_texture_group_;
   struct TextureLayouts {
     wgpu::BindGroupLayout bind_group_layout;
     wgpu::PipelineLayout pipeline_layout;
+    wgpu::PipelineLayout memexport_pipeline_layout;
   };
   std::unordered_map<uint32_t, TextureLayouts> texture_layouts_;
   const TextureLayouts& GetTextureLayouts(TextureLayoutSignature signature);

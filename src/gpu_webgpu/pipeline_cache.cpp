@@ -26,6 +26,11 @@ REXCVAR_DEFINE_STRING(webgpu_dump_shaders, "", "GPU/WebGPU",
 namespace rex::graphics::webgpu {
 
 namespace {
+// Vertex shader resources are also read by their memory export compute variant.
+constexpr wgpu::ShaderStage kVertexStages = wgpu::ShaderStage::Vertex | wgpu::ShaderStage::Compute;
+}  // namespace
+
+namespace {
 
 constexpr char kNullPixelShader[] = "@fragment fn main() {}\n";
 
@@ -75,7 +80,7 @@ const PipelineCache::TextureLayouts& PipelineCache::GetTextureLayouts(
   };
   add_stage(signature.pixel_count, signature.pixel_cube_mask, 0, wgpu::ShaderStage::Fragment);
   add_stage(signature.vertex_count, signature.vertex_cube_mask, wgsl_binding::kVertexTextureBase,
-            wgpu::ShaderStage::Vertex);
+            kVertexStages);
   TextureLayouts layouts;
   wgpu::BindGroupLayoutDescriptor desc;
   desc.label = "textures";
@@ -89,6 +94,9 @@ const PipelineCache::TextureLayouts& PipelineCache::GetTextureLayouts(
   layout_desc.bindGroupLayoutCount = groups.size();
   layout_desc.bindGroupLayouts = groups.data();
   layouts.pipeline_layout = provider_.device().CreatePipelineLayout(&layout_desc);
+  groups[1] = shared_memory_rw_layout_;
+  layout_desc.label = "guest memory export";
+  layouts.memexport_pipeline_layout = provider_.device().CreatePipelineLayout(&layout_desc);
   return texture_layouts_.emplace(signature.value, std::move(layouts)).first->second;
 }
 
@@ -125,14 +133,12 @@ bool PipelineCache::Initialize() {
     uint64_t size;
   };
   static constexpr UniformEntry kUniforms[] = {
-      {wgsl_binding::kSystemConstants, wgpu::ShaderStage::Vertex | wgpu::ShaderStage::Fragment,
+      {wgsl_binding::kSystemConstants, kVertexStages | wgpu::ShaderStage::Fragment,
        sizeof(WgslSystemConstants)},
-      {wgsl_binding::kVertexFloatConstants, wgpu::ShaderStage::Vertex, 4096},
+      {wgsl_binding::kVertexFloatConstants, kVertexStages, 4096},
       {wgsl_binding::kPixelFloatConstants, wgpu::ShaderStage::Fragment, 4096},
-      {wgsl_binding::kBoolLoopConstants, wgpu::ShaderStage::Vertex | wgpu::ShaderStage::Fragment,
-       160},
-      {wgsl_binding::kFetchConstants, wgpu::ShaderStage::Vertex | wgpu::ShaderStage::Fragment,
-       768},
+      {wgsl_binding::kBoolLoopConstants, kVertexStages | wgpu::ShaderStage::Fragment, 160},
+      {wgsl_binding::kFetchConstants, kVertexStages | wgpu::ShaderStage::Fragment, 768},
   };
   std::array<wgpu::BindGroupLayoutEntry, 5> draw_entries;
   for (size_t i = 0; i < draw_entries.size(); ++i) {
@@ -158,6 +164,11 @@ bool PipelineCache::Initialize() {
   shared_desc.entryCount = 1;
   shared_desc.entries = &shared_entry;
   shared_memory_layout_ = device.CreateBindGroupLayout(&shared_desc);
+  // Writable for the memory export compute variant of vertex shaders.
+  shared_entry.visibility = wgpu::ShaderStage::Compute;
+  shared_entry.buffer.type = wgpu::BufferBindingType::Storage;
+  shared_desc.label = "shared memory (writable)";
+  shared_memory_rw_layout_ = device.CreateBindGroupLayout(&shared_desc);
 
   // Group 2: textures (L-04d); empty until texture fetch is translated.
   wgpu::BindGroupLayoutDescriptor texture_desc;
@@ -176,6 +187,8 @@ bool PipelineCache::Initialize() {
   layout_desc.bindGroupLayoutCount = layouts.size();
   layout_desc.bindGroupLayouts = layouts.data();
   texture_layouts_[0].pipeline_layout = device.CreatePipelineLayout(&layout_desc);
+  layouts[1] = shared_memory_rw_layout_;
+  texture_layouts_[0].memexport_pipeline_layout = device.CreatePipelineLayout(&layout_desc);
 
   wgpu::ShaderSourceWGSL wgsl;
   wgsl.code = kNullPixelShader;
@@ -231,6 +244,27 @@ wgpu::ShaderModule PipelineCache::GetShaderModule(Shader& shader, uint64_t modif
   }
   modules_.emplace(key, module);
   return module;
+}
+
+wgpu::ComputePipeline PipelineCache::GetMemExportPipeline(Shader& vertex_shader,
+                                                          uint64_t modification,
+                                                          TextureLayoutSignature signature) {
+  ModuleKey key{vertex_shader.ucode_data_hash() ^ signature.value, modification};
+  auto it = memexport_pipelines_.find(key);
+  if (it != memexport_pipelines_.end()) {
+    return it->second;
+  }
+  wgpu::ComputePipeline pipeline;
+  if (wgpu::ShaderModule module = GetShaderModule(vertex_shader, modification)) {
+    wgpu::ComputePipelineDescriptor desc;
+    desc.label = "guest memory export";
+    desc.layout = GetTextureLayouts(signature).memexport_pipeline_layout;
+    desc.compute.module = module;
+    desc.compute.entryPoint = "main";
+    pipeline = provider_.device().CreateComputePipeline(&desc);
+  }
+  memexport_pipelines_.emplace(key, pipeline);
+  return pipeline;
 }
 
 wgpu::RenderPipeline PipelineCache::GetPipeline(const PipelineKey& key, Shader& vertex_shader,
