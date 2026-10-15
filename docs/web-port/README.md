@@ -1567,7 +1567,7 @@ Every task's "Done when" implicitly includes **`tools/check_native.sh check` pas
 | W-L12 | todo | **Audio**: FFmpeg for wasm (XMA only), web audio driver with an AudioWorklet and SAB ring, AudioContext unlock on first gesture (8.5). | W-L01 | 8.5, SDK `src/audio/` | WM5 |
 | W-L13 | todo | **Option B (wasm32 remapped window)** if W-L03 or Safari requires it: heap range limits in the SDK, segment table macro, 32-bit pointer audit. | W-L03 | 7.1 | Same golden checks as WM2/WM4 in a wasm32 build |
 | W-L14 | todo | **Review gate** for small-model work: review each `review` task within a day; check native builds still pass. | — | 16.1 | Ongoing |
-| W-L15 | todo | **Web build system** (10.1, 10.2): `web-wasm64-release` preset, `TRIALSHD_WEB` (OFF by default, `FATAL_ERROR` without Emscripten, 7.8), static WebGPU renderer library, third-party subset, shell HTML, link flags; boots to WM1 with the GPU plugin stubbed. Also: kernel/threading web layer (timers thread, affinity no-ops, exception handler and `dlopen` compiled out, fibers per W-S08, sockets stubbed). | W-L01, W-L02, W-L04, W-S10, W-S11 | 3.5, 8.2, 8.4, 10 | WM1 |
+| W-L15 | claimed claude-opus-5.5 2026-10-15 | **Web build system** (10.1, 10.2): `web-wasm64-release` preset, `TRIALSHD_WEB` (OFF by default, `FATAL_ERROR` without Emscripten, 7.8), static WebGPU renderer library, third-party subset, shell HTML, link flags; boots to WM1 with the GPU plugin stubbed. Also: kernel/threading web layer (timers thread, affinity no-ops, exception handler and `dlopen` compiled out, fibers per W-S08, sockets stubbed). | W-L01, W-L02, W-L04, W-S10, W-S11 | 3.5, 8.2, 8.4, 10 | WM1 |
 
 ### 16.5 Order and parallelism
 
@@ -1585,6 +1585,13 @@ details of W-L04 to W-L09. The critical path is W-L01 → W-L02/W-L04 → W-L15 
 W-L06/W-L07 (graphics).
 
 ### 16.6 Notes log
+
+- 2026-10-15 (claude-opus-5.5): claimed **W-L15** (critical path to WM1) while W-L02,
+  W-S10 and W-S11 finish: starting with what does not depend on codegen - the SDK's web
+  platform layer (`*_emscripten.cpp`, `threading_posix.cpp` web branches, timer thread),
+  `TRIALSHD_WEB` / `web-wasm64-release` CMake, the static GPU-plugin registry and a stub
+  renderer. Generated code is linked once W-L02 lands. Free for others meanwhile:
+  W-L08, W-L10 (after W-S13), W-L12, W-L06 design work, and the S tasks.
 
 - 2026-10-15 (claude-opus-5.5): **W-L04 → `review` (needs macOS check, 7.8)**. Web
   runtime memory: `memory_emscripten.cpp` (`sbrk` guest window, bookkeeping page APIs,
