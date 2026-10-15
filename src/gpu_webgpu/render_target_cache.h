@@ -76,6 +76,16 @@ class RenderTargetCache {
     uint32_t height = 0;
   };
 
+  // A draw that fully overwrites the samples it covers in some targets (a
+  // Direct3D 9 clear rectangle): transfers of tile rows it covers are skipped,
+  // like the SDK's elide_rt_transfers.
+  struct Overwrite {
+    // Bit 0: depth/stencil, bit 1 + i: color target i.
+    uint32_t mask = 0;
+    // Covered guest pixels [x0, x1) x [y0, y1).
+    int32_t x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+  };
+
   RenderTargetCache(ui::webgpu::WebGpuProvider& provider, FrameRecorder& frame_recorder,
                     uint32_t scale_x, uint32_t scale_y);
   ~RenderTargetCache();
@@ -89,7 +99,7 @@ class RenderTargetCache {
   // would be drawn (no targets).
   // `rows`: guest pixel rows the draw can write (DrawExtentEstimator).
   bool Update(const RegisterFile& regs, uint32_t color_targets_used, bool depth_stencil_used,
-              uint32_t rows, Binding& binding_out);
+              uint32_t rows, const Overwrite& overwrite, Binding& binding_out);
 
   // Host format for a guest color/depth format (with feature fallbacks).
   wgpu::TextureFormat GetColorHostFormat(xenos::ColorRenderTargetFormat format,
@@ -106,10 +116,14 @@ class RenderTargetCache {
   RenderTarget* GetOrCreate(RenderTargetKey key);
   // Takes ownership of the target's tiles down to `rows` guest pixel rows,
   // transferring tiles owned by other targets (except those in `bound`).
-  void Acquire(RenderTarget* target, uint32_t rows, const Binding* bound);
+  // `overwrite`: the draw fully overwrites this target in that rectangle.
+  void Acquire(RenderTarget* target, uint32_t rows, const Binding* bound,
+               const Overwrite* overwrite = nullptr);
   void Transfer(RenderTarget* source, RenderTarget* dest, uint32_t tile_first,
                 uint32_t tile_count);
   bool InitializeTransfer();
+  static bool CoversTiles(const RenderTarget& target, uint32_t tile_first, uint32_t tile_end,
+                          const Overwrite& overwrite);
 
   ui::webgpu::WebGpuProvider& provider_;
   FrameRecorder& frame_recorder_;

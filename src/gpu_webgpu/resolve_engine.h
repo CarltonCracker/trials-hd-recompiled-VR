@@ -25,6 +25,7 @@ class WebGpuProvider;
 namespace rex::graphics::webgpu {
 
 class FrameRecorder;
+class GpuProfiler;
 class RenderTargetCache;
 class TextureCache;
 struct RenderTarget;
@@ -41,6 +42,7 @@ class ResolveEngine {
         texture_cache_(texture_cache) {}
 
   bool Initialize();
+  void set_gpu_profiler(GpuProfiler* profiler) { gpu_profiler_ = profiler; }
 
   // Performs the copy part of a resolve (not the clears) from the source
   // target (RenderTargetCache::GetForResolve). Returns false if it was dropped.
@@ -73,6 +75,7 @@ class ResolveEngine {
 
   ui::webgpu::WebGpuProvider& provider_;
   memory::Memory& memory_;
+  GpuProfiler* gpu_profiler_ = nullptr;
   FrameRecorder& frame_recorder_;
   RenderTargetCache& render_target_cache_;
   TextureCache& texture_cache_;

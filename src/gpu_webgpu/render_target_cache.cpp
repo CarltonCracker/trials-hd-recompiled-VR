@@ -143,7 +143,8 @@ RenderTarget* RenderTargetCache::GetOrCreate(RenderTargetKey key) {
 }
 
 bool RenderTargetCache::Update(const RegisterFile& regs, uint32_t color_targets_used,
-                               bool depth_stencil_used, uint32_t rows, Binding& binding_out) {
+                               bool depth_stencil_used, uint32_t rows,
+                               const Overwrite& overwrite, Binding& binding_out) {
   binding_out = {};
   auto surface_info = regs.Get<reg::RB_SURFACE_INFO>();
   uint32_t pitch = surface_info.surface_pitch;
@@ -192,13 +193,14 @@ bool RenderTargetCache::Update(const RegisterFile& regs, uint32_t color_targets_
   binding_out.width = width;
   binding_out.height = height;
 
-  for (RenderTarget* target : binding_out.color) {
-    if (target) {
-      Acquire(target, rows, &binding_out);
+  for (uint32_t i = 0; i < binding_out.color.size(); ++i) {
+    if (binding_out.color[i]) {
+      Acquire(binding_out.color[i], rows, &binding_out,
+              (overwrite.mask & (2u << i)) ? &overwrite : nullptr);
     }
   }
   if (binding_out.depth) {
-    Acquire(binding_out.depth, rows, &binding_out);
+    Acquire(binding_out.depth, rows, &binding_out, (overwrite.mask & 1) ? &overwrite : nullptr);
   }
   return true;
 }
@@ -228,7 +230,8 @@ RenderTarget* RenderTargetCache::GetForResolve(const RegisterFile& regs,
   return target;
 }
 
-void RenderTargetCache::Acquire(RenderTarget* target, uint32_t rows, const Binding* bound) {
+void RenderTargetCache::Acquire(RenderTarget* target, uint32_t rows, const Binding* bound,
+                                const Overwrite* overwrite) {
   uint32_t samples_y = target->key.msaa_samples == uint32_t(xenos::MsaaSamples::k1X) ? 1 : 2;
   uint32_t tile_rows = (rows * samples_y + xenos::kEdramTileHeightSamples - 1) /
                        xenos::kEdramTileHeightSamples;
@@ -256,7 +259,7 @@ void RenderTargetCache::Acquire(RenderTarget* target, uint32_t rows, const Bindi
     if (owner == run_owner) {
       continue;
     }
-    if (run_owner) {
+    if (run_owner && !(overwrite && CoversTiles(*target, run_first, i, *overwrite))) {
       Transfer(run_owner, target, run_first, i - run_first);
     }
     run_owner = owner;
@@ -267,6 +270,19 @@ void RenderTargetCache::Acquire(RenderTarget* target, uint32_t rows, const Bindi
   }
   target->owned_epoch = ownership_epoch_;
   target->owned_tiles = tile_count;
+}
+
+bool RenderTargetCache::CoversTiles(const RenderTarget& target, uint32_t tile_first,
+                                    uint32_t tile_end, const Overwrite& overwrite) {
+  uint32_t samples_x = target.sample_count > 1 ? 2 : 1;
+  uint32_t samples_y = samples_x;
+  int32_t tile_width = int32_t(xenos::kEdramTileWidthSamples / samples_x);
+  int32_t tile_height = int32_t(xenos::kEdramTileHeightSamples / samples_y);
+  // Whole tile rows containing the tiles.
+  int32_t y0 = int32_t(tile_first / target.pitch_tiles) * tile_height;
+  int32_t y1 = int32_t((tile_end + target.pitch_tiles - 1) / target.pitch_tiles) * tile_height;
+  return overwrite.x0 <= 0 && overwrite.x1 >= int32_t(target.pitch_tiles) * tile_width &&
+         overwrite.y0 <= y0 && overwrite.y1 >= y1;
 }
 
 bool RenderTargetCache::InitializeTransfer() {
@@ -467,7 +483,8 @@ void RenderTargetCache::Transfer(RenderTarget* source, RenderTarget* dest, uint3
   }
   dest->initialized = true;
   wgpu::PassTimestampWrites timestamp_writes;
-  if (gpu_profiler_ && gpu_profiler_->BeginPass(PassCategory::kTransfer, timestamp_writes)) {
+  if (gpu_profiler_ && gpu_profiler_->BeginPass(PassCategory::kTransfer, timestamp_writes,
+                                                (source->key.value << 32) ^ dest->key.value)) {
     pass_desc.timestampWrites = &timestamp_writes;
   }
   wgpu::RenderPassEncoder pass = frame_recorder_.encoder().BeginRenderPass(&pass_desc);

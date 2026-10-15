@@ -112,7 +112,8 @@ bool GpuProfiler::is_enabled() const {
   return legacy == "true" || legacy == "1";
 }
 
-bool GpuProfiler::BeginPass(PassCategory category, wgpu::PassTimestampWrites& writes_out) {
+bool GpuProfiler::BeginPass(PassCategory category, wgpu::PassTimestampWrites& writes_out,
+                            uint64_t tag) {
   if (!is_enabled()) {
     return false;
   }
@@ -131,7 +132,7 @@ bool GpuProfiler::BeginPass(PassCategory category, wgpu::PassTimestampWrites& wr
   }
   uint32_t begin_query = slot.query_count++;
   uint32_t end_query = slot.query_count++;
-  slot.intervals.push_back({category, begin_query, end_query});
+  slot.intervals.push_back({category, begin_query, end_query, tag});
 
   writes_out.querySet = query_set_;
   writes_out.beginningOfPassWriteIndex = begin_query;
@@ -203,6 +204,7 @@ void GpuProfiler::ProcessReadback(uint32_t slot_index) {
         if (t1 >= t0) {
           uint64_t diff = t1 - t0;
           category_ns_[static_cast<size_t>(interval.category)] += diff;
+          tag_ns_[(uint64_t(interval.category) << 56) ^ interval.tag] += diff;
           frame_total_ns += diff;
         }
       }
@@ -232,6 +234,18 @@ void GpuProfiler::ProcessReadback(uint32_t slot_index) {
         cat_ms(PassCategory::kPost), cat_ms(PassCategory::kResolve), cat_ms(PassCategory::kUI),
         cat_ms(PassCategory::kTransfer), cat_ms(PassCategory::kMemExport), frames_counted_);
 
+    std::vector<std::pair<uint64_t, uint64_t>> tags(tag_ns_.begin(), tag_ns_.end());
+    std::sort(tags.begin(), tags.end(),
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+    std::string top;
+    for (size_t i = 0; i < std::min(tags.size(), size_t(10)); ++i) {
+      top += fmt::format(" [{} {:X}: {:.2f}]",
+                         PassCategoryName(PassCategory(tags[i].first >> 56)),
+                         tags[i].first & ((uint64_t(1) << 56) - 1),
+                         double(tags[i].second) / 1e6 / frames);
+    }
+    REXGPU_INFO("gpu top passes (ms/frame):{}", top);
+    tag_ns_.clear();
     total_ns_ = 0;
     std::fill(category_ns_.begin(), category_ns_.end(), 0);
     frames_counted_ = 0;

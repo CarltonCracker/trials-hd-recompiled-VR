@@ -16,6 +16,7 @@
 #include <rex/memory.h>
 
 #include "frame_recorder.h"
+#include "gpu_profiler.h"
 #include "render_target_cache.h"
 #include "texture_cache.h"
 #include "webgpu_provider.h"
@@ -268,6 +269,11 @@ bool ResolveEngine::Copy(const draw_util::ResolveInfo& info, RenderTarget& sourc
   pass_desc.label = "resolve";
   pass_desc.colorAttachmentCount = 1;
   pass_desc.colorAttachments = &attachment;
+  wgpu::PassTimestampWrites timestamp_writes;
+  if (gpu_profiler_ && gpu_profiler_->BeginPass(PassCategory::kResolve, timestamp_writes,
+                                                source->key.value)) {
+    pass_desc.timestampWrites = &timestamp_writes;
+  }
   wgpu::RenderPassEncoder pass = frame_recorder_.encoder().BeginRenderPass(&pass_desc);
   pass.SetPipeline(pipeline);
   pass.SetBindGroup(0, bind_group, 1, &constants_offset);

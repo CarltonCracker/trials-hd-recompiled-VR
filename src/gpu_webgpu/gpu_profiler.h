@@ -5,6 +5,7 @@
 #pragma once
 
 #include <array>
+#include <unordered_map>
 #include <chrono>
 #include <cstdint>
 #include <vector>
@@ -32,7 +33,7 @@ const char* PassCategoryName(PassCategory category);
 
 class GpuProfiler {
  public:
-  static constexpr uint32_t kMaxQueriesPerFrame = 512;
+  static constexpr uint32_t kMaxQueriesPerFrame = 4096;
   static constexpr uint32_t kRingSlots = 8;
 
   explicit GpuProfiler(ui::webgpu::WebGpuProvider& provider);
@@ -45,7 +46,9 @@ class GpuProfiler {
 
   // Prepares timestamp writes for the beginning and end of a pass in `category`.
   // Returns true and populates `writes_out` if a query pair is available.
-  bool BeginPass(PassCategory category, wgpu::PassTimestampWrites& writes_out);
+  // `tag` groups passes in the per-tag report (for example a render target key).
+  bool BeginPass(PassCategory category, wgpu::PassTimestampWrites& writes_out,
+                 uint64_t tag = 0);
 
   // Resolves queries into the resolve buffer for the current frame.
   void EndFrame(const wgpu::CommandEncoder& encoder);
@@ -58,6 +61,7 @@ class GpuProfiler {
     PassCategory category;
     uint32_t begin_query;
     uint32_t end_query;
+    uint64_t tag;
   };
 
   struct FrameSlot {
@@ -81,6 +85,7 @@ class GpuProfiler {
   // Accumulated profiling statistics over the reporting window (~1 second).
   std::array<uint64_t, static_cast<size_t>(PassCategory::kCount)> category_ns_ = {};
   uint64_t total_ns_ = 0;
+  std::unordered_map<uint64_t, uint64_t> tag_ns_;
   uint32_t frames_counted_ = 0;
   std::chrono::steady_clock::time_point last_report_time_;
 };

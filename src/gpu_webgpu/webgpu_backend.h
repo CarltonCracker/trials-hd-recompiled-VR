@@ -14,6 +14,7 @@
 
 #include "draw_snapshot.h"
 #include "pipeline_cache.h"
+#include "render_target_cache.h"
 
 namespace rex::memory {
 class Memory;
@@ -65,6 +66,10 @@ class WebGpuBackend {
   bool IsTracedFrame(uint32_t frame_index) const;
   // Runs a memory-exporting vertex shader as compute (L-04g).
   void MemExport(const DrawSnapshot& draw);
+  RenderTargetCache::Overwrite GetOverwrite(const RegisterFile& regs, const Shader& vertex_shader,
+                                            const Shader* pixel_shader,
+                                            reg::RB_DEPTHCONTROL depth_control,
+                                            uint32_t color_mask);
   wgpu::BindGroup GetTextureBindGroup(const RegisterFile& regs, const Shader& vertex_shader,
                                       const Shader* pixel_shader,
                                       TextureLayoutSignature texture_signature,

@@ -233,6 +233,9 @@ bool WebGpuBackend::Initialize(memory::Memory& memory, const RegisterFile& regis
   resolve_engine_ = std::make_unique<ResolveEngine>(provider_, memory, *frame_recorder_,
       *render_target_cache_, *texture_cache_);
   if (!resolve_engine_->Initialize()) { return false; }
+  if (gpu_profiler_ && gpu_profiler_->is_enabled()) {
+    resolve_engine_->set_gpu_profiler(gpu_profiler_.get());
+  }
 
   // Group 0: the uniform ring with one window per binding (7.6.5).
   static constexpr std::array<std::pair<uint32_t, uint64_t>, 5> kUniformWindows = {{
@@ -712,7 +715,10 @@ bool WebGpuBackend::Draw(const DrawSnapshot& draw) {
   RenderTargetCache::Binding targets;
   // EDRAM has no height: rows the draw can touch, for tile ownership.
   uint32_t draw_rows = draw_extent_estimator_->EstimateMaxY(true, *vertex_shader);
-  if (!render_target_cache_->Update(regs, color_targets_used, depth_used, draw_rows, targets)) {
+  RenderTargetCache::Overwrite overwrite =
+      GetOverwrite(regs, *vertex_shader, pixel_shader, depth_control, color_mask);
+  if (!render_target_cache_->Update(regs, color_targets_used, depth_used, draw_rows, overwrite,
+                                    targets)) {
     return true;
   }
 
@@ -939,7 +945,9 @@ bool WebGpuBackend::Draw(const DrawSnapshot& draw) {
   wgpu::PassTimestampWrites timestamp_writes;
   bool has_timestamps = false;
   if (new_pass && gpu_profiler_) {
-    has_timestamps = gpu_profiler_->BeginPass(category, timestamp_writes);
+    RenderTarget* tag_target = targets.color[0] ? targets.color[0] : targets.depth;
+    has_timestamps = gpu_profiler_->BeginPass(category, timestamp_writes,
+                                              tag_target ? tag_target->key.value : 0);
   }
   const wgpu::RenderPassEncoder& pass = frame_recorder_->BeginRenderPass(
       pass_targets, pass_label, has_timestamps ? &timestamp_writes : nullptr);
@@ -1031,6 +1039,72 @@ bool WebGpuBackend::Draw(const DrawSnapshot& draw) {
       break;
   }
   return true;
+}
+
+RenderTargetCache::Overwrite WebGpuBackend::GetOverwrite(const RegisterFile& regs,
+                                                         const Shader& vertex_shader,
+                                                         const Shader* pixel_shader,
+                                                         reg::RB_DEPTHCONTROL depth_control,
+                                                         uint32_t color_mask) {
+  // As the SDK's RenderTargetCache::ElideOverwrittenTransfers.
+  RenderTargetCache::Overwrite overwrite;
+  auto rb_colorcontrol = regs.Get<reg::RB_COLORCONTROL>();
+  if ((pixel_shader && pixel_shader->kills_pixels()) ||
+      (rb_colorcontrol.alpha_test_enable &&
+       rb_colorcontrol.alpha_func != xenos::CompareFunction::kAlways)) {
+    return overwrite;
+  }
+  bool depth_passes = !depth_control.z_enable ||
+                      depth_control.zfunc == xenos::CompareFunction::kAlways;
+  bool stencil_passes =
+      !depth_control.stencil_enable ||
+      (depth_control.stencilfunc == xenos::CompareFunction::kAlways &&
+       (!depth_control.backface_enable ||
+        depth_control.stencilfunc_bf == xenos::CompareFunction::kAlways));
+  if (!depth_passes || !stencil_passes) {
+    return overwrite;
+  }
+  auto stencil_ref_mask = regs.Get<reg::RB_STENCILREFMASK>();
+  auto stencil_ref_mask_bf = regs.Get<reg::RB_STENCILREFMASK>(XE_GPU_REG_RB_STENCILREFMASK_BF);
+  if (depth_control.z_enable && depth_control.z_write_enable && depth_control.stencil_enable &&
+      depth_control.stencilzpass == xenos::StencilOp::kReplace &&
+      stencil_ref_mask.stencilwritemask == 0xFF &&
+      (!depth_control.backface_enable ||
+       (depth_control.stencilzpass_bf == xenos::StencilOp::kReplace &&
+        stencil_ref_mask_bf.stencilwritemask == 0xFF))) {
+    overwrite.mask |= 1;
+  }
+  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+    if (((color_mask >> (4 * i)) & 0xF) != 0xF) {
+      continue;
+    }
+    auto blend_control = regs.Get<reg::RB_BLENDCONTROL>(reg::RB_BLENDCONTROL::rt_register_indices[i]);
+    if (blend_control.color_srcblend == xenos::BlendFactor::kOne &&
+        blend_control.color_destblend == xenos::BlendFactor::kZero &&
+        blend_control.color_comb_fcn == xenos::BlendOp::kAdd &&
+        blend_control.alpha_srcblend == xenos::BlendFactor::kOne &&
+        blend_control.alpha_destblend == xenos::BlendFactor::kZero &&
+        blend_control.alpha_comb_fcn == xenos::BlendOp::kAdd) {
+      overwrite.mask |= 2u << i;
+    }
+  }
+  float x0, y0, x1, y1;
+  if (!overwrite.mask ||
+      !draw_extent_estimator_->EstimateRectangleListBounds(vertex_shader, x0, y0, x1, y1)) {
+    overwrite.mask = 0;
+    return overwrite;
+  }
+  // Fully covered whole pixels, clipped by the scissor.
+  draw_util::Scissor scissor;
+  draw_util::GetScissor(regs, scissor, false);
+  overwrite.x0 = std::max(int32_t(std::ceil(x0)), int32_t(scissor.offset[0]));
+  overwrite.y0 = std::max(int32_t(std::ceil(y0)), int32_t(scissor.offset[1]));
+  overwrite.x1 = std::min(int32_t(std::floor(x1)), int32_t(scissor.offset[0] + scissor.extent[0]));
+  overwrite.y1 = std::min(int32_t(std::floor(y1)), int32_t(scissor.offset[1] + scissor.extent[1]));
+  if (overwrite.x0 >= overwrite.x1 || overwrite.y0 >= overwrite.y1) {
+    overwrite.mask = 0;
+  }
+  return overwrite;
 }
 
 void WebGpuBackend::MemExport(const DrawSnapshot& draw) {
