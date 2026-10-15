@@ -440,7 +440,21 @@ bool TextureCache::LoadTexture(Texture& texture) {
     uint32_t chunk_end = std::min(end, (chunk_first + i + 1) << chunk_shift);
     shared_memory_.WatchMemoryRange(chunk_start, chunk_end - chunk_start, WatchCallback, this,
                                     &texture, i);
-    uint64_t hash = XXH3_64bits(guest + chunk_start, chunk_end - chunk_start);
+    // Only the texture's own data: not the gap between the base and the mips.
+    uint64_t hash = 0;
+    auto hash_part = [&](uint32_t part_start, uint32_t part_length) {
+      uint32_t first = std::max(chunk_start, part_start);
+      uint32_t last = std::min(chunk_end, part_start + part_length);
+      if (first < last) {
+        hash = XXH3_64bits_withSeed(guest + first, last - first, hash);
+      }
+    };
+    if (key.base_page) {
+      hash_part(base_address, layout.base.level_data_extent_bytes);
+    }
+    if (key.mip_page && layout.mips_total_extent_bytes) {
+      hash_part(mip_address, layout.mips_total_extent_bytes);
+    }
     changed |= hash != texture.chunk_hashes[i];
     texture.chunk_hashes[i] = hash;
   }
