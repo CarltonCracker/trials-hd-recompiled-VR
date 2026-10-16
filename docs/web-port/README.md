@@ -471,6 +471,29 @@ separate full-game compile check: real headers, no Linux platform spoof, no scra
 include copy, and no regeneration/writes to `generated/default`. Objects go only to
 `out/web-spikes/recomp-objects/` and must never be published.
 
+### 6.1 Exact single-form FMA fast path (W-L16)
+
+Only `fmadds`, `fmsubs`, `fnmadds`, and `fnmsubs` emit `REX_FMA_S`. It expands to
+`std::fma` natively, and `rex::ppc::FmaSingle` on wasm; the surrounding signs and
+`double(float(...))` remain identical. The other 257 double-form calls stay unchanged.
+The helper takes the fast path only for finite inputs whose two multiplicands round-trip
+through float exactly. A binary32 × binary32 product has at most 48 significant bits
+and lies within binary64's exponent range, so multiplication is exact; one double add
+then gives the same rounded double result as fused `std::fma`. Other operands,
+including NaN/Inf, fall back to `std::fma`.
+
+`source ~/emsdk/emsdk_env.sh && tools/web/tests/run_fma_single.sh` passed **12,073,008
+strict bit comparisons on each of native and wasm64**, including raw double results,
+all four generated sign/float-rounding forms, signed zero, subnormals, NaN payloads,
+overflow and non-float cancellation fallback. Wasm microbenchmark: **16.794 → 4.664 ms
+per million calls (3.60×)**. Native behavior is not optimized or changed.
+
+The pinned pre-change Node run (`out/fma-before/`) booted and profiled for 40 seconds.
+After a 10-second warmup, FMA and descendants accounted for **33.14%** of active wasm
+samples (futex waits excluded). `tools/web/tests/fma_profile.py` has a synthetic parser
+self-check and retains every worker's statistics. Full-game post-change profiling and
+native golden verification are required before W-L16 is complete.
+
 ---
 
 ## 7. Architecture
@@ -1837,8 +1860,15 @@ W-L06/W-L07 (graphics).
   parser self-check and records all worker rows; artifacts are `out/fma-before/`.
   The initial runner checked stdout only, but this pinned build logs to `game.log`;
   boot and profile data were revalidated from that log without rerunning/altering data.
-  Upcoming native regeneration changes 6,183 call spellings only, with identity
-  expansion; other agents should expect reviewed generated-fingerprint churn.
+  Native regeneration review passed: **6,183 identity macro replacements in 106
+  files**, 257 double forms unchanged, and no other generated differences (PCH
+  normalization also checked). Other agents should expect that reviewed fingerprint
+  churn. **Native golden gates passed**: vs original pre-FMA captures, worst PSNR is
+  WebGPU 41.5 dB / Vulkan 38.5 dB; final `check_native.sh check
+  out/native_baseline_fma_final` is WebGPU 34.4 dB / Vulkan 39.4 dB (9 captures each),
+  with clean fingerprints and no web symbols in native binaries. Isolated post-change
+  Node compilation/profile remains in progress. Initial configure lacked Ninja in
+  PATH; fixed by using the existing `.venv/bin/ninja`, with no project change.
   User says Claude is restarting again: Pi retains W-L16's three SDK paths and FMA
   tests; Claude's W-L06/W-L07 claims remain untouched. Pi's Node profiling build will
   use `out/build/web-wasm64-fma-profile` to avoid competing in Claude's build folders.
