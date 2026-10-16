@@ -154,7 +154,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_options(rexgpu-webgpu PRIVATE -Wl,--exclude-libs,ALL)
 endif()
 
-# Offline translator check: tools/xenos2wgsl (see its main.cpp).
+# Offline translator check: tools/xenos2wgsl (see its main.cpp), when present.
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/xenos2wgsl/main.cpp)
 add_executable(xenos2wgsl
     ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/xenos2wgsl/main.cpp
     ${REXGPU_WEBGPU_TRANSLATOR_SOURCES}
@@ -173,3 +174,4 @@ target_include_directories(xenos2wgsl PRIVATE
 )
 target_compile_options(xenos2wgsl PRIVATE -fno-strict-aliasing -ffp-model=strict -fno-char8_t)
 target_link_libraries(xenos2wgsl PRIVATE rexruntime xxHash::xxhash)
+endif()
