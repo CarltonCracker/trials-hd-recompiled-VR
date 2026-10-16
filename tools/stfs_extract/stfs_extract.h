@@ -55,7 +55,8 @@ class StfsPackage {
   uint32_t HashBlockNumber(uint32_t idx, int level) const;
   uint64_t HashOffset(uint32_t idx, int level) const;
   const uint8_t* GetTable(uint64_t off);
-  uint32_t NextBlock(uint32_t idx);
+  bool NextBlock(uint32_t idx, uint32_t* next);
+  bool ReadAt(uint64_t off, uint8_t* data, size_t size);
 
   std::filesystem::path path_;
   struct Impl;
@@ -77,6 +78,7 @@ class StfsPackage {
   uint32_t step0_ = 0;
   uint32_t step1_ = 0;
   uint64_t base_ = 0;
+  uint64_t file_size_ = 0;
   std::vector<StfsEntry> entries_;
   std::unordered_map<uint64_t, std::vector<uint8_t>> cache_;
 };

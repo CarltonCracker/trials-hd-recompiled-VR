@@ -1,10 +1,14 @@
 #include "stfs_extract.h"
 
 #include <algorithm>
-#include <cstring>
+#include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <iomanip>
-#include <iostream>
+#include <sstream>
+#include <string_view>
+#include <unordered_set>
+#include <unistd.h>
 
 namespace stfs {
 
@@ -40,6 +44,35 @@ inline uint32_t read_u24le(const uint8_t* p) {
          (static_cast<uint32_t>(p[2]) << 16);
 }
 
+bool Fail(std::string* error, std::string message) {
+  if (error) *error = std::move(message);
+  return false;
+}
+
+bool WriteFile(const std::filesystem::path& destination, const char* data, size_t size,
+               std::string* error) {
+  // Replace only after a complete write, preserving existing files on disk-full errors.
+  std::string temporary = destination.string() + ".tmp.XXXXXX";
+  int fd = mkstemp(temporary.data());
+  if (fd < 0) return Fail(error, "Failed to create temporary file for " + destination.string());
+  std::FILE* file = fdopen(fd, "wb");
+  bool written = false;
+  if (file) {
+    written = size == 0 || std::fwrite(data, 1, size, file) == size;
+    if (std::fclose(file) != 0) written = false;
+  } else {
+    close(fd);
+  }
+  std::error_code ec;
+  if (written) std::filesystem::rename(temporary, destination, ec);
+  if (!written || ec) {
+    std::error_code ignored;
+    std::filesystem::remove(temporary, ignored);
+    return Fail(error, "Failed to write " + destination.string());
+  }
+  return true;
+}
+
 }  // namespace
 
 struct StfsPackage::Impl {
@@ -60,6 +93,7 @@ void StfsPackage::Close() {
   cache_.clear();
   entries_.clear();
   licenses_.clear();
+  file_size_ = 0;
 }
 
 uint32_t StfsPackage::license_mask() const {
@@ -79,12 +113,16 @@ bool StfsPackage::Open(const std::filesystem::path& path, std::string* error) {
     return false;
   }
 
-  std::vector<uint8_t> hdr(0x971A);
-  if (!impl_->file.read(reinterpret_cast<char*>(hdr.data()), hdr.size())) {
-    if (error) *error = "Failed to read header (too short)";
+  auto fail = [&](std::string message) {
     Close();
-    return false;
-  }
+    return Fail(error, std::move(message));
+  };
+  impl_->file.seekg(0, std::ios::end);
+  auto file_size = impl_->file.tellg();
+  if (file_size < 0) return fail("Failed to determine package size");
+  file_size_ = static_cast<uint64_t>(file_size);
+  std::vector<uint8_t> hdr(0x971A);
+  if (!ReadAt(0, hdr.data(), hdr.size())) return fail("Failed to read header (too short)");
 
   std::string_view magic(reinterpret_cast<const char*>(hdr.data()), 4);
   if (magic != "LIVE" && magic != "PIRS" && magic != "CON ") {
@@ -140,18 +178,23 @@ bool StfsPackage::Open(const std::filesystem::path& path, std::string* error) {
   bpht_ = read_only_ ? 1 : 2;
   step0_ = 0xAA + bpht_;
   step1_ = 0x70E4 + (0xAA + 1) * bpht_;
-  base_ = (header_size_ + kBlockSize - 1) & ~static_cast<uint64_t>(kBlockSize - 1);
+  base_ = (uint64_t(header_size_) + kBlockSize - 1) & ~uint64_t(kBlockSize - 1);
+  if (header_size_ < hdr.size() || base_ > file_size_ ||
+      total_blocks_ > kEndOfChain || total_blocks_ > file_size_ / kBlockSize ||
+      ft_block_count_ > total_blocks_) {
+    return fail("Invalid package bounds");
+  }
 
   // Read file listing
   entries_.clear();
   uint32_t blk = ft_block_;
   std::vector<uint8_t> block_buf(kBlockSize);
+  std::unordered_set<uint32_t> seen;
 
   for (uint32_t i = 0; i < ft_block_count_; ++i) {
-    uint64_t off = BlockToOffset(blk);
-    impl_->file.seekg(off, std::ios::beg);
-    if (!impl_->file.read(reinterpret_cast<char*>(block_buf.data()), kBlockSize)) {
-      break;
+    if (blk >= total_blocks_ || !seen.insert(blk).second ||
+        !ReadAt(BlockToOffset(blk), block_buf.data(), kBlockSize)) {
+      return fail("Invalid or truncated file-table chain");
     }
 
     for (int m = 0; m < 0x40; ++m) {
@@ -160,7 +203,12 @@ bool StfsPackage::Open(const std::filesystem::path& path, std::string* error) {
         break;
       }
       uint32_t nl = e[0x28] & 0x3F;
+      if (nl == 0 || nl > 0x28) return fail("Invalid file name length");
       std::string name(reinterpret_cast<const char*>(e), nl);
+      if (name == "." || name == ".." || name.find_first_of("/\\:") != std::string::npos ||
+          name.find('\0') != std::string::npos) {
+        return fail("Unsafe package file name");
+      }
       bool is_dir = (e[0x28] & 0x80) != 0;
       uint32_t start = read_u24le(e + 0x2F);
       uint16_t parent = read_be16(e + 0x32);
@@ -175,27 +223,37 @@ bool StfsPackage::Open(const std::filesystem::path& path, std::string* error) {
       entries_.push_back(std::move(entry));
     }
 
-    blk = NextBlock(blk);
-    if (blk == kEndOfChain) {
-      break;
+    if (!NextBlock(blk, &blk) || seen.contains(blk) ||
+        (blk == kEndOfChain && i + 1 < ft_block_count_)) {
+      return fail("Invalid or truncated file-table chain");
     }
   }
 
-  // Build full paths
-  for (auto& entry : entries_) {
-    std::vector<std::string> parts;
-    parts.push_back(entry.name);
-    uint16_t p = entry.parent;
-    while (p != 0xFFFF && p < entries_.size()) {
-      parts.insert(parts.begin(), entries_[p].name);
-      p = entries_[p].parent;
+  // Resolve each path once; gray nodes detect cycles without recursion.
+  std::vector<uint8_t> state(entries_.size());
+  std::unordered_set<std::string> paths;
+  for (size_t i = 0; i < entries_.size(); ++i) {
+    std::vector<size_t> chain;
+    size_t index = i;
+    while (index < entries_.size() && state[index] != 2) {
+      if (state[index] == 1) return fail("Cyclic package directory parents");
+      state[index] = 1;
+      chain.push_back(index);
+      auto parent = entries_[index].parent;
+      if (parent != 0xFFFF && (parent >= entries_.size() || !entries_[parent].is_dir)) {
+        return fail("Invalid package directory parent");
+      }
+      index = parent == 0xFFFF ? entries_.size() : parent;
     }
-    std::string full_path;
-    for (size_t k = 0; k < parts.size(); ++k) {
-      if (k > 0) full_path += '/';
-      full_path += parts[k];
+    std::string path = index == entries_.size() ? "" : entries_[index].path;
+    for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+      path = path.empty() ? entries_[*it].name : path + '/' + entries_[*it].name;
+      if (path.size() > 4096 || !paths.insert(path).second) {
+        return fail("Duplicate or overlong package path");
+      }
+      entries_[*it].path = path;
+      state[*it] = 2;
     }
-    entry.path = std::move(full_path);
   }
 
   return true;
@@ -230,21 +288,25 @@ uint64_t StfsPackage::HashOffset(uint32_t idx, int level) const {
   return base_ + (static_cast<uint64_t>(HashBlockNumber(idx, level)) << 12);
 }
 
+bool StfsPackage::ReadAt(uint64_t off, uint8_t* data, size_t size) {
+  if (!impl_->file.is_open() || off > file_size_ || size > file_size_ - off) return false;
+  impl_->file.seekg(static_cast<std::streamoff>(off), std::ios::beg);
+  return bool(impl_->file.read(reinterpret_cast<char*>(data), size));
+}
+
 const uint8_t* StfsPackage::GetTable(uint64_t off) {
   auto it = cache_.find(off);
   if (it != cache_.end()) {
     return it->second.data();
   }
   std::vector<uint8_t> buf(kBlockSize);
-  impl_->file.seekg(off, std::ios::beg);
-  if (!impl_->file.read(reinterpret_cast<char*>(buf.data()), kBlockSize)) {
-    return nullptr;
-  }
+  if (!ReadAt(off, buf.data(), kBlockSize)) return nullptr;
   auto res = cache_.emplace(off, std::move(buf));
   return res.first->second.data();
 }
 
-uint32_t StfsPackage::NextBlock(uint32_t idx) {
+bool StfsPackage::NextBlock(uint32_t idx, uint32_t* next) {
+  if (idx >= total_blocks_) return false;
   uint32_t sec = root_active_ ? kBlockSize : 0;
   if (read_only_) {
     sec = 0;
@@ -252,51 +314,47 @@ uint32_t StfsPackage::NextBlock(uint32_t idx) {
     if (total_blocks_ > 0xAA) {
       if (total_blocks_ > 0x70E4) {
         const uint8_t* t2 = GetTable(HashOffset(idx, 2) + sec);
-        if (!t2) return kEndOfChain;
+        if (!t2) return false;
         uint32_t record = (idx / 0x70E4) % 0xAA;
         uint8_t st = t2[record * 0x18 + 0x14];
         sec = (st & 0x40) ? kBlockSize : 0;
       }
       const uint8_t* t1 = GetTable(HashOffset(idx, 1) + sec);
-      if (!t1) return kEndOfChain;
+      if (!t1) return false;
       uint32_t record = (idx / 0xAA) % 0xAA;
       uint8_t st = t1[record * 0x18 + 0x14];
       sec = (st & 0x40) ? kBlockSize : 0;
     }
   }
   const uint8_t* t0 = GetTable(HashOffset(idx, 0) + sec);
-  if (!t0) return kEndOfChain;
+  if (!t0) return false;
   uint32_t record = idx % 0xAA;
   const uint8_t* e = t0 + record * 0x18;
-  return (static_cast<uint32_t>(e[0x15]) << 16) |
-         (static_cast<uint32_t>(e[0x16]) << 8) |
-         static_cast<uint32_t>(e[0x17]);
+  *next = (static_cast<uint32_t>(e[0x15]) << 16) |
+          (static_cast<uint32_t>(e[0x16]) << 8) |
+          static_cast<uint32_t>(e[0x17]);
+  return *next == kEndOfChain || *next < total_blocks_;
 }
 
 bool StfsPackage::ReadFile(const StfsEntry& entry, std::vector<uint8_t>& out_data, std::string* error) {
+  if (entry.size > file_size_) return Fail(error, "File size exceeds package size");
   out_data.resize(entry.size);
   uint32_t remaining = entry.size;
   uint32_t blk = entry.start_block;
   uint32_t offset = 0;
+  std::unordered_set<uint32_t> seen;
 
-  while (remaining > 0 && blk != kEndOfChain) {
+  while (remaining > 0) {
     uint32_t n = std::min<uint32_t>(kBlockSize, remaining);
-    uint64_t file_offset = BlockToOffset(blk);
-    impl_->file.seekg(file_offset, std::ios::beg);
-    if (!impl_->file.read(reinterpret_cast<char*>(out_data.data() + offset), n)) {
-      if (error) *error = "Failed to read block " + std::to_string(blk);
-      return false;
+    if (blk >= total_blocks_ || !seen.insert(blk).second ||
+        !ReadAt(BlockToOffset(blk), out_data.data() + offset, n)) {
+      return Fail(error, "Invalid or truncated data chain for " + entry.path);
     }
     remaining -= n;
     offset += n;
-    blk = NextBlock(blk);
-  }
-
-  if (remaining > 0) {
-    if (error) {
-      *error = entry.path + ": chain ended with " + std::to_string(remaining) + " bytes missing";
+    if (!NextBlock(blk, &blk) || seen.contains(blk)) {
+      return Fail(error, "Invalid data chain for " + entry.path);
     }
-    return false;
   }
   return true;
 }
@@ -307,48 +365,47 @@ bool StfsPackage::ExtractAll(const std::filesystem::path& out_dir,
                              std::string* error) {
   std::error_code ec;
   std::filesystem::create_directories(out_dir, ec);
+  if (ec) return Fail(error, "Failed to create " + out_dir.string() + ": " + ec.message());
+  auto root = std::filesystem::canonical(out_dir, ec);
+  if (ec) return Fail(error, "Invalid extraction directory: " + ec.message());
+  // shortcut: caller owns this directory; use directory-relative no-follow I/O for shared targets.
+  auto safe_path = [&](const std::string& relative) {
+    auto path = root;
+    for (const auto& part : std::filesystem::path(relative)) {
+      path /= part;
+      auto status = std::filesystem::symlink_status(path, ec);
+      if (std::filesystem::is_symlink(status) ||
+          (ec && ec != std::errc::no_such_file_or_directory)) return false;
+    }
+    return true;
+  };
+  for (const auto& entry : entries_) {
+    if (!safe_path(entry.path)) return Fail(error, "Unsafe extraction path: " + entry.path);
+  }
+  bool license = write_license && content_type_ == 0x000D0000;
+  if (license && !safe_path("package_license.toml")) return Fail(error, "Unsafe license path");
 
   std::vector<uint8_t> buffer;
   for (size_t i = 0; i < entries_.size(); ++i) {
-    const auto& e = entries_[i];
-    if (progress) progress(e, i, entries_.size());
-    if (e.is_dir) {
-      continue;
-    }
-    std::filesystem::path dst = out_dir / e.path;
-    std::filesystem::create_directories(dst.parent_path(), ec);
-
-    if (!ReadFile(e, buffer, error)) {
+    const auto& entry = entries_[i];
+    if (progress) progress(entry, i, entries_.size());
+    auto destination = root / entry.path;
+    std::filesystem::create_directories(entry.is_dir ? destination : destination.parent_path(), ec);
+    if (ec) return Fail(error, "Failed to create directory: " + ec.message());
+    if (!entry.is_dir &&
+        (!ReadFile(entry, buffer, error) ||
+         !WriteFile(destination, reinterpret_cast<const char*>(buffer.data()), buffer.size(), error))) {
       return false;
-    }
-
-    std::ofstream out(dst, std::ios::binary);
-    if (!out) {
-      if (error) *error = "Failed to create " + dst.string();
-      return false;
-    }
-    out.write(reinterpret_cast<const char*>(buffer.data()), buffer.size());
-  }
-
-  for (const auto& e : entries_) {
-    if (e.is_dir) {
-      std::filesystem::path dst = out_dir / e.path;
-      std::filesystem::create_directories(dst, ec);
     }
   }
 
-  if (write_license && content_type_ == 0x000D0000) {
-    uint32_t mask = license_mask();
-    std::filesystem::path lic_path = out_dir / "package_license.toml";
-    std::ofstream lic(lic_path);
-    if (!lic) {
-      if (error) *error = "Failed to write package_license.toml";
-      return false;
-    }
-    lic << "# Written by tools/stfs_extract.py from the package's license block.\n";
-    lic << "license_mask = 0x" << std::uppercase << std::hex << mask << "\n";
+  if (license) {
+    std::ostringstream text;
+    text << "# Written by tools/stfs_extract.py from the package's license block.\n";
+    text << "license_mask = 0x" << std::uppercase << std::hex << license_mask() << "\n";
+    auto data = text.str();
+    return WriteFile(root / "package_license.toml", data.data(), data.size(), error);
   }
-
   return true;
 }
 
