@@ -1658,7 +1658,7 @@ profile per thread with guest functions named `__imp__sub_<address>`.
 | WM1 | done 2026-10-15 (W-L15; null GPU, Chromium 154) | Runtime boots headless in the browser to the first guest frame (no graphics: GPU plugin stubbed) | Console shows the guest reaching the main menu's first swap |
 | WM2 | done 2026-10-16 (16.6: menu panel 40.6-51.6 dB, full frame 38.3-39.1 dB) | Menus render through the browser's WebGPU | `main_menu_nav` golden captures within 40 dB of native |
 | WM3 | done 2026-10-16 (W-L10) | Game data import and persistence | Fresh profile → pick package → plays; reload → no re-import |
-| WM4 | gamepad part done 2026-10-16 (16.6); keyboard ride pending | Rides render; input from keyboard and gamepad | `ride_middle_name_danger` completes; `check_fps_log.py 60` passes in Chromium |
+| WM4 | done 2026-10-16 (16.6) | Rides render; input from keyboard and gamepad | `ride_middle_name_danger` completes; `check_fps_log.py 60` passes in Chromium |
 | WM5 | todo | Audio | Music and effects audible; no underruns over a 2-minute ride |
 | WM6 | todo | 60 FPS at 720p in desktop Chrome (RX 6600) | 3 runs, min ≥ 55 FPS riding, logged in 4.3-style table |
 | WM7 | todo | Firefox desktop | WM2–WM5 checks pass in Firefox |
@@ -1881,9 +1881,9 @@ Every task's "Done when" implicitly includes **`tools/check_native.sh check` pas
 | W-L03 | todo | **Memory-model cost.** Build a micro-benchmark from real generated functions (a physics-heavy one and a VMX-heavy one, driven with captured inputs) for native, wasm32 and wasm64; then compare the full game's busiest guest threads once WM1 runs. Decide A vs B (7.1) with numbers. | W-S03, W-S10, W-S11 | 7.1, 7.2 | Table of ns/call in 7.1; decision recorded in 1 (D1) |
 | W-L04 | review 2026-10-15 (needs macOS check) | **Runtime memory for the web** (`xmemory.cpp`, `memory_posix.cpp` → `memory_emscripten.cpp`): one linear-memory window, folded physical views, bookkeeping-only protection, `MarkPhysicalWritten`, the dirty bitmap and write epochs; `TranslateVirtual`/`TranslatePhysical`/`GetPhysicalAddress` consistent with the macro. | W-L01 | 3.4, 8.1, 8.3 | Unit test (native-hosted with the web memory model compiled in): guest writes through all three views land in the same physical bytes; bitmap bits match the writes |
 | W-L05 | claimed claude-opus-5.5 2026-10-15 | **Write tracking consumers**: `SharedMemory`, `PrimitiveProcessor` and the renderer's texture cache and memory mirror use the dirty bitmap on the web; debug assertion mode compares against chunk hashes (14.8). | W-L04, W-S09 | 8.3, renderer doc 8.3, 8.9 | WM4 ride shows no stale textures; assertion mode passes over `ride_middle_name_danger` |
-| W-L06 | claimed claude-opus-5.5 2026-10-15 | **GPU worker and yielding** (7.4): run the command processor on the canvas-owning pthread; JSPI yield at swap/ring waits (or the resumable loop if W-S05 fails); move presenter paint and ImGui drawing there (9.4). | W-L01, W-S05 | 7.3, 7.4, 9.4 | WM2: menus render and the settings overlay works |
-| W-L07 | claimed claude-opus-5.5 2026-10-15 | **Renderer web build** (section 9): `#if __EMSCRIPTEN__` in provider/presenter/mirror, canvas surface, feature and limit fallbacks (`Unorm16` → tier1, split mirror if W-S01 says so, timestamp degrade), async capture. | W-S01, W-L06 | 9 | Renderer builds with `--use-port=emdawnwebgpu`; WM2 check |
-| W-L08 | claimed claude-opus-5.5 2026-10-16 (taken over from pi-gpt, out of usage) | **Input and app shell**: web `WindowedAppContext` (no SDL window), UI pthread driven by main-thread rAF messages, web input driver over the SAB, keyboard controls and rebinding, fullscreen/pointer lock, Exit Game behavior (8.7, 8.8). | W-L01 | 8.7, 8.8 | WM4 input part: keyboard and gamepad ride; settings menu usable with mouse and keyboard |
+| W-L06 | done 2026-10-16 (WM2; overlays on the GPU worker, 16.6) | **GPU worker and yielding** (7.4): run the command processor on the canvas-owning pthread; JSPI yield at swap/ring waits (or the resumable loop if W-S05 fails); move presenter paint and ImGui drawing there (9.4). | W-L01, W-S05 | 7.3, 7.4, 9.4 | WM2: menus render and the settings overlay works |
+| W-L07 | done 2026-10-16 (WM2; canvas resize and DPR, 16.6) | **Renderer web build** (section 9): `#if __EMSCRIPTEN__` in provider/presenter/mirror, canvas surface, feature and limit fallbacks (`Unorm16` → tier1, split mirror if W-S01 says so, timestamp degrade), async capture. | W-S01, W-L06 | 9 | Renderer builds with `--use-port=emdawnwebgpu`; WM2 check |
+| W-L08 | done 2026-10-16 (pi-gpt + claude-opus-5.5; keyboard and gamepad rides, settings by mouse/keyboard/pad, 16.6) | **Input and app shell**: web `WindowedAppContext` (no SDL window), UI pthread driven by main-thread rAF messages, web input driver over the SAB, keyboard controls and rebinding, fullscreen/pointer lock, Exit Game behavior (8.7, 8.8). | W-L01 | 8.7, 8.8 | WM4 input part: keyboard and gamepad ride; settings menu usable with mouse and keyboard |
 | W-L09 | todo | **Split guest-memory mirror** (only if W-S01 shows < 512 MiB storage bindings): 4 × 128 MiB buffers, WGSL address → (binding, offset), index/vertex fetch and memexport paths updated, native unchanged unless `--webgpu_split_mirror`. | W-S01 | renderer doc 8.3, 9.1 | Native with the split forced passes golden scenes; web passes WM2 |
 | W-L10 | done 2026-10-16 (pi-gpt; committed by claude-opus-5.5, 16.6) | **Files and import**: WasmFS + OPFS backend, VFS host-path device on OPFS, import flow (picker, drag-drop, extraction worker using W-S13), license metadata, saves/settings/shader storage in OPFS, `storage.persist()` (8.6). | W-L01, W-S13 | 8.6, `src/package_license.cpp` | WM3 |
 | W-L11 | todo | **Browser CPU cost reduction** for the GPU worker if W-S12 or WM4 shows it bound: render bundles for static passes, fewer bind-group changes, larger uniform rings, batching small uploads. | W-S12, WM4 | 9.6, renderer doc 7.5 | WM6 or a documented ceiling with profiles |
@@ -1914,6 +1914,15 @@ details of W-L04 to W-L09. The critical path is W-L01 → W-L02/W-L04 → W-L15 
 W-L06/W-L07 (graphics).
 
 ### 16.6 Notes log
+
+- 2026-10-16 (claude-opus-5.5): **W-L06, W-L07, W-L08 and WM4 done.** Chromium, all with the
+  committed build: `keyboard_ride.txt` (Return through menus, Up to ride, Left/Right lean, P
+  pause and resume, Escape to the checkpoint - fault counter 1 - and R restart: timer back to 0);
+  `controller_ride.txt` and `ride_middle_name_danger.txt` by gamepad (`check_fps_log.py 60`
+  passes, above); new `settings_mouse.txt` (F1, a click unticks Keyboard, a click on Close
+  closes; `cdp.py` script command `click X Y`); `controller_settings.txt`; `settings_menu.txt`
+  at `--viewport 1280x720@2` (new DPR option): canvas 2560x1440, overlay at the same
+  relative size. Pointer lock: not used (pi-gpt's note: not needed for this game).
 
 - 2026-10-16 (claude-opus-5.5): **WM2 done.** `main_menu_nav.txt` in Chromium (60 FPS default
   cap) vs native `baseline_webgpu`: every capture selects the native row; the static menu panel

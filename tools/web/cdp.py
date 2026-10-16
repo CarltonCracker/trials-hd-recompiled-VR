@@ -199,6 +199,15 @@ async def run_headless_script(s, script_path, out_dir):
             out_file.parent.mkdir(parents=True, exist_ok=True)
             out_file.write_bytes(base64.b64decode(shot["data"]))
             s.write("capture", f"saved screenshot to {out_file}")
+        elif cmd == "click":
+            # click X Y: a left click at CSS pixel (X, Y) of the page.
+            x, y = float(c_args[0]), float(c_args[1])
+            for kind in ("mouseMoved", "mousePressed", "mouseReleased"):
+                await s.call("Input.dispatchMouseEvent", {
+                    "type": kind, "x": x, "y": y, "button": "left",
+                    "buttons": 1 if kind == "mousePressed" else 0, "clickCount": 1,
+                }, session=s.page_session)
+                await asyncio.sleep(0.05)
         elif cmd == "focus":
             await s.call("Runtime.evaluate", {
                 "expression": "const c = document.querySelector('canvas'); if (c) c.focus();"
@@ -221,10 +230,11 @@ async def drive(s, args):
     if args.viewport:
         # An exact CSS viewport (the canvas fills it): 1280x720 makes the canvas
         # the same size as the native guest-output captures.
-        width, height = (int(v) for v in args.viewport.lower().split("x"))
+        size, _, scale = args.viewport.lower().partition("@")
+        width, height = (int(v) for v in size.split("x"))
         await s.call("Emulation.setDeviceMetricsOverride", {
-            "width": width, "height": height, "deviceScaleFactor": 1, "mobile": False},
-            session=s.page_session)
+            "width": width, "height": height, "deviceScaleFactor": float(scale or 1),
+            "mobile": False}, session=s.page_session)
     if getattr(args, "init_js", None):
         await s.call("Page.addScriptToEvaluateOnNewDocument", {
             "source": args.init_js.read_text()}, session=s.page_session)
@@ -338,7 +348,7 @@ def main():
     parser.add_argument("--script", type=Path, help="run a tests/headless/*.txt script against the page")
     parser.add_argument("--init-js", type=Path, help="test fixture to inject before page scripts run")
     parser.add_argument("--out-dir", type=Path, default=Path("out/run"), help="output directory for captures")
-    parser.add_argument("--viewport", help="exact page size in CSS pixels, e.g. 1280x720")
+    parser.add_argument("--viewport", help="exact page size in CSS pixels, e.g. 1280x720, optionally @DPR (1280x720@2)")
     parser.add_argument("--chromium", default="chromium")
     parser.add_argument("--profile", type=Path,
                         help="browser profile directory to use and keep (default: a fresh one)")

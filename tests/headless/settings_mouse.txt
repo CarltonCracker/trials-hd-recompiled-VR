@@ -1,0 +1,15 @@
+# Settings with the mouse (web port, W-L08): opens settings with F1, clicks the
+# Keyboard checkbox (off: the key list folds away and the window shrinks), then
+# clicks Close. Nothing is saved.
+# Run: tools/web/cdp.py URL --script tests/headless/settings_mouse.txt
+wait 24
+focus trials
+tap F1
+wait 1.5
+capture mouse_open
+click 507 95
+wait 0.8
+capture mouse_unchecked
+click 311 485
+wait 1.5
+capture mouse_closed
