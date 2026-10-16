@@ -1,7 +1,6 @@
 // Copies a rectangle of a single-sampled texture 1:1 into the render target
 // (frontbuffer to guest output), applying the guest's gamma ramp. The
-// viewport covers the destination. With luma_alpha, alpha is the luma of the
-// result, for FXAA (fxaa.wgsl).
+// viewport covers the destination.
 
 struct BlitConstants {
   source_offset: vec2i,
@@ -9,7 +8,7 @@ struct BlitConstants {
   // 2: piecewise linear. Bits 8:9, 10:11: leading columns, rows that copy the
   // next one (the resolve's half-pixel offset fill at 2x/3x).
   gamma_mode: u32,
-  luma_alpha: u32,
+  padding: u32,
 }
 @group(0) @binding(0) var source: texture_2d<f32>;
 @group(0) @binding(1) var<uniform> constants: BlitConstants;
@@ -43,9 +42,6 @@ fn fs_main(@builtin(position) position: vec4f) -> @location(0) vec4f {
   } else if (gamma_mode == 2u) {
     let value = vec3u(saturate(color) * 1023.0 + 0.5);
     color = vec3f(apply_pwl(value.r, 0u), apply_pwl(value.g, 1u), apply_pwl(value.b, 2u));
-  }
-  if (constants.luma_alpha != 0u) {
-    return vec4f(color, dot(saturate(color), vec3f(0.299, 0.587, 0.114)));
   }
   return vec4f(color, 1.0);
 }

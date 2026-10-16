@@ -125,9 +125,9 @@ player one and work at the same time. Default keys:
 | Throttle | Up / W | RT |
 | Brake | Down / S | LT |
 | Lean back / forward | Left / A, Right / D | Left stick |
-| Return to last checkpoint (menus: back) | Backspace | B |
+| Return to last checkpoint (menus: back) | Escape / Backspace | B |
 | Restart track | R | Back |
-| Pause | Escape | Start |
+| Pause | P | Start |
 | Bailout | Y | Y |
 | Menu navigation | Arrows / WASD | D-pad |
 | Menu select | Return / Space | A |
@@ -155,7 +155,6 @@ cancels); **Reset Keys** restores the default layout. Changes apply immediately.
 | Display Mode | Windowed or fullscreen (applies immediately) |
 | Resolution | Window size, or the fullscreen display mode; *Desktop* = borderless at desktop resolution |
 | Render Resolution | Internal resolution: 1280x720, 2560x1440 or 3840x2160 (restart to apply) |
-| Anti-aliasing | Off, FXAA or FXAA (Extreme) on the final image (applies immediately). The game's own 4x MSAA is only used to speed up its depth and shadow passes and does not smooth edges; a higher Render Resolution supersamples instead |
 | Unlock FPS | Independent real rendering with the original fixed physics tick (on by default; restart to apply) |
 | FPS Limit | Unlimited, 240, 165, 144, 120, 90, 60 or 30 real rendered frames per second; independent of physics with Unlock FPS enabled |
 | VSync | Tear-free presentation (restart to apply) |
