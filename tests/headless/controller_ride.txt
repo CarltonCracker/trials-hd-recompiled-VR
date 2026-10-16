@@ -1,0 +1,44 @@
+# Browser controller smoke test: navigate with A/D-pad, then throttle and lean.
+# Uses the same route as ride_middle_name_danger.txt, with short analog checks.
+wait 22
+pad a 1
+wait 0.1
+pad a 0
+wait 3
+pad a 1
+wait 0.1
+pad a 0
+wait 3
+pad down 1
+wait 0.1
+pad down 0
+wait 0.6
+pad a 1
+wait 0.1
+pad a 0
+wait 3
+pad a 1
+wait 0.1
+pad a 0
+wait 2
+pad a 1
+wait 0.1
+pad a 0
+wait 12
+capture controller_loaded
+axis rt 32767
+wait 4
+capture controller_throttle
+axis lx -16384
+wait 1
+capture controller_lean_left
+axis lx 16384
+wait 1
+capture controller_lean_right
+axis lx 0
+axis rt 0
+pad start 1
+wait 0.1
+pad start 0
+wait 1
+capture controller_pause

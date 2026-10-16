@@ -1,0 +1,66 @@
+# Golden scenes for renderer parity testing (Section 11)
+# Each scene defines:
+#   script:    the headless input script (tests/headless/*.txt)
+#   capture:   the capture name (maps to <capture>.png in out/run/)
+#   min_psnr:  minimum acceptable PSNR in dB
+#   min_ssim:  minimum acceptable SSIM [0..1]
+
+[scenes.main_menu]
+script = "tests/headless/main_menu_nav.txt"
+capture = "nav_0"
+min_psnr = 35.0
+min_ssim = 0.95
+
+[scenes.tracklist_3d]
+script = "tests/headless/ride_middle_name_danger.txt"
+capture = "tracklist_sel"
+min_psnr = 30.0
+min_ssim = 0.90
+
+[scenes.tutorial_start]
+script = "tests/headless/ride_tutorial.txt"
+capture = "pad_loaded"
+min_psnr = 30.0
+min_ssim = 0.90
+
+[scenes.danger_ride]
+script = "tests/headless/ride_middle_name_danger.txt"
+capture = "t2_ride1"
+min_psnr = 25.0
+min_ssim = 0.85
+
+[scenes.checkpoint]
+script = "tests/headless/keyboard_ride.txt"
+capture = "kb_checkpoint"
+min_psnr = 28.0
+min_ssim = 0.88
+
+[scenes.restart]
+script = "tests/headless/keyboard_ride.txt"
+capture = "kb_restart"
+min_psnr = 28.0
+min_ssim = 0.88
+
+[scenes.pause_menu]
+script = "tests/headless/ride_middle_name_danger.txt"
+capture = "t2_pause"
+min_psnr = 30.0
+min_ssim = 0.90
+
+[scenes.results]
+script = "tests/headless/ride_middle_name_danger.txt"
+capture = "t2_results"
+min_psnr = 30.0
+min_ssim = 0.90
+
+[scenes.settings]
+script = "tests/headless/settings_menu.txt"
+capture = "settings_open"
+min_psnr = 35.0
+min_ssim = 0.95
+
+[scenes.credits]
+script = "tests/headless/credits.txt"
+capture = "credits"
+min_psnr = 35.0
+min_ssim = 0.95

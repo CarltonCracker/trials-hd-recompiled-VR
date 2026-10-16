@@ -1,0 +1,41 @@
+# Test navigating to Exit Game and pressing A to exit.
+wait 24
+capture nav_0
+pad down 1
+wait 0.1
+pad down 0
+wait 0.8
+pad down 1
+wait 0.1
+pad down 0
+wait 0.8
+pad down 1
+wait 0.1
+pad down 0
+wait 0.8
+pad down 1
+wait 0.1
+pad down 0
+wait 0.8
+pad down 1
+wait 0.1
+pad down 0
+wait 0.8
+pad down 1
+wait 0.1
+pad down 0
+wait 0.8
+pad down 1
+wait 0.1
+pad down 0
+wait 0.8
+pad down 1
+wait 0.1
+pad down 0
+wait 0.8
+capture exit_selected
+wait 0.5
+pad a 1
+wait 0.1
+pad a 0
+wait 3

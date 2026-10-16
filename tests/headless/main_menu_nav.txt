@@ -1,0 +1,44 @@
+# Captures every main-menu selection while walking down with the D-pad.
+# Run: INPUT=tests/headless/main_menu_nav.txt tools/headless_run.sh 45 --vulkan_headless_surface=true
+wait 24
+capture nav_0
+pad down 1
+wait 0.1
+pad down 0
+wait 0.8
+capture nav_1
+pad down 1
+wait 0.1
+pad down 0
+wait 0.8
+capture nav_2
+pad down 1
+wait 0.1
+pad down 0
+wait 0.8
+capture nav_3
+pad down 1
+wait 0.1
+pad down 0
+wait 0.8
+capture nav_4
+pad down 1
+wait 0.1
+pad down 0
+wait 0.8
+capture nav_5
+pad down 1
+wait 0.1
+pad down 0
+wait 0.8
+capture nav_6
+pad down 1
+wait 0.1
+pad down 0
+wait 0.8
+capture nav_7
+pad down 1
+wait 0.1
+pad down 0
+wait 0.8
+capture nav_8
