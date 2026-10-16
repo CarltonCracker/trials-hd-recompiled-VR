@@ -22,7 +22,8 @@ commit by CMake at configure time; regenerate with tools/export_sdk_patch.sh).
   guest threads - heap corruption)
 - graphics: lock the command processor's CallInThread queue (pushed from
   other threads); logging: reserve the category registry (read lock-free)
-- macOS: user data under Application Support and Apple Silicon presentation defaults
+- storage & paths: default user data directory next to executable (self-contained); config_path() getter
+- macOS: Apple Silicon presentation defaults
 - ui/overlay: achievements close callback and input gating
 - command processor CPU: sequential register writes (type-0 packets) go
   through the range path, context registers (0x2000-0x3FFF) are bulk-copied,
@@ -830,6 +831,18 @@ index 0000000..4155460
 +}
 +
 +}  // namespace rex::ppc
+diff --git a/include/rex/rex_app.h b/include/rex/rex_app.h
+index 1f52480..a480b4e 100644
+--- a/include/rex/rex_app.h
++++ b/include/rex/rex_app.h
+@@ -257,6 +257,7 @@ class ReXApp : public ui::WindowedApp, public ui::WindowListener, public ui::Win
+   const std::filesystem::path& update_data_root() const { return update_data_root_; }
+   const std::filesystem::path& cache_root() const { return cache_root_; }
+   const std::filesystem::path& metadata_root() const { return metadata_root_; }
++  const std::filesystem::path& config_path() const { return config_path_; }
+ 
+   /// Set a callback that provides guest frame stats to the debug overlay.
+   void SetGuestFrameStats(ui::DebugOverlayDialog::FrameStatsProvider provider);
 diff --git a/include/rex/system/gpu_plugin.h b/include/rex/system/gpu_plugin.h
 index 453c210..b59ac7e 100644
 --- a/include/rex/system/gpu_plugin.h
@@ -16328,7 +16341,7 @@ index e1a5287..356ace6 100644
    std::unique_ptr<RenderDocAPI> renderdoc_api(new RenderDocAPI());
  
 diff --git a/src/ui/rex_app.cpp b/src/ui/rex_app.cpp
-index b94fe9e..aa883be 100644
+index b94fe9e..b29dcd8 100644
 --- a/src/ui/rex_app.cpp
 +++ b/src/ui/rex_app.cpp
 @@ -26,6 +26,9 @@
@@ -16350,6 +16363,22 @@ index b94fe9e..aa883be 100644
  
  namespace rex {
  
+@@ -111,13 +114,13 @@ bool ReXApp::SetupEnvironment() {
+     game_dir = game_data_cvar;
+   }
+ 
+-  // User data: cvar override, or platform user directory
++  // User data: cvar override, or executable directory (self-contained)
+   std::filesystem::path user_dir;
+   std::string user_data_cvar = REXCVAR_GET(user_data_root);
+   if (!user_data_cvar.empty()) {
+     user_dir = user_data_cvar;
+   } else {
+-    user_dir = rex::filesystem::GetUserFolder() / GetName();
++    user_dir = exe_dir;
+   }
+ 
+   // Update data: cvar override, or empty (opt-in)
 @@ -307,7 +310,12 @@ bool ReXApp::ConstructRuntime(const PathConfig& paths) {
  
  bool ReXApp::SetupPresentation() {

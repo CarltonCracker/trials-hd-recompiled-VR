@@ -144,6 +144,20 @@ Settings are saved to `trials_hd.toml` and can also be passed as command-line ar
 
 ---
 
+## Save Data & Storage
+
+All game saves, user profiles, achievements, shader caches, logs, and configuration settings are stored locally in the build directory, right next to the executable and `trials_hd.toml`:
+
+- **Configuration:** `trials_hd.toml` (graphics settings, display modes, keybindings)
+- **Save Data & Profiles:** `5841095A/` (track times, medals, unlocked bikes, and custom tracks)
+- **Achievements:** `achievements/5841095A.toml` (unlocked achievement progress)
+- **Shader Cache:** `cache/` (compiled graphics pipelines)
+- **Logs:** `logs/` (`trials_hd.log`)
+
+No data is written to system or user home directories (e.g. `~/.local/share/trials_hd` or `~/Library/Application Support/trials_hd`). Everything is self-contained in the build folder next to the settings config. Custom storage paths can still be specified if desired using `--user_data_root=/path/to/data` or `--cache_root=/path/to/cache`.
+
+---
+
 ## Headless Testing
 
 Automated headless tests and benchmarks run under Xvfb:

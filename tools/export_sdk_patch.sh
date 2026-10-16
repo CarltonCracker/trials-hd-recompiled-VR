@@ -37,7 +37,8 @@ commit by CMake at configure time; regenerate with tools/export_sdk_patch.sh).
   guest threads - heap corruption)
 - graphics: lock the command processor's CallInThread queue (pushed from
   other threads); logging: reserve the category registry (read lock-free)
-- macOS: user data under Application Support and Apple Silicon presentation defaults
+- storage & paths: default user data directory next to executable (self-contained); config_path() getter
+- macOS: Apple Silicon presentation defaults
 - ui/overlay: achievements close callback and input gating
 - command processor CPU: sequential register writes (type-0 packets) go
   through the range path, context registers (0x2000-0x3FFF) are bulk-copied,

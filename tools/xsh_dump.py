@@ -16,8 +16,22 @@ import argparse
 import os
 import struct
 import sys
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-DEFAULT_XSH = os.path.expanduser("~/.local/share/trials_hd/cache/shaders/shareable/5841095A.xsh")
+
+def get_default_xsh():
+    candidates = [
+        os.path.join(ROOT_DIR, "out/build/linux-amd64-relwithdebinfo/cache/shaders/shareable/5841095A.xsh"),
+        os.path.join(ROOT_DIR, "cache/shaders/shareable/5841095A.xsh"),
+        os.path.expanduser("~/.local/share/trials_hd/cache/shaders/shareable/5841095A.xsh"),
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return candidates[0]
+
+
+DEFAULT_XSH = get_default_xsh()
 MAGIC = 0x48534558  # 'XESH'
 VERSION = 0x20201219
 

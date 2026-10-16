@@ -41,7 +41,8 @@ This folder contains no game data. You need your own copy of Trials HD (XBLA).
    The WebGPU renderer is the default; for the Vulkan one: ./trials_hd --gpu_plugin=xenos
 
 Graphics settings: press the controller's Guide button (or Back + Start, or F1).
-Settings are saved to trials_hd.toml next to the executable.
+All settings (trials_hd.toml), save data (5841095A/), achievements, and cache
+are saved locally in this folder next to the executable.
 EOF
 
 if [[ " $* " == *" --link-assets "* ]]; then
