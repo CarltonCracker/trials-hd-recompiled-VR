@@ -383,6 +383,38 @@ target_include_directories(trials_hd_web_recomp PRIVATE ${_root} ${_root}/src ${
 target_precompile_headers(trials_hd_web_recomp PRIVATE ${_gen}/trials_hd_pch.h)
 
 #=============================================================================
+# WebGPU renderer (src/gpu_webgpu), linked in (7.9.10), on the browser's
+# WebGPU through emdawnwebgpu (W-L07). The browser variant only: it needs a
+# canvas and JSPI (the GPU worker's waits suspend to the event loop, 7.4).
+#=============================================================================
+set(TRIALSHD_WEB_WEBGPU OFF)
+if(NOT TRIALSHD_WEB_NODE)
+    set(TRIALSHD_WEB_WEBGPU ON)
+    set(_gpu ${_root}/src/gpu_webgpu)
+    # The same files as src/gpu_webgpu/CMakeLists.txt, minus the X11 helper.
+    file(GLOB _gpu_sources CONFIGURE_DEPENDS ${_gpu}/*.cpp ${_gpu}/wgsl/*.cpp)
+    list(FILTER _gpu_sources EXCLUDE REGEX "/x11_display\\.cpp$")
+    # Embedded WGSL (wgsl/<name>.wgsl.h), with the renderer's own script.
+    file(GLOB _gpu_wgsl CONFIGURE_DEPENDS ${_gpu}/shaders/*.wgsl ${_gpu}/wgsl/*.wgsl)
+    set(_gpu_wgsl_headers)
+    foreach(_wgsl IN LISTS _gpu_wgsl)
+        get_filename_component(_name ${_wgsl} NAME_WE)
+        set(_header ${CMAKE_BINARY_DIR}/gpu_webgpu/wgsl/${_name}.wgsl.h)
+        add_custom_command(
+            OUTPUT ${_header}
+            COMMAND ${CMAKE_COMMAND} -DIN=${_wgsl} -DOUT=${_header} -DNAME=${_name}
+                    -P ${_gpu}/embed_wgsl.cmake
+            DEPENDS ${_wgsl} ${_gpu}/embed_wgsl.cmake
+            VERBATIM)
+        list(APPEND _gpu_wgsl_headers ${_header})
+    endforeach()
+    add_library(trials_hd_web_webgpu OBJECT ${_gpu_sources} ${_gpu_wgsl_headers})
+    target_include_directories(trials_hd_web_webgpu PRIVATE
+        ${_gpu} ${CMAKE_BINARY_DIR}/gpu_webgpu ${_sdk})
+    target_compile_options(trials_hd_web_webgpu PRIVATE --use-port=emdawnwebgpu)
+endif()
+
+#=============================================================================
 # The game
 #=============================================================================
 add_executable(trials_hd
@@ -405,6 +437,16 @@ add_executable(trials_hd
 )
 target_include_directories(trials_hd PRIVATE ${_root} ${_root}/src ${_gen})
 target_link_libraries(trials_hd PRIVATE trials_hd_web_thirdparty trials_hd_web_ffmpeg)
+if(TRIALSHD_WEB_WEBGPU)
+    target_sources(trials_hd PRIVATE $<TARGET_OBJECTS:trials_hd_web_webgpu>)
+    target_compile_definitions(trials_hd PRIVATE TRIALSHD_WEB_WEBGPU=1)
+    target_compile_options(trials_hd PRIVATE --use-port=emdawnwebgpu)
+    # JSPI: every pthread entry can suspend, so the GPU worker's WebGPU waits
+    # (WaitAny) and its per-frame yield return to the browser's event loop.
+    # The command processor's thread receives the page's canvas (7.9.5).
+    target_link_options(trials_hd PRIVATE
+        --use-port=emdawnwebgpu -sJSPI -sOFFSCREENCANVAS_SUPPORT)
+endif()
 
 # Linear memory: the 2.75 GiB guest window (7.9.2) plus the host heap. A pool
 # of workers big enough that guest thread creation never waits for one (8.4).

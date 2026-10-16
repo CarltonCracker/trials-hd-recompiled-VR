@@ -44,6 +44,12 @@
 #if defined(__EMSCRIPTEN__)
 #include "web/null_graphics_system.h"
 #include "web/web_files.h"
+#if defined(TRIALSHD_WEB_WEBGPU)
+// The WebGPU renderer, linked in (src/gpu_webgpu/plugin_main.cpp).
+extern "C" uint32_t rex_gpu_abi_version(void);
+extern "C" rex::system::IGraphicsSystem* rex_gpu_create(uint32_t abi_version,
+                                                        const rex::system::GpuCreateInfo* info);
+#endif
 #endif
 
 #if defined(TRIALSHD_CALL_TRACE)
@@ -162,10 +168,15 @@ class TrialsHdApp : public rex::ReXApp {
   // Audio falls back to a silent driver when no output device can be opened.
   void OnPreSetup(rex::RuntimeConfig& config) override {
 #if defined(__EMSCRIPTEN__)
-    // Web (docs/web-port/README.md 7.9.10): renderers are linked in. Until
-    // the WebGPU renderer is ported (W-L06/W-L07), "null" runs the GPU
-    // command stream without drawing.
+    // Web (docs/web-port/README.md 7.9.10): renderers are linked in. "null"
+    // runs the GPU command stream without drawing (?gpu_plugin=null).
     trials_hd::web::RegisterNullGpuPlugin();
+#if defined(TRIALSHD_WEB_WEBGPU)
+    rex::system::RegisterStaticGpuPlugin("webgpu", rex_gpu_abi_version, rex_gpu_create);
+    if (config.gpu_plugin.empty()) {
+      config.gpu_plugin = "webgpu";
+    }
+#endif
     if (config.gpu_plugin.empty()) {
       config.gpu_plugin = "null";
     }

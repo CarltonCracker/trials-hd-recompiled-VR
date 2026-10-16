@@ -9,7 +9,7 @@
 <style>
   html, body { margin: 0; height: 100%; background: #000; color: #ccc; font: 12px monospace; }
   canvas { display: block; width: 100vw; height: 100vh; }
-  #log { position: fixed; left: 0; right: 0; bottom: 0; max-height: 35vh; overflow: auto;
+  #log { display: none; position: fixed; left: 0; right: 0; bottom: 0; max-height: 35vh; overflow: auto;
          margin: 0; padding: 4px 8px; background: rgba(0, 0, 0, 0.6); white-space: pre-wrap; }
 </style>
 </head>
@@ -23,7 +23,11 @@
   for (const [name, value] of new URLSearchParams(location.search)) {
     runtimeArguments.push(value === '' ? `--${name}` : `--${name}=${value}`);
   }
+  // The log is always in the console; page#log also shows it over the game.
   const logElement = document.getElementById('log');
+  if (location.hash === '#log') {
+    logElement.style.display = 'block';
+  }
   const logLines = [];
   function showLog(text) {
     console.log(text);
@@ -34,11 +38,16 @@
     logElement.textContent = logLines.join('\n');
     logElement.scrollTop = logElement.scrollHeight;
   }
+  // Size the canvas in device pixels now: it moves to the GPU worker when the
+  // game starts (resizing afterwards is W-L08's).
+  const canvasElement = document.getElementById('canvas');
+  canvasElement.width = Math.round(canvasElement.clientWidth * devicePixelRatio);
+  canvasElement.height = Math.round(canvasElement.clientHeight * devicePixelRatio);
   // Read by headless checks (tools/web/cdp.py).
   window.trialsHd = { started: performance.now(), exitCode: null };
   var Module = {
     arguments: runtimeArguments,
-    canvas: document.getElementById('canvas'),
+    canvas: canvasElement,
     print: showLog,
     printErr: showLog,
     onExit: (code) => {

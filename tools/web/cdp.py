@@ -206,6 +206,13 @@ async def drive(s, args):
     await s.call("Target.setAutoAttach", {
         "autoAttach": True, "waitForDebuggerOnStart": True, "flatten": True},
         session=s.page_session)
+    if args.viewport:
+        # An exact CSS viewport (the canvas fills it): 1280x720 makes the canvas
+        # the same size as the native guest-output captures.
+        width, height = (int(v) for v in args.viewport.lower().split("x"))
+        await s.call("Emulation.setDeviceMetricsOverride", {
+            "width": width, "height": height, "deviceScaleFactor": 1, "mobile": False},
+            session=s.page_session)
     await s.call("Page.navigate", {"url": args.url}, session=s.page_session)
     started = time.monotonic()
     exit_code = None
@@ -302,6 +309,7 @@ def main():
     parser.add_argument("--screenshot", type=Path, help="save a PNG of the page at the end")
     parser.add_argument("--script", type=Path, help="run a tests/headless/*.txt script against the page")
     parser.add_argument("--out-dir", type=Path, default=Path("out/run"), help="output directory for captures")
+    parser.add_argument("--viewport", help="exact page size in CSS pixels, e.g. 1280x720")
     parser.add_argument("--chromium", default="chromium")
     args = parser.parse_args()
     sys.exit(asyncio.run(run(args)))

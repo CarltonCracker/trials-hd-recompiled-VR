@@ -6,7 +6,9 @@
 #include <cstring>
 #include <vector>
 
+#if !defined(__EMSCRIPTEN__)
 #include <dawn/native/DawnNative.h>
+#endif
 #include <fmt/format.h>
 
 #include <rex/cvar.h>
@@ -79,11 +81,13 @@ constexpr wgpu::BackendType kPreferredBackend = wgpu::BackendType::Metal;
 constexpr wgpu::BackendType kPreferredBackend = wgpu::BackendType::Vulkan;
 #endif
 
+#if !defined(__EMSCRIPTEN__)
 // Owns the Dawn native instance, which keeps the enumerated adapters alive.
 std::unique_ptr<dawn::native::Instance>& NativeInstance() {
   static std::unique_ptr<dawn::native::Instance> instance;
   return instance;
 }
+#endif
 
 }  // namespace
 
@@ -118,12 +122,18 @@ bool WebGpuProvider::Initialize() {
   wgpu::InstanceDescriptor instance_desc;
   instance_desc.requiredFeatureCount = 1;
   instance_desc.requiredFeatures = &kTimedWaitAny;
+#if defined(__EMSCRIPTEN__)
+  // The browser's WebGPU (emdawnwebgpu). TimedWaitAny works there with JSPI:
+  // Wait() suspends this worker to its event loop (docs/web-port 7.4).
+  instance_ = wgpu::CreateInstance(&instance_desc);
+#else
   auto& native_instance = NativeInstance();
   native_instance = std::make_unique<dawn::native::Instance>(&instance_desc);
   if (REXCVAR_GET(webgpu_backend_validation)) {
     native_instance->SetBackendValidationLevel(dawn::native::BackendValidationLevel::Full);
   }
   instance_ = wgpu::Instance(native_instance->Get());
+#endif
   if (!instance_) {
     REXLOG_ERROR("WebGPU: failed to create the Dawn instance");
     return false;
@@ -148,6 +158,8 @@ bool WebGpuProvider::Initialize() {
   wgpu::Limits adapter_limits;
   adapter_.GetLimits(&adapter_limits);
 
+  wgpu::DeviceDescriptor device_desc;
+#if !defined(__EMSCRIPTEN__)  // The browser always validates and has no toggles.
   std::vector<const char*> enabled_toggles;
   enabled_toggles.push_back("use_user_defined_labels_in_backend");
   if (!REXCVAR_GET(webgpu_validation)) {
@@ -156,9 +168,8 @@ bool WebGpuProvider::Initialize() {
   wgpu::DawnTogglesDescriptor toggles;
   toggles.enabledToggleCount = enabled_toggles.size();
   toggles.enabledToggles = enabled_toggles.data();
-
-  wgpu::DeviceDescriptor device_desc;
   device_desc.nextInChain = &toggles;
+#endif
   device_desc.label = "rexgpu-webgpu";
   device_desc.requiredFeatureCount = features.size();
   device_desc.requiredFeatures = features.data();
@@ -188,6 +199,7 @@ bool WebGpuProvider::Initialize() {
   if (!device_) {
     return false;
   }
+#if !defined(__EMSCRIPTEN__)  // Dawn-only; the browser reports to its console.
   device_.SetLoggingCallback([](wgpu::LoggingType type, wgpu::StringView message) {
     switch (type) {
       case wgpu::LoggingType::Error:
@@ -201,6 +213,7 @@ bool WebGpuProvider::Initialize() {
         break;
     }
   });
+#endif
   queue_ = device_.GetQueue();
   device_.GetLimits(&limits_);
 
@@ -221,6 +234,28 @@ bool WebGpuProvider::Initialize() {
 }
 
 bool WebGpuProvider::SelectAdapter() {
+#if defined(__EMSCRIPTEN__)
+  // The browser picks the adapter; it has no enumeration.
+  wgpu::RequestAdapterOptions options;
+  options.powerPreference = wgpu::PowerPreference::HighPerformance;
+  Wait(instance_.RequestAdapter(
+      &options, wgpu::CallbackMode::WaitAnyOnly,
+      [this](wgpu::RequestAdapterStatus status, wgpu::Adapter adapter, wgpu::StringView message) {
+        if (status == wgpu::RequestAdapterStatus::Success) {
+          adapter_ = std::move(adapter);
+        } else {
+          REXLOG_ERROR("WebGPU: no adapter: {}", ToString(message));
+        }
+      }));
+  if (!adapter_) {
+    return false;
+  }
+  wgpu::AdapterInfo info;
+  adapter_.GetInfo(&info);
+  REXLOG_INFO("WebGPU adapter: {} {} ({}, {})", ToString(info.vendor), ToString(info.architecture),
+              AdapterTypeName(info.adapterType), ToString(info.description));
+  return true;
+#else
   wgpu::RequestAdapterOptions options;
   options.backendType = kPreferredBackend;
   options.powerPreference = wgpu::PowerPreference::HighPerformance;
@@ -257,6 +292,7 @@ bool WebGpuProvider::SelectAdapter() {
   adapter_ = wgpu::Adapter(adapters[size_t(chosen)].Get());
   REXLOG_INFO("WebGPU: using adapter {}", chosen);
   return true;
+#endif
 }
 
 bool WebGpuProvider::Wait(wgpu::Future future) const {

@@ -868,6 +868,42 @@ index 352af67..ad20064 100644
  #endif
  };
  
+diff --git a/include/rex/thread/web.h b/include/rex/thread/web.h
+new file mode 100644
+index 0000000..737caec
+--- /dev/null
++++ b/include/rex/thread/web.h
+@@ -0,0 +1,30 @@
++/**
++ * @file        thread/web.h
++ * @brief       Threads in the web (Emscripten) build: canvases and yielding
++ *
++ * A browser worker presents its canvas and delivers WebGPU callbacks only
++ * when it returns to its event loop; JSPI lets C++ do that without unwinding
++ * (docs/web-port/README.md 7.4 and 7.9.5 in Trials HD Recompiled).
++ */
++
++#pragma once
++
++#include <rex/platform.h>
++
++#if !REX_PLATFORM_EMSCRIPTEN
++#error "rex/thread/web.h is for the web (Emscripten) build only"
++#endif
++
++namespace rex::thread::web {
++
++// The next thread created by rex::thread::Thread::Create (from any thread)
++// receives these canvases (comma-separated CSS selectors, "#canvas" for the
++// page's canvas) as OffscreenCanvases it owns. Pass nullptr to clear.
++void SetTransferredCanvasesForNextThread(const char* selectors);
++
++// Returns to this worker's event loop once (the canvas presents, WebGPU
++// callbacks run) and resumes. Needs -sJSPI; not a timer, so repeated calls
++// are not clamped to 4 ms.
++void YieldToEventLoop();
++
++}  // namespace rex::thread::web
 diff --git a/include/rex/ui/imgui_dialog.h b/include/rex/ui/imgui_dialog.h
 index a7ab6b3..5db4278 100644
 --- a/include/rex/ui/imgui_dialog.h
@@ -937,6 +973,26 @@ index 294d706..77072bc 100644
  };
  
  }  // namespace rex::ui
+diff --git a/include/rex/ui/presenter.h b/include/rex/ui/presenter.h
+index afb4a30..750e087 100644
+--- a/include/rex/ui/presenter.h
++++ b/include/rex/ui/presenter.h
+@@ -375,6 +375,15 @@ class Presenter {
+   void RequestUIPaintFromUIThread();
+ 
+  protected:
++#if REX_PLATFORM_EMSCRIPTEN
++  // Web: the presenter paints to the page's canvas, which it owns on the GPU
++  // worker, outside the window-surface connection (docs/web-port/README.md
++  // 7.9.7); this gives the paint flow that surface's size.
++  void SetCanvasPaintSizeWeb(uint32_t width, uint32_t height) {
++    surface_width_in_paint_connection_ = width;
++    surface_height_in_paint_connection_ = height;
++  }
++#endif
+   enum class PaintResult {
+     kPresented,
+     kPresentedSuboptimal,
 diff --git a/include/rex/ui/renderdoc_api.h b/include/rex/ui/renderdoc_api.h
 index 536f710..665b647 100644
 --- a/include/rex/ui/renderdoc_api.h
@@ -1851,7 +1907,7 @@ index b4b885a..f2e8ea6 100644
  #include <sys/ioctl.h>
  #include <unistd.h>
 diff --git a/src/core/threading_posix.cpp b/src/core/threading_posix.cpp
-index 9ac8d15..0a74479 100644
+index 9ac8d15..418eb7c 100644
 --- a/src/core/threading_posix.cpp
 +++ b/src/core/threading_posix.cpp
 @@ -9,11 +9,15 @@
@@ -1880,18 +1936,61 @@ index 9ac8d15..0a74479 100644
  
  #include <pthread.h>
  #include <semaphore.h>
-@@ -42,6 +48,10 @@ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only")
+@@ -42,6 +48,13 @@ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only")
  
  #include <sched.h>
  
 +#if REX_PLATFORM_EMSCRIPTEN
++#include <emscripten/emscripten.h>
 +#include <emscripten/threading.h>
++
++#include <rex/thread/web.h>
 +#endif
 +
  #if REX_PLATFORM_ANDROID
  #include <dlfcn.h>
  
-@@ -178,6 +188,8 @@ void EnableAffinityConfiguration() {}
+@@ -173,11 +186,48 @@ void install_signal_handler(SignalType type) {
+ // TODO(dougvj)
+ void EnableAffinityConfiguration() {}
+ 
++#if REX_PLATFORM_EMSCRIPTEN
++namespace web {
++
++namespace {
++std::mutex transferred_canvases_mutex_;
++std::string transferred_canvases_;
++}  // namespace
++
++void SetTransferredCanvasesForNextThread(const char* selectors) {
++  std::lock_guard<std::mutex> lock(transferred_canvases_mutex_);
++  transferred_canvases_ = selectors ? selectors : "";
++}
++
++std::string TakeTransferredCanvases() {
++  std::lock_guard<std::mutex> lock(transferred_canvases_mutex_);
++  return std::exchange(transferred_canvases_, std::string());
++}
++
++// A MessageChannel round trip is one event-loop task: unlike setTimeout
++// (emscripten_sleep), it is not clamped to 4 ms when repeated.
++EM_ASYNC_JS(void, rex_web_yield_to_event_loop, (), {
++  await new Promise((resolve) => {
++    const channel = new MessageChannel();
++    channel.port1.onmessage = () => resolve();
++    channel.port2.postMessage(0);
++  });
++});
++
++void YieldToEventLoop() {
++  rex_web_yield_to_event_loop();
++}
++
++}  // namespace web
++#endif
++
+ // uint64_t ticks() { return mach_absolute_time(); }
+ 
  uint32_t current_thread_system_id() {
  #if defined(__APPLE__)
    return static_cast<uint32_t>(pthread_mach_thread_np(pthread_self()));
@@ -1900,7 +1999,7 @@ index 9ac8d15..0a74479 100644
  #else
    return static_cast<uint32_t>(syscall(SYS_gettid));
  #endif
-@@ -267,6 +279,50 @@ static sem_t* RexCreateAnonymousSemaphore() {
+@@ -267,6 +317,50 @@ static sem_t* RexCreateAnonymousSemaphore() {
  }
  #endif  // __APPLE__
  
@@ -1951,7 +2050,7 @@ index 9ac8d15..0a74479 100644
  class PosixConditionBase {
   public:
    PosixConditionBase() {
-@@ -320,12 +376,23 @@ class PosixConditionBase {
+@@ -320,12 +414,23 @@ class PosixConditionBase {
      }
    }
  
@@ -1977,7 +2076,7 @@ index 9ac8d15..0a74479 100644
        auto result = handles[0]->Wait(timeout);
        return std::make_pair(result, 0);
      }
-@@ -335,13 +402,41 @@ class PosixConditionBase {
+@@ -335,13 +440,41 @@ class PosixConditionBase {
                          ? std::chrono::steady_clock::time_point::max()
                          : start_time + timeout;
  
@@ -2021,7 +2120,7 @@ index 9ac8d15..0a74479 100644
  
        for (size_t i = 0; i < handles.size(); ++i) {
  #if REX_PLATFORM_LINUX
-@@ -367,6 +462,9 @@ class PosixConditionBase {
+@@ -367,6 +500,9 @@ class PosixConditionBase {
  
        if (!all_locked) {
          locks.clear();
@@ -2031,7 +2130,7 @@ index 9ac8d15..0a74479 100644
          std::this_thread::yield();
          continue;
        }
-@@ -411,12 +509,15 @@ class PosixConditionBase {
+@@ -411,12 +547,15 @@ class PosixConditionBase {
          return std::make_pair<WaitResult, size_t>(WaitResult::kTimeout, 0);
        }
  
@@ -2051,7 +2150,7 @@ index 9ac8d15..0a74479 100644
        }
      }
    }
-@@ -428,8 +529,16 @@ class PosixConditionBase {
+@@ -428,8 +567,16 @@ class PosixConditionBase {
   protected:
    inline virtual bool signaled() const = 0;
    inline virtual void post_execution() = 0;
@@ -2068,7 +2167,7 @@ index 9ac8d15..0a74479 100644
  };
  
  // There really is no native POSIX handle for a single wait/signal construct
-@@ -450,6 +559,7 @@ class PosixCondition<Event> : public PosixConditionBase {
+@@ -450,6 +597,7 @@ class PosixCondition<Event> : public PosixConditionBase {
      auto lock = std::unique_lock<std::mutex>(mutex_);
      signal_ = true;
      cond_.notify_all();
@@ -2076,7 +2175,7 @@ index 9ac8d15..0a74479 100644
      return true;
    }
  
-@@ -487,6 +597,7 @@ class PosixCondition<Semaphore> : public PosixConditionBase {
+@@ -487,6 +635,7 @@ class PosixCondition<Semaphore> : public PosixConditionBase {
      }
      count_ += release_count;
      cond_.notify_all();
@@ -2084,7 +2183,7 @@ index 9ac8d15..0a74479 100644
      return true;
    }
  
-@@ -519,6 +630,7 @@ class PosixCondition<Mutant> : public PosixConditionBase {
+@@ -519,6 +668,7 @@ class PosixCondition<Mutant> : public PosixConditionBase {
        // Free to be acquired by another thread
        if (count_ == 0) {
          cond_.notify_all();
@@ -2092,7 +2191,7 @@ index 9ac8d15..0a74479 100644
        }
        return true;
      }
-@@ -551,6 +663,7 @@ class PosixCondition<Timer> : public PosixConditionBase {
+@@ -551,6 +701,7 @@ class PosixCondition<Timer> : public PosixConditionBase {
      std::lock_guard<std::mutex> lock(mutex_);
      signal_ = true;
      cond_.notify_all();
@@ -2100,7 +2199,21 @@ index 9ac8d15..0a74479 100644
      return true;
    }
  
-@@ -736,6 +849,9 @@ class PosixCondition<Thread> : public PosixConditionBase {
+@@ -667,6 +818,13 @@ class PosixCondition<Thread> : public PosixConditionBase {
+         return false;
+       }
+     }
++#if REX_PLATFORM_EMSCRIPTEN
++    // Canvases requested for this thread (rex/thread/web.h).
++    std::string canvases = web::TakeTransferredCanvases();
++    if (!canvases.empty()) {
++      emscripten_pthread_attr_settransferredcanvases(&attr, canvases.c_str());
++    }
++#endif
+     if (pthread_create(&thread_, &attr, ThreadStartRoutine, start_data) != 0) {
+       pthread_attr_destroy(&attr);
+       return false;
+@@ -736,6 +894,9 @@ class PosixCondition<Thread> : public PosixConditionBase {
        if (pthread_equal(thread_, pthread_self())) {
          pthread_setname_np(std::string(name).c_str());
        }
@@ -2110,7 +2223,7 @@ index 9ac8d15..0a74479 100644
  #else
        pthread_setname_np(thread_, std::string(name).c_str());
  #endif
-@@ -772,6 +888,13 @@ class PosixCondition<Thread> : public PosixConditionBase {
+@@ -772,6 +933,13 @@ class PosixCondition<Thread> : public PosixConditionBase {
        return std::numeric_limits<uint64_t>::max();
      }
      return (uint64_t(1) << cpu_count) - 1;
@@ -2124,7 +2237,7 @@ index 9ac8d15..0a74479 100644
  #else
      cpu_set_t cpu_set;
  #if REX_PLATFORM_ANDROID
-@@ -799,6 +922,9 @@ class PosixCondition<Thread> : public PosixConditionBase {
+@@ -799,6 +967,9 @@ class PosixCondition<Thread> : public PosixConditionBase {
      // macOS doesn't expose Linux-style pthread affinity masks; keep this a
      // no-op so higher layers can build and run.
      (void)mask;
@@ -2134,7 +2247,7 @@ index 9ac8d15..0a74479 100644
  #else
      cpu_set_t cpu_set;
      CPU_ZERO(&cpu_set);
-@@ -857,6 +983,8 @@ class PosixCondition<Thread> : public PosixConditionBase {
+@@ -857,6 +1028,8 @@ class PosixCondition<Thread> : public PosixConditionBase {
        std::unique_lock<std::mutex> lock(callback_mutex_);
        user_callbacks_.push_back(std::move(callback));
        has_pending_user_callbacks_.store(true, std::memory_order_release);
@@ -2143,7 +2256,7 @@ index 9ac8d15..0a74479 100644
      }
  
      // If the callback is queued on the current thread, don't self-signal.
-@@ -872,6 +1000,10 @@ class PosixCondition<Thread> : public PosixConditionBase {
+@@ -872,6 +1045,10 @@ class PosixCondition<Thread> : public PosixConditionBase {
      // macOS has no sigqueue/pthread_sigqueue; pthread_kill delivers the signal
      // without the sigval payload.
      int result = pthread_kill(thread_, GetSystemSignal(SignalType::kThreadUserCallback));
@@ -2154,7 +2267,7 @@ index 9ac8d15..0a74479 100644
  #else
      sigval value{};
      value.sival_ptr = this;
-@@ -887,6 +1019,12 @@ class PosixCondition<Thread> : public PosixConditionBase {
+@@ -887,6 +1064,12 @@ class PosixCondition<Thread> : public PosixConditionBase {
      }
    }
  
@@ -2167,7 +2280,7 @@ index 9ac8d15..0a74479 100644
    bool DispatchQueuedUserCallbacks() {
      if (!has_pending_user_callbacks_.load(std::memory_order_acquire)) {
        return false;
-@@ -951,8 +1089,21 @@ class PosixCondition<Thread> : public PosixConditionBase {
+@@ -951,8 +1134,21 @@ class PosixCondition<Thread> : public PosixConditionBase {
        return true;
      }
  
@@ -2189,7 +2302,7 @@ index 9ac8d15..0a74479 100644
    }
  
    void Terminate(int exit_code) {
-@@ -979,6 +1130,7 @@ class PosixCondition<Thread> : public PosixConditionBase {
+@@ -979,6 +1175,7 @@ class PosixCondition<Thread> : public PosixConditionBase {
        exit_code_ = exit_code;
        signaled_ = true;
        cond_.notify_all();
@@ -2197,7 +2310,7 @@ index 9ac8d15..0a74479 100644
      }
      if (is_current_thread) {
        pthread_exit(reinterpret_cast<void*>(exit_code));
-@@ -1043,6 +1195,7 @@ class PosixCondition<Thread> : public PosixConditionBase {
+@@ -1043,6 +1240,7 @@ class PosixCondition<Thread> : public PosixConditionBase {
    mutable std::condition_variable state_signal_;
    std::deque<std::function<void()>> user_callbacks_;
    std::atomic<bool> has_pending_user_callbacks_{false};
@@ -2205,7 +2318,7 @@ index 9ac8d15..0a74479 100644
  #if REX_PLATFORM_ANDROID
    // Name accessible via name() on Android before API 26 which added
    // pthread_getname_np.
-@@ -1070,50 +1223,28 @@ bool DispatchCurrentThreadUserCallback() {
+@@ -1070,50 +1268,28 @@ bool DispatchCurrentThreadUserCallback() {
  
  namespace {
  
@@ -2269,7 +2382,7 @@ index 9ac8d15..0a74479 100644
  }  // namespace
  
  // This wraps a condition object as our handle because posix has no single
-@@ -1163,26 +1294,12 @@ WaitResult Wait(WaitHandle* wait_handle, bool is_alertable, std::chrono::millise
+@@ -1163,26 +1339,12 @@ WaitResult Wait(WaitHandle* wait_handle, bool is_alertable, std::chrono::millise
      return posix_wait_handle->condition().Wait(timeout);
    }
  
@@ -2298,7 +2411,7 @@ index 9ac8d15..0a74479 100644
    auto posix_wait_handle_to_signal = dynamic_cast<PosixWaitHandle*>(wait_handle_to_signal);
    auto posix_wait_handle_to_wait_on = dynamic_cast<PosixWaitHandle*>(wait_handle_to_wait_on);
    if (posix_wait_handle_to_signal == nullptr || posix_wait_handle_to_wait_on == nullptr) {
-@@ -1192,24 +1309,7 @@ WaitResult SignalAndWait(WaitHandle* wait_handle_to_signal, WaitHandle* wait_han
+@@ -1192,24 +1354,7 @@ WaitResult SignalAndWait(WaitHandle* wait_handle_to_signal, WaitHandle* wait_han
      return WaitResult::kFailed;
    }
  
@@ -2324,7 +2437,7 @@ index 9ac8d15..0a74479 100644
  }
  
  std::pair<WaitResult, size_t> WaitMultiple(WaitHandle* wait_handles[], size_t wait_handle_count,
-@@ -1228,21 +1328,13 @@ std::pair<WaitResult, size_t> WaitMultiple(WaitHandle* wait_handles[], size_t wa
+@@ -1228,21 +1373,13 @@ std::pair<WaitResult, size_t> WaitMultiple(WaitHandle* wait_handles[], size_t wa
      return PosixConditionBase::WaitMultiple(std::move(conditions), wait_all, timeout);
    }
  
@@ -2352,7 +2465,7 @@ index 9ac8d15..0a74479 100644
  }
  
  class PosixEvent : public PosixConditionHandle<Event> {
-@@ -1449,6 +1541,7 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
+@@ -1449,6 +1586,7 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
      thread->handle_.exit_code_ = 0;
      thread->handle_.signaled_ = true;
      thread->handle_.cond_.notify_all();
@@ -2360,7 +2473,7 @@ index 9ac8d15..0a74479 100644
    }
  
    current_thread_ = nullptr;
-@@ -1511,6 +1604,8 @@ void Thread::Exit(int exit_code) {
+@@ -1511,6 +1649,8 @@ void Thread::Exit(int exit_code) {
  void set_current_thread_name(const std::string_view name) {
  #if defined(__APPLE__)
    pthread_setname_np(std::string(name).c_str());
@@ -15072,6 +15185,92 @@ index 3f9422d..02bcc4b 100644
    if (keystroke_queue_.empty()) {
      return X_ERROR_EMPTY;
    }
+diff --git a/src/kernel/crt/memory.cpp b/src/kernel/crt/memory.cpp
+index 31c5384..d133f31 100644
+--- a/src/kernel/crt/memory.cpp
++++ b/src/kernel/crt/memory.cpp
+@@ -10,23 +10,37 @@
+ #include <cstring>
+ 
+ #include <rex/hook.h>
++#if REX_PLATFORM_EMSCRIPTEN
++#include <rex/memory/web_guest.h>
++#endif
+ 
+ namespace rex::kernel::crt {
+ 
++// Web: natively a write into GPU-watched memory faults into the runtime;
++// these host copies have to mark it themselves (docs/web-port 8.3.1, W-L05).
++static inline void* Written(void* dst, size_t n) {
++#if REX_PLATFORM_EMSCRIPTEN
++  rex::memory::web::MarkHostWrite(dst, uint32_t(n));
++#else
++  (void)n;
++#endif
++  return dst;
++}
++
+ // ---------------------------------------------------------------------------
+ // Standard memory operations
+ // ---------------------------------------------------------------------------
+ 
+ static void* native_memcpy(void* dst, const void* src, size_t n) {
+-  return std::memcpy(dst, src, n);
++  return Written(std::memcpy(dst, src, n), n);
+ }
+ 
+ static void* native_memmove(void* dst, const void* src, size_t n) {
+-  return std::memmove(dst, src, n);
++  return Written(std::memmove(dst, src, n), n);
+ }
+ 
+ static void* native_memset(void* dst, int val, size_t n) {
+-  return std::memset(dst, val, n);
++  return Written(std::memset(dst, val, n), n);
+ }
+ 
+ static void* native_memchr(const void* ptr, int val, size_t n) {
+@@ -38,19 +52,19 @@ static void* native_memchr(const void* ptr, int val, size_t n) {
+ // ---------------------------------------------------------------------------
+ 
+ static void* native_XMemCpy(void* dst, const void* src, size_t n) {
+-  return std::memcpy(dst, src, n);
++  return Written(std::memcpy(dst, src, n), n);
+ }
+ 
+ static void* native_XMemSet(void* dst, int val, size_t n) {
+-  return std::memset(dst, val, n);
++  return Written(std::memset(dst, val, n), n);
+ }
+ 
+ static void* native_XMemSet128(void* dst, int val, size_t n) {
+-  return std::memset(dst, val, n);
++  return Written(std::memset(dst, val, n), n);
+ }
+ 
+ static void* native_memset_vmx(void* dst, int val, size_t n) {
+-  return std::memset(dst, val, n);
++  return Written(std::memset(dst, val, n), n);
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -60,14 +74,14 @@ static void* native_memset_vmx(void* dst, int val, size_t n) {
+ static int native_memcpy_s(void* dst, size_t dstsz, const void* src, size_t count) {
+   if (!dst || !src || count > dstsz)
+     return 22;  // EINVAL
+-  std::memcpy(dst, src, count);
++  Written(std::memcpy(dst, src, count), count);
+   return 0;
+ }
+ 
+ static int native_memmove_s(void* dst, size_t dstsz, const void* src, size_t count) {
+   if (!dst || !src || count > dstsz)
+     return 22;  // EINVAL
+-  std::memmove(dst, src, count);
++  Written(std::memmove(dst, src, count), count);
+   return 0;
+ }
+ 
 diff --git a/src/kernel/xam/xam_net.cpp b/src/kernel/xam/xam_net.cpp
 index 58e36a4..b14b097 100644
 --- a/src/kernel/xam/xam_net.cpp

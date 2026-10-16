@@ -10,13 +10,15 @@
 #include <rex/ui/surface.h>
 #if defined(__APPLE__)
 #include <rex/ui/surface_mac.h>
+#elif defined(__EMSCRIPTEN__)
+#include <emscripten/html5.h>
 #else
 #include <rex/ui/surface_gnulinux.h>
 #endif
 
 #include "webgpu_provider.h"
 #include "wgsl/guest_output.wgsl.h"
-#if !defined(__APPLE__)
+#if !defined(__APPLE__) && !defined(__EMSCRIPTEN__)
 #include "x11_display.h"
 #endif
 
@@ -127,6 +129,9 @@ Surface::TypeFlags WebGpuPresenter::GetSupportedSurfaceTypes() const {
   }
 #if defined(__APPLE__)
   return Surface::kTypeFlag_CAMetalLayer;
+#elif defined(__EMSCRIPTEN__)
+  // The page's canvas is not a window surface: PaintToCanvas() draws to it.
+  return 0;
 #else
   return Surface::kTypeFlag_XcbWindow | Surface::kTypeFlag_WaylandSurface;
 #endif
@@ -136,6 +141,15 @@ Presenter::SurfacePaintConnectResult
 WebGpuPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(
     Surface& new_surface, uint32_t new_surface_width, uint32_t new_surface_height,
     bool was_paintable, bool& is_vsync_implicit_out) {
+#if defined(__EMSCRIPTEN__)
+  // No window surfaces on the web (GetSupportedSurfaceTypes).
+  (void)new_surface;
+  (void)new_surface_width;
+  (void)new_surface_height;
+  (void)was_paintable;
+  (void)is_vsync_implicit_out;
+  return SurfacePaintConnectResult::kFailureSurfaceUnusable;
+#else
   std::lock_guard lock(provider_.device_mutex());
   const wgpu::Device& device = provider_.device();
 
@@ -255,7 +269,64 @@ WebGpuPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(
   REXLOG_INFO("WebGpuPresenter: surface {}x{}, format {}, present mode {}", new_surface_width,
               new_surface_height, uint32_t(format), uint32_t(present_mode));
   return SurfacePaintConnectResult::kSuccess;
+#endif  // __EMSCRIPTEN__
 }
+
+#if defined(__EMSCRIPTEN__)
+bool WebGpuPresenter::PaintToCanvas() {
+  int width = 0;
+  int height = 0;
+  if (emscripten_get_canvas_element_size(kCanvasSelector, &width, &height) != EMSCRIPTEN_RESULT_SUCCESS ||
+      width <= 0 || height <= 0) {
+    return false;
+  }
+  {
+    std::lock_guard lock(provider_.device_mutex());
+    if (!wgpu_surface_) {
+      // The canvas was transferred to this thread (the GPU worker) when it
+      // was created; emdawnwebgpu finds it by its selector here.
+      wgpu::EmscriptenSurfaceSourceCanvasHTMLSelector canvas_source;
+      canvas_source.selector = kCanvasSelector;
+      wgpu::SurfaceDescriptor surface_desc;
+      surface_desc.label = "canvas";
+      surface_desc.nextInChain = &canvas_source;
+      wgpu_surface_ = provider_.instance().CreateSurface(&surface_desc);
+      if (!wgpu_surface_) {
+        REXLOG_ERROR("WebGpuPresenter: cannot create a surface for the canvas");
+        return false;
+      }
+    }
+    if (surface_config_.width != uint32_t(width) || surface_config_.height != uint32_t(height) ||
+        !surface_config_.device) {
+      wgpu::SurfaceCapabilities caps;
+      wgpu_surface_.GetCapabilities(provider_.adapter(), &caps);
+      wgpu::TextureFormat format = caps.formatCount ? caps.formats[0]
+                                                    : wgpu::TextureFormat::BGRA8Unorm;
+      for (size_t i = 0; i < caps.formatCount; ++i) {
+        if (IsPreferredSurfaceFormat(caps.formats[i])) {
+          format = caps.formats[i];
+          break;
+        }
+      }
+      wgpu::SurfaceConfiguration config;
+      config.device = provider_.device();
+      config.format = format;
+      config.usage = wgpu::TextureUsage::RenderAttachment;
+      config.width = uint32_t(width);
+      config.height = uint32_t(height);
+      // The browser paces presentation (9.3).
+      config.presentMode = wgpu::PresentMode::Fifo;
+      config.alphaMode = wgpu::CompositeAlphaMode::Opaque;
+      wgpu_surface_.Configure(&config);
+      surface_config_ = config;
+      SetCanvasPaintSizeWeb(uint32_t(width), uint32_t(height));
+      REXLOG_INFO("WebGpuPresenter: canvas {}x{}, format {}", width, height, uint32_t(format));
+    }
+  }
+  PaintResult result = PaintAndPresentImpl(false);
+  return result == PaintResult::kPresented || result == PaintResult::kPresentedSuboptimal;
+}
+#endif
 
 void WebGpuPresenter::DisconnectPaintingFromSurfaceFromUIThreadImpl() {
   std::lock_guard lock(provider_.device_mutex());
@@ -381,9 +452,13 @@ Presenter::PaintResult WebGpuPresenter::PaintAndPresentImpl(bool execute_ui_draw
   pass.End();
   wgpu::CommandBuffer commands = encoder.Finish();
   provider_.queue().Submit(1, &commands);
+#if !defined(__EMSCRIPTEN__)
+  // In a browser the canvas presents when the worker's task ends (the GPU
+  // worker yields after painting); emdawnwebgpu has no explicit present.
   if (wgpu_surface_.Present() != wgpu::Status::Success) {
     return PaintResult::kNotPresentedConnectionOutdated;
   }
+#endif
   return suboptimal ? PaintResult::kPresentedSuboptimal : PaintResult::kPresented;
 }
 

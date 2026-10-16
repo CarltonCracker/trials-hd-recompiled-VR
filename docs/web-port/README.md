@@ -1049,6 +1049,48 @@ reads `WebAudioRing`.
 - Error scopes and the `WaitAny` calls listed in 9.1 become `AllowSpontaneous` callbacks;
   test captures complete asynchronously and write the PNG from the callback.
 
+**As built (W-L06/W-L07 first stage, 2026-10-15).** The browser build links the WebGPU
+renderer (`src/gpu_webgpu/*.cpp` minus `x11_display.cpp`, WGSL embedded by its
+`embed_wgsl.cmake`; `--use-port=emdawnwebgpu -sJSPI -sOFFSCREENCANVAS_SUPPORT`) and
+registers it as "webgpu", the default (`?gpu_plugin=null` keeps the null one). How it runs:
+
+- **One GPU worker.** `WebGpuGraphicsSystem::SetupPresentation` only records the app
+  context on the web; `CreateCommandProcessor` calls
+  `rex::thread::web::SetTransferredCanvasesForNextThread("#canvas")` (new
+  `rex/thread/web.h`; `threading_posix.cpp` passes it to
+  `emscripten_pthread_attr_settransferredcanvases`), so the command processor's thread
+  gets the canvas: Emscripten proxies that `pthread_create` to the browser's main thread,
+  which transfers the canvas. `WebGpuCommandProcessor::SetupContext` then creates the
+  device and the presenter on that thread (`InitializeOnGpuWorker`); `presenter()`
+  returns the web presenter. Every WebGPU object lives on this worker.
+- **Waits:** emdawnwebgpu implements `TimedWaitAny` with JSPI, and `-sJSPI` makes every
+  pthread entry suspendable, so the renderer's existing `instance.WaitAny(...)` calls
+  (adapter/device requests, error scopes, map-async readbacks) suspend the worker to its
+  event loop unchanged. Only the Dawn-native instance, adapter enumeration, toggles and
+  logging callback are behind `#if !defined(__EMSCRIPTEN__)` (`webgpu_provider.cpp`).
+- **Presentation:** after `backend_->Swap()`, the GPU worker calls
+  `WebGpuPresenter::PaintToCanvas()` (surface from
+  `EmscriptenSurfaceSourceCanvasHTMLSelector{"#canvas"}`, configured at the canvas size,
+  Fifo, opaque; the SDK presenter learns the size through the new web-only
+  `Presenter::SetCanvasPaintSizeWeb`, without which the paint flow drew nothing) and then
+  `rex::thread::web::YieldToEventLoop()`: one `MessageChannel` round trip through an
+  `EM_ASYNC_JS` import. Not `emscripten_sleep(0)`: that is a `setTimeout`, clamped to 4 ms
+  once nested. The browser shows the frame when the worker's task ends;
+  `wgpuSurfacePresent` aborts in emdawnwebgpu and is skipped. The command processor's idle
+  wait stays a futex wait (a yield per idle would cost a task per ring kick).
+- **Write tracking:** `IssueDraw`, `IssueCopy` and `IssueSwap` call
+  `Memory::DeliverPhysicalWrites()` first (W-L05); without it textures uploaded before the
+  CPU filled them stayed black.
+- Not yet: ImGui overlays on the GPU worker (no presenter exists when `ReXApp` sets up
+  overlays), canvas resize, async test capture, timestamp-query degradation checks.
+
+Result: Chromium 154 (RX 6600) renders the main menu (`?web_assets_url=/assets`) like the
+native renderer, uncapped at about 930 guest frames per second (72 draws per frame).
+A 1280x720 page screenshot vs native `nav_0`: 37.0 dB overall; the static menu panel and
+rider match at 42-99 dB, the difference is in animated layers (selection pulse, moving
+background overlay) captured at a different phase. The WM2 check needs the scripted
+`main_menu_nav` with input (W-L08) and frame-aligned guest-output captures.
+
 #### 7.9.8 Files
 
 - WasmFS with the OPFS backend mounted at `/opfs`. Layout:
@@ -1843,6 +1885,22 @@ details of W-L04 to W-L09. The critical path is W-L01 → W-L02/W-L04 → W-L15 
 W-L06/W-L07 (graphics).
 
 ### 16.6 Notes log
+
+- 2026-10-15 (claude-opus-5.5): **W-L06/W-L07 first stage + W-L05 delivery: the main menu
+  renders in Chromium through the browser's WebGPU** (as built in 7.9.7). The renderer
+  runs on the command processor's thread, which receives the canvas; its `WaitAny` calls
+  suspend through JSPI unchanged; each swap paints the canvas and yields once to the event
+  loop. CPU writes reach the renderer's caches through `Memory::DeliverPhysicalWrites()`
+  before every draw, resolve and swap, and the W-S09 CRT hooks (SDK `kernel/crt/memory.cpp`,
+  app `src/crt_hooks.cpp`) mark what they write; file reads already trigger the watches
+  (`xfile.cpp`), and XMA output is audio only. Menu: 72 draws per frame, ~930 guest FPS
+  uncapped; screenshot vs native `nav_0` 37.0 dB (animated layers at a different phase;
+  static regions 42-99 dB). Native: `flock out/native-web-check.lock tools/check_native.sh
+  check out/native_baseline_claude` (baseline fingerprint updated to pi-gpt's reviewed W-L16
+  regeneration): `webgpu: 9 captures`, `worst 42.2 dB`; `vulkan: 9 captures`, `worst 42.4
+  dB`; `NATIVE CHECK PASSED`. W-L05/W-L06/W-L07 stay claimed: overlays on the GPU worker,
+  canvas resize, async capture, and the WM2/WM4 scripted checks (need W-L08 input).
+  `cdp.py --viewport WxH` sets an exact page size.
 
 - 2026-10-15 (claude-opus-5.5): W-L06/W-L07 progress: the WebGPU renderer runs in Chromium on
   the GPU worker (device on the command processor's thread, canvas transferred to it, JSPI

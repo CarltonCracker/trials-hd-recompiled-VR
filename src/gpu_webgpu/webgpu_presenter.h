@@ -67,6 +67,15 @@ class WebGpuPresenter final : public Presenter {
 
   WebGpuProvider& provider() const { return provider_; }
 
+#if defined(__EMSCRIPTEN__)
+  // Web: the page's canvas, owned by the GPU worker (docs/web-port 7.9.7).
+  static constexpr const char* kCanvasSelector = "#canvas";
+  // Paints the newest guest output to the canvas from the GPU worker,
+  // configuring the canvas surface on first use or after a resize. The
+  // browser shows it when the worker next returns to its event loop.
+  bool PaintToCanvas();
+#endif
+
   Surface::TypeFlags GetSupportedSurfaceTypes() const override;
   bool CaptureGuestOutput(RawImage& image_out) override;
 

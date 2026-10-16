@@ -18,9 +18,18 @@
 #include <rex/ppc/func.h>
 #include <rex/system/xmemory.h>
 
+// Natively a write into GPU-watched memory faults into the runtime's handler;
+// on the web these copies mark the pages themselves (docs/web-port 8.3.1).
+#if defined(__EMSCRIPTEN__)
+#define TRIALSHD_MARK_GUEST_WRITE(address, size) rex::memory::web::MarkGuestWrite(address, size)
+#else
+#define TRIALSHD_MARK_GUEST_WRITE(address, size) ((void)0)
+#endif
+
 extern "C" REX_FUNC(sub_822F81A0) {
   std::memmove(rex::memory::GuestPtr(base, ctx.r3.u32), rex::memory::GuestPtr(base, ctx.r4.u32),
                ctx.r5.u32);
+  TRIALSHD_MARK_GUEST_WRITE(ctx.r3.u32, ctx.r5.u32);
 }
 
 // memmove for both copies: as fast as memcpy here, and defined if a caller
@@ -29,8 +38,10 @@ extern "C" REX_FUNC(sub_822F81A0) {
 extern "C" REX_FUNC(sub_822F8628) {
   std::memmove(rex::memory::GuestPtr(base, ctx.r3.u32), rex::memory::GuestPtr(base, ctx.r4.u32),
                ctx.r5.u32);
+  TRIALSHD_MARK_GUEST_WRITE(ctx.r3.u32, ctx.r5.u32);
 }
 
 extern "C" REX_FUNC(sub_822F8040) {
   std::memset(rex::memory::GuestPtr(base, ctx.r3.u32), int(ctx.r4.u32 & 0xFF), ctx.r5.u32);
+  TRIALSHD_MARK_GUEST_WRITE(ctx.r3.u32, ctx.r5.u32);
 }

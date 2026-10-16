@@ -16,6 +16,13 @@
 #include "webgpu_backend.h"
 #include "webgpu_provider.h"
 
+#if defined(__EMSCRIPTEN__)
+#include <rex/thread/web.h>
+
+#include "webgpu_graphics_system.h"
+#include "webgpu_presenter.h"
+#endif
+
 // Same names as the Vulkan backend's: the app and the test scripts set them
 // by name (docs/webgpu-renderer/README.md, 7.6.2).
 REXCVAR_DEFINE_BOOL(log_guest_fps, false, "GPU",
@@ -48,6 +55,12 @@ WebGpuCommandProcessor::WebGpuCommandProcessor(GraphicsSystem* graphics_system,
 WebGpuCommandProcessor::~WebGpuCommandProcessor() = default;
 
 bool WebGpuCommandProcessor::SetupContext() {
+#if defined(__EMSCRIPTEN__)
+  // This thread is the GPU worker: every WebGPU object lives here (7.9.5).
+  if (!static_cast<WebGpuGraphicsSystem*>(graphics_system_)->InitializeOnGpuWorker()) {
+    return false;
+  }
+#endif
   provider_ = static_cast<ui::webgpu::WebGpuProvider*>(graphics_system_->provider());
   if (!provider_) {
     return false;
@@ -62,6 +75,10 @@ bool WebGpuCommandProcessor::SetupContext() {
 
 void WebGpuCommandProcessor::ShutdownContext() {
   backend_.reset();
+#if defined(__EMSCRIPTEN__)
+  provider_ = nullptr;
+  static_cast<WebGpuGraphicsSystem*>(graphics_system_)->ShutdownOnGpuWorker();
+#endif
 }
 
 Shader* WebGpuCommandProcessor::LoadShader(xenos::ShaderType shader_type, uint32_t guest_address,
@@ -73,6 +90,11 @@ bool WebGpuCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
                                        IndexBufferInfo* index_buffer_info,
                                        bool major_mode_explicit) {
   g_draws_since_report.fetch_add(1, std::memory_order_relaxed);
+#if defined(__EMSCRIPTEN__)
+  // CPU writes since the last delivery reach the caches watching them before
+  // this draw reads guest memory, as the write faults would natively (7.9.3).
+  memory_->DeliverPhysicalWrites();
+#endif
   DrawSnapshot draw;
   draw.regs = register_file_;
   draw.primitive_type = prim_type;
@@ -105,6 +127,9 @@ bool WebGpuCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
 
 bool WebGpuCommandProcessor::IssueCopy() {
   g_copies_since_report.fetch_add(1, std::memory_order_relaxed);
+#if defined(__EMSCRIPTEN__)
+  memory_->DeliverPhysicalWrites();
+#endif
   ResolveSnapshot resolve;
   resolve.regs = register_file_;
   resolve.frame_index = frame_index_;
@@ -122,6 +147,9 @@ bool WebGpuCommandProcessor::IssueCopy() {
 
 void WebGpuCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
                                        uint32_t frontbuffer_height) {
+#if defined(__EMSCRIPTEN__)
+  memory_->DeliverPhysicalWrites();  // A CPU-written front buffer.
+#endif
   if (REXCVAR_GET(log_guest_fps)) {
     // Same line format as the Vulkan backend (tests/check_fps_log.py).
     using clock = std::chrono::steady_clock;
@@ -177,6 +205,15 @@ void WebGpuCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
   swap.display_width = std::max(uint32_t(1), uint32_t(video_mode.display_width));
   swap.display_height = std::max(uint32_t(1), uint32_t(video_mode.display_height));
   backend_->Swap(swap);
+#if defined(__EMSCRIPTEN__)
+  // Draw the frame to the canvas and return to the event loop once, which is
+  // when the browser shows it (and runs pending WebGPU callbacks).
+  if (auto* presenter =
+          static_cast<ui::webgpu::WebGpuPresenter*>(graphics_system_->presenter())) {
+    presenter->PaintToCanvas();
+  }
+  ::rex::thread::web::YieldToEventLoop();
+#endif
 }
 
 }  // namespace rex::graphics::webgpu
