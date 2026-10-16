@@ -26,7 +26,13 @@ class TrialsHdAudioProcessor extends AudioWorkletProcessor {
     this.lastWrite = 0;
     this.quantaSinceWrite = kFedQuanta;
     this.peak = 0;
+    this.recording = null;
     this.port.onmessage = (event) => {
+      if (event.data.record) {
+        // Test/debug: copy the next `record` frames played (stereo, interleaved).
+        this.recording = { data: new Float32Array(event.data.record * 2), frames: 0 };
+        return;
+      }
       const { buffer, offset } = event.data;
       this.capacity = new Uint32Array(buffer, offset, kHeaderWords)[kCapacity];
       this.header = new Uint32Array(buffer, offset, kHeaderWords);
@@ -72,6 +78,19 @@ class TrialsHdAudioProcessor extends AudioWorkletProcessor {
     left.fill(0, count);
     if (right) {
       right.fill(0, count);
+    }
+    const rec = this.recording;
+    if (rec) {
+      const n = Math.min(frames, rec.data.length / 2 - rec.frames);
+      for (let i = 0; i < n; ++i) {
+        rec.data[(rec.frames + i) * 2] = left[i];
+        rec.data[(rec.frames + i) * 2 + 1] = right ? right[i] : left[i];
+      }
+      rec.frames += n;
+      if (rec.frames * 2 >= rec.data.length) {
+        this.port.postMessage({ recorded: rec.data }, [rec.data.buffer]);
+        this.recording = null;
+      }
     }
     if (count < frames && this.quantaSinceWrite < kFedQuanta) {
       Atomics.add(header, kUnderruns, 1);

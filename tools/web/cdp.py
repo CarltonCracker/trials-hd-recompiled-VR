@@ -25,6 +25,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import wave
 
 from websockets.asyncio.client import connect
 
@@ -199,6 +200,32 @@ async def run_headless_script(s, script_path, out_dir):
             out_file.parent.mkdir(parents=True, exist_ok=True)
             out_file.write_bytes(base64.b64decode(shot["data"]))
             s.write("capture", f"saved screenshot to {out_file}")
+        elif cmd == "record_audio":
+            # record_audio NAME SECONDS: saves the next SECONDS of what the page's
+            # AudioWorklet plays to NAME.wav (blocks like `wait`).
+            name, seconds = c_args[0], float(c_args[1])
+            expr = (
+                "(async () => { const a = window.trialsHd.audio;"
+                f" const d = await a.record({seconds});"
+                " const pcm = new Int16Array(d.length);"
+                " for (let i = 0; i < d.length; ++i) pcm[i] = Math.max(-1, Math.min(1, d[i])) * 32767;"
+                " const u8 = new Uint8Array(pcm.buffer); let bin = '';"
+                " for (let i = 0; i < u8.length; i += 32768) bin += String.fromCharCode(...u8.subarray(i, i + 32768));"
+                " return JSON.stringify({rate: a.context.sampleRate, data: btoa(bin)}); })()")
+            result = await s.call("Runtime.evaluate", {
+                "expression": expr, "awaitPromise": True, "returnByValue": True},
+                session=s.page_session)
+            if "exceptionDetails" in result:
+                raise RuntimeError(f"Audio recording failed: {result['exceptionDetails']}")
+            recorded = json.loads(result["result"]["value"])
+            out_file = out_dir / f"{name}.wav"
+            out_file.parent.mkdir(parents=True, exist_ok=True)
+            with wave.open(str(out_file), "wb") as wav:
+                wav.setnchannels(2)
+                wav.setsampwidth(2)
+                wav.setframerate(int(recorded["rate"]))
+                wav.writeframes(base64.b64decode(recorded["data"]))
+            s.write("capture", f"saved audio to {out_file}")
         elif cmd == "click":
             # click X Y: a left click at CSS pixel (X, Y) of the page.
             x, y = float(c_args[0]), float(c_args[1])

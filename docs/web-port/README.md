@@ -1659,7 +1659,7 @@ profile per thread with guest functions named `__imp__sub_<address>`.
 | WM2 | done 2026-10-16 (16.6: menu panel 40.6-51.6 dB, full frame 38.3-39.1 dB) | Menus render through the browser's WebGPU | `main_menu_nav` golden captures within 40 dB of native |
 | WM3 | done 2026-10-16 (W-L10) | Game data import and persistence | Fresh profile → pick package → plays; reload → no re-import |
 | WM4 | done 2026-10-16 (16.6) | Rides render; input from keyboard and gamepad | `ride_middle_name_danger` completes; `check_fps_log.py 60` passes in Chromium |
-| WM5 | todo | Audio | Music and effects audible; no underruns over a 2-minute ride |
+| WM5 | done 2026-10-16 (measured, 16.6; listening check by the user) | Audio | Music and effects audible; no underruns over a 2-minute ride |
 | WM6 | todo | 60 FPS at 720p in desktop Chrome (RX 6600) | 3 runs, min ≥ 55 FPS riding, logged in 4.3-style table |
 | WM7 | todo | Firefox desktop | WM2–WM5 checks pass in Firefox |
 | WM8 | todo | Safari (macOS) | WM2–WM5 checks pass, or a documented blocker |
@@ -1887,7 +1887,7 @@ Every task's "Done when" implicitly includes **`tools/check_native.sh check` pas
 | W-L09 | todo | **Split guest-memory mirror** (only if W-S01 shows < 512 MiB storage bindings): 4 × 128 MiB buffers, WGSL address → (binding, offset), index/vertex fetch and memexport paths updated, native unchanged unless `--webgpu_split_mirror`. | W-S01 | renderer doc 8.3, 9.1 | Native with the split forced passes golden scenes; web passes WM2 |
 | W-L10 | done 2026-10-16 (pi-gpt; committed by claude-opus-5.5, 16.6) | **Files and import**: WasmFS + OPFS backend, VFS host-path device on OPFS, import flow (picker, drag-drop, extraction worker using W-S13), license metadata, saves/settings/shader storage in OPFS, `storage.persist()` (8.6). | W-L01, W-S13 | 8.6, `src/package_license.cpp` | WM3 |
 | W-L11 | todo | **Browser CPU cost reduction** for the GPU worker if W-S12 or WM4 shows it bound: render bundles for static passes, fewer bind-group changes, larger uniform rings, batching small uploads. | W-S12, WM4 | 9.6, renderer doc 7.5 | WM6 or a documented ceiling with profiles |
-| W-L12 | claimed claude-opus-5.5 2026-10-16 | **Audio**: FFmpeg for wasm (XMA only), web audio driver with an AudioWorklet and SAB ring, AudioContext unlock on first gesture (8.5). | W-L01 | 8.5, SDK `src/audio/` | WM5 |
+| W-L12 | done 2026-10-16 (16.6) | **Audio**: FFmpeg for wasm (XMA only), web audio driver with an AudioWorklet and SAB ring, AudioContext unlock on first gesture (8.5). | W-L01 | 8.5, SDK `src/audio/` | WM5 |
 | W-L13 | todo | **Option B (wasm32 remapped window)** if W-L03 or Safari requires it: heap range limits in the SDK, segment table macro, 32-bit pointer audit. | W-L03 | 7.1 | Same golden checks as WM2/WM4 in a wasm32 build |
 | W-L14 | claimed pi-gpt 2026-10-15 (W-S13 first; W-L16 verification still running) | **Review gate** for small-model work: review each `review` task within a day; check native builds still pass. | — | 16.1 | Ongoing |
 | W-L15 | review 2026-10-15 (needs macOS check) | **Web build system** (10.1, 10.2): `web-wasm64-release` preset, `TRIALSHD_WEB` (OFF by default, `FATAL_ERROR` without Emscripten, 7.8), static WebGPU renderer library, third-party subset, shell HTML, link flags; boots to WM1 with the GPU plugin stubbed. Also: kernel/threading web layer (timers thread, affinity no-ops, exception handler and `dlopen` compiled out, fibers per W-S08, sockets stubbed). | W-L01, W-L02, W-L04, W-S10, W-S11 | 3.5, 8.2, 8.4, 10 | WM1 |
@@ -1914,6 +1914,16 @@ details of W-L04 to W-L09. The critical path is W-L01 → W-L02/W-L04 → W-L15 
 W-L06/W-L07 (graphics).
 
 ### 16.6 Notes log
+
+- 2026-10-16 (claude-opus-5.5): **W-L12 and WM5 done.** `ride_middle_name_danger.txt` in
+  Chromium (131 s): **0 underruns**, worklet consumption exactly real time (heartbeat 49,280
+  quanta = 131.4 s), peak 0.48. New `WebAudio.record(seconds)` + `cdp.py` script command
+  `record_audio NAME SECONDS` save what the AudioWorklet actually played (WAV in the out dir;
+  game audio, never commit it). 30 s recorded while riding: stereo (L/R correlation 0.52), no
+  silent 250 ms window, no clicks (no sample step > 0.5), a steady bed around -40 dBFS with
+  events up to -26 dBFS; energy 19% < 200 Hz, 51% 200-2000 Hz, 25% 2-8 kHz. XMA decodes
+  through the wasm FFmpeg (`decode_frame` in the CPU profile). The browser needs a key press,
+  click or touch before it plays; until then frames are dropped at the playback rate.
 
 - 2026-10-16 (claude-opus-5.5): **W-L06, W-L07, W-L08 and WM4 done.** Chromium, all with the
   committed build: `keyboard_ride.txt` (Return through menus, Up to ride, Left/Right lean, P

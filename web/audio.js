@@ -65,6 +65,19 @@ export class WebAudio {
     }
   }
 
+  // For tests and debugging: resolves with the next `seconds` of what the
+  // worklet plays, as interleaved stereo samples at the context's rate.
+  record(seconds) {
+    return new Promise((resolve) => {
+      this.node.port.onmessage = (event) => {
+        if (event.data.recorded) {
+          resolve(event.data.recorded);
+        }
+      };
+      this.node.port.postMessage({ record: Math.round(seconds * this.context.sampleRate) });
+    });
+  }
+
   // For tests and the console: the ring's counters.
   stats() {
     const h = this.header;
