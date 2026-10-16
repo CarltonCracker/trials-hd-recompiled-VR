@@ -713,6 +713,35 @@ index 3c2fe09..95f7db1 100644
    alignas(16) uint8_t src[16], dst[16];
    simde_mm_store_si128((simde__m128i*)src, a);
    memset(dst, 0, sizeof(dst));
+diff --git a/include/rex/ppc/web_fma.h b/include/rex/ppc/web_fma.h
+new file mode 100644
+index 0000000..4155460
+--- /dev/null
++++ b/include/rex/ppc/web_fma.h
+@@ -0,0 +1,23 @@
++// Exact double FMA for the generated single-precision forms (caller rounds to float).
++#pragma once
++
++#include <cmath>
++#include <limits>
++
++namespace rex::ppc {
++
++inline double FmaSingle(double a, double b, double c) noexcept {
++#if defined(__clang__)
++#pragma clang fp contract(off)
++#endif
++  static_assert(std::numeric_limits<float>::digits == 24 &&
++                std::numeric_limits<double>::digits == 53);
++  // Two finite float operands have an exact, non-overflowing 48-bit double product.
++  if (std::isfinite(a) && std::isfinite(b) && std::isfinite(c) &&
++      double(float(a)) == a && double(float(b)) == b) {
++    return a * b + c;
++  }
++  return std::fma(a, b, c);
++}
++
++}  // namespace rex::ppc
 diff --git a/include/rex/system/gpu_plugin.h b/include/rex/system/gpu_plugin.h
 index 453c210..b59ac7e 100644
 --- a/include/rex/system/gpu_plugin.h
@@ -1041,10 +1070,10 @@ index 0000000..dc2c10a
 +
 +}  // namespace rex::ui
 diff --git a/resources/templates/codegen/pch_h.inja b/resources/templates/codegen/pch_h.inja
-index 68274d2..df2e325 100644
+index 68274d2..9890fc7 100644
 --- a/resources/templates/codegen/pch_h.inja
 +++ b/resources/templates/codegen/pch_h.inja
-@@ -333,3 +333,96 @@ inline std::atomic<i32>& ppc_global_lock_count_() {
+@@ -333,3 +333,101 @@ inline std::atomic<i32>& ppc_global_lock_count_() {
      assert(old_count_ >= 1 && "LeaveGlobalLock called without matching EnterGlobalLock"); \
      rex::thread::global_critical_region::mutex().unlock();                                \
    } while (0)
@@ -1061,6 +1090,8 @@ index 68274d2..df2e325 100644
 +#define REX_CAS_U64(x, expected, desired) \
 +  __sync_bool_compare_and_swap(reinterpret_cast<uint64_t*>(REX_RAW_ADDR(x)), expected, desired)
 +#define REX_ZERO_CACHE_LINE(x, size) memset((void*)REX_RAW_ADDR(x), 0, size)
++// Native FMA stays std::fma; the web path preserves the same double result.
++#define REX_FMA_S(a, b, c) std::fma(a, b, c)
 +
 +//=============================================================================
 +// Web (Emscripten) memory model
@@ -1072,6 +1103,9 @@ index 68274d2..df2e325 100644
 +
 +#if defined(__EMSCRIPTEN__)
 +#include <rex/memory/web_guest.h>
++#include <rex/ppc/web_fma.h>
++#undef REX_FMA_S
++#define REX_FMA_S(a, b, c) ::rex::ppc::FmaSingle(a, b, c)
 +
 +#undef REX_PHYS_HOST_OFFSET
 +#define REX_PHYS_HOST_OFFSET(addr) (::rex::memory::web::kFold[(u32)(addr) >> 24])
@@ -1141,6 +1175,46 @@ index 68274d2..df2e325 100644
 +    }                                                                                    \
 +  } while (0)
 +#endif  // __EMSCRIPTEN__
+diff --git a/src/codegen/builders/floating_point.cpp b/src/codegen/builders/floating_point.cpp
+index 1702241..b1921b8 100644
+--- a/src/codegen/builders/floating_point.cpp
++++ b/src/codegen/builders/floating_point.cpp
+@@ -207,7 +207,7 @@ bool build_fmadd(BuilderContext& ctx) {
+ 
+ bool build_fmadds(BuilderContext& ctx) {
+   ctx.emit_set_flush_mode(false);
+-  ctx.println("\t{}.f64 = double(float(std::fma({}.f64, {}.f64, {}.f64)));",
++  ctx.println("\t{}.f64 = double(float(REX_FMA_S({}.f64, {}.f64, {}.f64)));",
+               ctx.f(ctx.insn.operands[0]), ctx.f(ctx.insn.operands[1]), ctx.f(ctx.insn.operands[2]),
+               ctx.f(ctx.insn.operands[3]));
+   return true;
+@@ -223,7 +223,7 @@ bool build_fmsub(BuilderContext& ctx) {
+ 
+ bool build_fmsubs(BuilderContext& ctx) {
+   ctx.emit_set_flush_mode(false);
+-  ctx.println("\t{}.f64 = double(float(std::fma({}.f64, {}.f64, -{}.f64)));",
++  ctx.println("\t{}.f64 = double(float(REX_FMA_S({}.f64, {}.f64, -{}.f64)));",
+               ctx.f(ctx.insn.operands[0]), ctx.f(ctx.insn.operands[1]), ctx.f(ctx.insn.operands[2]),
+               ctx.f(ctx.insn.operands[3]));
+   return true;
+@@ -239,7 +239,7 @@ bool build_fnmadd(BuilderContext& ctx) {
+ 
+ bool build_fnmadds(BuilderContext& ctx) {
+   ctx.emit_set_flush_mode(false);
+-  ctx.println("\t{}.f64 = double(float(-std::fma({}.f64, {}.f64, {}.f64)));",
++  ctx.println("\t{}.f64 = double(float(-REX_FMA_S({}.f64, {}.f64, {}.f64)));",
+               ctx.f(ctx.insn.operands[0]), ctx.f(ctx.insn.operands[1]), ctx.f(ctx.insn.operands[2]),
+               ctx.f(ctx.insn.operands[3]));
+   return true;
+@@ -255,7 +255,7 @@ bool build_fnmsub(BuilderContext& ctx) {
+ 
+ bool build_fnmsubs(BuilderContext& ctx) {
+   ctx.emit_set_flush_mode(false);
+-  ctx.println("\t{}.f64 = double(float(-std::fma({}.f64, {}.f64, -{}.f64)));",
++  ctx.println("\t{}.f64 = double(float(-REX_FMA_S({}.f64, {}.f64, -{}.f64)));",
+               ctx.f(ctx.insn.operands[0]), ctx.f(ctx.insn.operands[1]), ctx.f(ctx.insn.operands[2]),
+               ctx.f(ctx.insn.operands[3]));
+   return true;
 diff --git a/src/codegen/builders/helpers.h b/src/codegen/builders/helpers.h
 index dbc8d51..331190f 100644
 --- a/src/codegen/builders/helpers.h

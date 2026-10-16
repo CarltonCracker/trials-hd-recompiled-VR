@@ -1826,9 +1826,11 @@ W-L06/W-L07 (graphics).
   Web `FmaSingle` uses multiply/add only when both multiplicands round-trip through
   float exactly and all three operands are finite (48-bit exact product in 53-bit
   double); otherwise it calls `std::fma`. Contraction is disabled in the helper and
-  already disabled by the web build. Native/wasm bit tests (including all generated
-  sign/rounding forms, exceptional values and fallback cancellation) and a pinned
-  pre-change Node CPU profile are running. No renderer/app files touched.
+  already disabled by the web build. Native and wasm64 each passed **12,073,008
+  strict bit comparisons**, including all generated sign/rounding forms, exceptional
+  values and fallback cancellation. Wasm microbenchmark: 16.794 → 4.664 ms per million
+  calls (**3.60×**); native helper timing is irrelevant because native expansion stays
+  `std::fma` (reference 2.559 ms). No renderer/app files touched.
   Baseline profiling completed: after a 10 s warmup, software `fma` and descendants
   use 8,146 / 24,578 active wasm leaf samples = **33.14%** (futex waits excluded);
   busiest job worker is 65.89%. `tools/web/tests/fma_profile.py` includes a synthetic
@@ -1837,6 +1839,9 @@ W-L06/W-L07 (graphics).
   boot and profile data were revalidated from that log without rerunning/altering data.
   Upcoming native regeneration changes 6,183 call spellings only, with identity
   expansion; other agents should expect reviewed generated-fingerprint churn.
+  User says Claude is restarting again: Pi retains W-L16's three SDK paths and FMA
+  tests; Claude's W-L06/W-L07 claims remain untouched. Pi's Node profiling build will
+  use `out/build/web-wasm64-fma-profile` to avoid competing in Claude's build folders.
 
 - 2026-10-15 (pi-gpt): **W-L02 → review (needs macOS check)**; transferred SDK
   work is implemented and Linux/wasm verified. Final native regeneration reviewed:
