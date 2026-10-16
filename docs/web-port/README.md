@@ -491,8 +491,13 @@ per million calls (3.60×)**. Native behavior is not optimized or changed.
 The pinned pre-change Node run (`out/fma-before/`) booted and profiled for 40 seconds.
 After a 10-second warmup, FMA and descendants accounted for **33.14%** of active wasm
 samples (futex waits excluded). `tools/web/tests/fma_profile.py` has a synthetic parser
-self-check and retains every worker's statistics. Full-game post-change profiling and
-native golden verification are required before W-L16 is complete.
+self-check and retains every worker's statistics. The pinned post-change run
+(`out/fma-after/`) booted and continued beyond 1,200 swaps: **11 / 9,125 = 0.12%**
+active wasm FMA samples, worst busy worker **0.24%**, passing the <5% target. All
+107 generated files compiled in the full Node build, SDK header regressions passed,
+and Linux native golden checks passed. Other runtime/UI files evolved concurrently,
+so these profiles do not establish a whole-game speedup attributable solely to FMA.
+W-L16 remains **review pending macOS**; full browser physics replay is still unverified.
 
 ---
 
@@ -1840,7 +1845,7 @@ Every task's "Done when" implicitly includes **`tools/check_native.sh check` pas
 | W-S10 | review | S | Header portability patch (SDK patch, guarded): `REX_PLATFORM_EMSCRIPTEN` in `platform.h`; enable the portable `vsl`/`vslo`/`vsro` branches for `__wasm__`; extend the chrono shim to `__EMSCRIPTEN__`; allow `dynlib.h` with no native library names. (Section 6 items 1, 3, 4, 6.) | — | Native Linux build unchanged (`git diff` of generated objects not needed; just builds and boots); `em++` of `trials_hd_recomp.0.cpp` gets past those three errors |
 | W-S11 | review | S | wasm `FPSCRPlatform` (section 6 item 2): shadow register for `getcsr`/`setcsr`, no-op flush; log (debug builds) when a guest rounding mode other than nearest is set. Also log natively which rounding modes the 5 `storeFromGuest` sites set during rides. | W-S10 | Natively: modes listed in 14.6; wasm: header compiles |
 | W-S12 | review | S | Browser WebGPU draw-cost benchmark page: 1,500 draws/frame with per-draw `setBindGroup` (dynamic offsets) and `setPipeline` changes like the renderer (renderer doc 7.5); report ms/frame in Chromium here vs the same program natively with Dawn (`tools/webgpu_smoke` can host the native half). | W-S04 | Table in 9.6 |
-| W-S13 | review | S | Port `tools/stfs_extract.py` to C++ (`tools/stfs_extract/stfs_extract.cpp`, library + CLI), byte-identical output on the user's package. | — | `cmp -r` of both extractions is empty; CLI added to native CMake as an optional tool |
+| W-S13 | review: must fix import validation (W-L17) | S | Port `tools/stfs_extract.py` to C++ (`tools/stfs_extract/stfs_extract.cpp`, library + CLI), byte-identical output on the user's package. | — | `cmp -r` of both extractions is empty; CLI added to native CMake as an optional tool |
 | W-S14 | done 2026-10-15 9b5a087 | S | `tools/web/serve.py`: static server on `127.0.0.1:8080` with COOP/COEP/CORP headers, `application/wasm`, brotli/gzip pre-compressed files, no directory listing outside the build folder. | — | `curl -I` shows the headers; a test page reports `crossOriginIsolated === true` |
 | W-S15 | done 2026-10-15 (with W-L15; script runner: W-S19) | S | `tools/web/cdp.py`: minimal CDP client (stdlib + `websockets` from `.venv`): launch Chromium with 11.1 flags, open URL, stream console to a file, `evaluate` JS, screenshot, and run `tests/headless/*.txt` commands through a page hook. | W-S14 | Runs a demo script against W-S04's page and saves a screenshot |
 | W-S16 | blocked: W-L10 | M | Pipeline warm-up: on startup, read the OPFS shader storage and create pipelines with `createRenderPipelineAsync` before the menu appears (design note from W-L10). | W-L10 | First menu frame has no shader-compile stalls > 50 ms in the console timing log |
@@ -1865,11 +1870,16 @@ Every task's "Done when" implicitly includes **`tools/check_native.sh check` pas
 | W-L11 | todo | **Browser CPU cost reduction** for the GPU worker if W-S12 or WM4 shows it bound: render bundles for static passes, fewer bind-group changes, larger uniform rings, batching small uploads. | W-S12, WM4 | 9.6, renderer doc 7.5 | WM6 or a documented ceiling with profiles |
 | W-L12 | todo | **Audio**: FFmpeg for wasm (XMA only), web audio driver with an AudioWorklet and SAB ring, AudioContext unlock on first gesture (8.5). | W-L01 | 8.5, SDK `src/audio/` | WM5 |
 | W-L13 | todo | **Option B (wasm32 remapped window)** if W-L03 or Safari requires it: heap range limits in the SDK, segment table macro, 32-bit pointer audit. | W-L03 | 7.1 | Same golden checks as WM2/WM4 in a wasm32 build |
-| W-L14 | todo | **Review gate** for small-model work: review each `review` task within a day; check native builds still pass. | — | 16.1 | Ongoing |
+| W-L14 | claimed pi-gpt 2026-10-15 (W-S13 first; W-L16 verification still running) | **Review gate** for small-model work: review each `review` task within a day; check native builds still pass. | — | 16.1 | Ongoing |
 | W-L15 | review 2026-10-15 (needs macOS check) | **Web build system** (10.1, 10.2): `web-wasm64-release` preset, `TRIALSHD_WEB` (OFF by default, `FATAL_ERROR` without Emscripten, 7.8), static WebGPU renderer library, third-party subset, shell HTML, link flags; boots to WM1 with the GPU plugin stubbed. Also: kernel/threading web layer (timers thread, affinity no-ops, exception handler and `dlopen` compiled out, fibers per W-S08, sockets stubbed). | W-L01, W-L02, W-L04, W-S10, W-S11 | 3.5, 8.2, 8.4, 10 | WM1 |
-| W-L16 | claimed pi-gpt 2026-10-15 | **Fast exact `fma` on wasm.** Wasm has no fused multiply-add; `std::fma` is musl's software routine, ~30% of the game's job-thread time in the W-L15 Node profile (`fma` + `normalize` under `sub_826697D0` and friends). 6,183 of the 6,440 generated `std::fma` calls are single-precision (`fmadds` family: `double(float(std::fma(a, b, c)))`). When `a` and `b` are float-representable, `a*b` is exact in double (48 of 53 bits), so `a*b + c` (with `-ffp-contract=off`) is bit-identical to `fma(a, b, c)`: checked 2026-10-15 over 198,959,703 random cases including NaN/Inf/subnormals and near-cancellation, 0 mismatches. Emit the single-precision forms through a macro (`REX_FMA_S`) that is `std::fma` natively (identity, as W-L02's macros) and a guarded fast path on the web; keep `std::fma` for the rest. | W-L02, W-L15 | 3.3, W-L02's identity-macro process | Native generated-code diff reviewed (macro names only) and golden scenes pass; web: same output in a W-L04-style unit test over the generated forms; profile share of `fma` < 5% |
+| W-L16 | review 2026-10-15 (needs macOS check) | **Fast exact `fma` on wasm.** Wasm has no fused multiply-add; `std::fma` is musl's software routine, ~30% of the game's job-thread time in the W-L15 Node profile (`fma` + `normalize` under `sub_826697D0` and friends). 6,183 of the 6,440 generated `std::fma` calls are single-precision (`fmadds` family: `double(float(std::fma(a, b, c)))`). When `a` and `b` are float-representable, `a*b` is exact in double (48 of 53 bits), so `a*b + c` (with `-ffp-contract=off`) is bit-identical to `fma(a, b, c)`: checked 2026-10-15 over 198,959,703 random cases including NaN/Inf/subnormals and near-cancellation, 0 mismatches. Emit the single-precision forms through a macro (`REX_FMA_S`) that is `std::fma` natively (identity, as W-L02's macros) and a guarded fast path on the web; keep `std::fma` for the rest. | W-L02, W-L15 | 3.3, W-L02's identity-macro process | Native generated-code diff reviewed (macro names only) and golden scenes pass; web: same output in a W-L04-style unit test over the generated forms; profile share of `fma` < 5% |
+| W-L17 | claimed pi-gpt 2026-10-15 | **Harden STFS import boundary** from W-L14 review: reject escaping paths, cyclic/invalid parents and truncated file tables/chains; report filesystem/write failures; add synthetic malformed-package regressions before the browser import uses it. | W-S13 | `tools/stfs_extract/`, 8.6 | Synthetic negative cases rejected without writes outside target or hangs; actual package still byte-identical to Python; native and wasm64 checks pass |
 
 ### 16.5 Order and parallelism
+
+Pi completed W-S13's read-only W-L14 review and is fixing its reproduced boundary
+failures in W-L17. W-L16's Linux/wasm verification passed (macOS remains a review gate).
+Claude's W-L06/W-L07 files remain excluded from Pi's edits.
 
 ```
 Now, in parallel:   W-S01 W-S02 W-S03 W-S06 W-S07 W-S08 W-S09 W-S10 W-S13 W-S14   |  W-L01
@@ -1912,6 +1922,28 @@ W-L06/W-L07 (graphics).
   black: nothing delivers CPU writes to the renderer yet. Claimed **W-L05** (delivery calls
   + the W-S09 host writers) since WM2 cannot be checked without it.
 
+- 2026-10-15 (pi-gpt): **W-L16 → review (needs macOS check)**. Full-game post-change
+  Node profile passed: **0.12%** software FMA + descendants (11/9,125 active wasm
+  samples after 10 s warmup), vs **33.14%** before; worst busy worker 0.24%. Both
+  pinned 40 s runs used null GPU, 60 FPS cap and the user's local assets, and passed
+  boot/sustained-swap checks. Runtime/UI updates from Claude also entered the new
+  build, so no whole-game speedup is claimed from sample-count changes. Initial full
+  Node build: all 496 targets including 107 generated files, 5m22s; SDK regressions
+  passed. Code/test commits: `5892bfe`, `d04057e`; private runs: `out/fma-{before,after}/`.
+  Claiming active W-L17 remediation next; no renderer/app ownership changes.
+
+- 2026-10-15 (pi-gpt): W-L14 review of W-S13 found four reproduced **must-fix** cases
+  at the browser import trust boundary, under the expected single-user workload:
+  (1) a `../escaped.bin` entry writes outside `ExtractAll`'s target (`stfs_extract.cpp:318`);
+  (2) a self-parented entry loops forever in `Open` (`:189`);
+  (3) a missing required file-table block is accepted as an empty successful package (`:153`);
+  (4) a failed output write reports success (`:330`; reproduced safely with a sandbox
+  symlink to `/dev/full`). All four verified with tiny synthetic packages, not game
+  content; local repro/results: `out/stfs-review/`. Smallest fixes: validate names and
+  parent chains during parsing, fail required reads, check directory/write/close results,
+  and test those boundaries. W-S13 is not approved; W-L17 is claimed for remediation
+  after W-L16's current profile. No extractor source changed during this review.
+
 - 2026-10-15 (pi-gpt): W-L16 scope is four single-precision FMA emitter forms only.
   Native `REX_FMA_S` expands to the original `std::fma`; double forms stay unchanged.
   Web `FmaSingle` uses multiply/add only when both multiplicands round-trip through
@@ -1935,8 +1967,8 @@ W-L06/W-L07 (graphics).
   WebGPU 41.5 dB / Vulkan 38.5 dB; final `check_native.sh check
   out/native_baseline_fma_final` is WebGPU 34.4 dB / Vulkan 39.4 dB (9 captures each),
   with clean fingerprints and no web symbols in native binaries. Isolated post-change
-  Node compilation/profile remains in progress. Initial configure lacked Ninja in
-  PATH; fixed by using the existing `.venv/bin/ninja`, with no project change.
+  Node compilation/profile subsequently passed (see final result above). Initial configure
+  lacked Ninja in PATH; fixed with `.venv/bin/ninja`, with no project change.
   User says Claude is restarting again: Pi retains W-L16's three SDK paths and FMA
   tests; Claude's W-L06/W-L07 claims remain untouched. Pi's Node profiling build will
   use `out/build/web-wasm64-fma-profile` to avoid competing in Claude's build folders.
