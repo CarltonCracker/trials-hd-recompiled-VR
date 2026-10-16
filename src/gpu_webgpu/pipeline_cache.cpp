@@ -65,14 +65,14 @@ const PipelineCache::TextureLayouts& PipelineCache::GetTextureLayouts(
   auto add_stage = [&entries](uint32_t count, uint32_t cube_mask, uint32_t base,
                               wgpu::ShaderStage stage) {
     for (uint32_t i = 0; i < count; ++i) {
-      wgpu::BindGroupLayoutEntry texture;
+      wgpu::BindGroupLayoutEntry texture{};
       texture.binding = base + i;
       texture.visibility = stage;
       texture.texture.sampleType = wgpu::TextureSampleType::Float;
       texture.texture.viewDimension = (cube_mask & (1u << i)) ? wgpu::TextureViewDimension::Cube
                                                               : wgpu::TextureViewDimension::e2D;
       entries.push_back(texture);
-      wgpu::BindGroupLayoutEntry sampler;
+      wgpu::BindGroupLayoutEntry sampler{};
       sampler.binding = base + i + wgsl_binding::kSamplerOffset;
       sampler.visibility = stage;
       sampler.sampler.type = wgpu::SamplerBindingType::Filtering;
@@ -141,7 +141,7 @@ bool PipelineCache::Initialize() {
       {wgsl_binding::kBoolLoopConstants, kVertexStages | wgpu::ShaderStage::Fragment, 160},
       {wgsl_binding::kFetchConstants, kVertexStages | wgpu::ShaderStage::Fragment, 768},
   };
-  std::array<wgpu::BindGroupLayoutEntry, 5> draw_entries;
+  std::array<wgpu::BindGroupLayoutEntry, 5> draw_entries{};
   for (size_t i = 0; i < draw_entries.size(); ++i) {
     draw_entries[i].binding = kUniforms[i].binding;
     draw_entries[i].visibility = kUniforms[i].visibility;
@@ -156,7 +156,7 @@ bool PipelineCache::Initialize() {
   draw_layout_ = device.CreateBindGroupLayout(&draw_desc);
 
   // Group 1: guest memory for vertex pulling.
-  wgpu::BindGroupLayoutEntry shared_entry;
+  wgpu::BindGroupLayoutEntry shared_entry{};
   shared_entry.binding = wgsl_binding::kSharedMemory;
   shared_entry.visibility = wgpu::ShaderStage::Vertex;
   shared_entry.buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;

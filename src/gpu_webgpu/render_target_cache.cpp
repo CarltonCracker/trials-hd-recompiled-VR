@@ -314,7 +314,7 @@ bool RenderTargetCache::InitializeTransfer() {
   // and the stencil view for depth.
   for (uint32_t i = 0; i < 4; ++i) {
     bool depth = i >= kDepth, multisampled = i & 1;
-    std::array<wgpu::BindGroupLayoutEntry, 3> entries;
+    std::array<wgpu::BindGroupLayoutEntry, 3> entries{};
     entries[0].binding = 0;
     entries[0].visibility = wgpu::ShaderStage::Fragment;
     entries[0].buffer.type = wgpu::BufferBindingType::Uniform;
@@ -454,7 +454,7 @@ void RenderTargetCache::Transfer(RenderTarget* source, RenderTarget* dest, uint3
   };
 
   if (!source->transfer_source_group) {
-    std::array<wgpu::BindGroupEntry, 3> entries;
+    std::array<wgpu::BindGroupEntry, 3> entries{};
     entries[0].binding = 0;
     entries[0].buffer = frame_recorder_.uniform_ring();
     entries[0].size = sizeof(TransferConstants);

@@ -38,7 +38,7 @@ bool WebGpuSharedMemory::Initialize() {
   device_.PushErrorScope(wgpu::ErrorFilter::Validation);
   device_.PushErrorScope(wgpu::ErrorFilter::OutOfMemory);
   device_.PushErrorScope(wgpu::ErrorFilter::Internal);
-  wgpu::BufferDescriptor desc;
+  wgpu::BufferDescriptor desc{};
   desc.label = "guest physical memory (512 MiB)";
   desc.size = kBufferSize;
   desc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::Index |

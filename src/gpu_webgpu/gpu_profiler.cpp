@@ -60,7 +60,7 @@ bool GpuProfiler::Initialize() {
   }
 
   std::lock_guard lock(provider_.device_mutex());
-  wgpu::QuerySetDescriptor qdesc;
+  wgpu::QuerySetDescriptor qdesc{};
   qdesc.label = "gpu profiler timestamps";
   qdesc.type = wgpu::QueryType::Timestamp;
   qdesc.count = kMaxQueriesPerFrame;
@@ -71,7 +71,7 @@ bool GpuProfiler::Initialize() {
     return false;
   }
 
-  wgpu::BufferDescriptor resolve_desc;
+  wgpu::BufferDescriptor resolve_desc{};
   resolve_desc.label = "gpu profiler timestamp resolve";
   resolve_desc.size = kMaxQueriesPerFrame * sizeof(uint64_t);
   resolve_desc.usage = wgpu::BufferUsage::QueryResolve | wgpu::BufferUsage::CopySrc;
@@ -82,7 +82,7 @@ bool GpuProfiler::Initialize() {
     return false;
   }
 
-  wgpu::BufferDescriptor readback_desc;
+  wgpu::BufferDescriptor readback_desc{};
   readback_desc.label = "gpu profiler timestamp readback";
   readback_desc.size = kMaxQueriesPerFrame * sizeof(uint64_t);
   readback_desc.usage = wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::MapRead;

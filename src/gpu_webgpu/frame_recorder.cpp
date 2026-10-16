@@ -23,7 +23,7 @@ FrameRecorder::~FrameRecorder() {
 
 bool FrameRecorder::Initialize() {
   std::lock_guard lock(provider_.device_mutex());
-  wgpu::BufferDescriptor desc;
+  wgpu::BufferDescriptor desc{};
   desc.label = "uniform ring";
   desc.size = kUniformRingSize;
   desc.usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst;

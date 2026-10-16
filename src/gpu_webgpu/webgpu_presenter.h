@@ -117,7 +117,7 @@ class WebGpuPresenter final : public Presenter {
   // Painting connection (UI thread, or the guest output thread when it paints).
   Surface* connected_surface_ = nullptr;
   wgpu::Surface wgpu_surface_;
-  wgpu::SurfaceConfiguration surface_config_;
+  wgpu::SurfaceConfiguration surface_config_{};
   uint64_t paint_serial_ = 0;
 };
 

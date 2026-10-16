@@ -32,7 +32,7 @@ bool WebGpuPrimitiveProcessor::InitializeBuiltinIndexBuffer(
     size_t size_bytes, std::function<void(void*)> fill_callback) {
   std::vector<uint8_t> data((size_bytes + 3) & ~size_t(3));
   fill_callback(data.data());
-  wgpu::BufferDescriptor desc;
+  wgpu::BufferDescriptor desc{};
   desc.label = "builtin index buffer";
   desc.size = data.size();
   desc.usage = wgpu::BufferUsage::Index | wgpu::BufferUsage::CopyDst;

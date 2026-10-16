@@ -72,7 +72,7 @@ bool WebGpuPresenter::InitializeSurfaceIndependent() {
     sampler_desc.minFilter = wgpu::FilterMode::Linear;
     linear_clamp_sampler_ = device.CreateSampler(&sampler_desc);
 
-    std::array<wgpu::BindGroupLayoutEntry, 2> entries;
+    std::array<wgpu::BindGroupLayoutEntry, 2> entries{};
     entries[0].binding = 0;
     entries[0].visibility = wgpu::ShaderStage::Fragment;
     entries[0].texture.sampleType = wgpu::TextureSampleType::Float;
@@ -237,7 +237,7 @@ WebGpuPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(
     present_mode = wgpu::PresentMode::Mailbox;
   }
 
-  wgpu::SurfaceConfiguration config;
+  wgpu::SurfaceConfiguration config{};
   config.device = device;
   config.format = format;
   config.usage = wgpu::TextureUsage::RenderAttachment;
@@ -328,7 +328,7 @@ bool WebGpuPresenter::PaintToCanvas() {
       // presentation path, and Firefox on Linux then shows nothing.
       wgpu::TextureFormat format = caps.formatCount ? caps.formats[0]
                                                     : wgpu::TextureFormat::BGRA8Unorm;
-      wgpu::SurfaceConfiguration config;
+      wgpu::SurfaceConfiguration config{};
       config.device = provider_.device();
       config.format = format;
       config.usage = wgpu::TextureUsage::RenderAttachment;
@@ -445,7 +445,7 @@ Presenter::PaintResult WebGpuPresenter::PaintAndPresentImpl(bool execute_ui_draw
       // letterboxed rectangle. The CAS/FSR effects of the Vulkan presenter
       // are not ported.
       const std::pair<uint32_t, uint32_t>& size = flow.effect_output_sizes[flow.effect_count - 1];
-      std::array<wgpu::BindGroupEntry, 2> entries;
+      std::array<wgpu::BindGroupEntry, 2> entries{};
       entries[0].binding = 0;
       entries[0].textureView = guest_output_view;
       entries[1].binding = 1;
@@ -503,7 +503,7 @@ bool WebGpuPresenter::CaptureGuestOutput(RawImage& image_out) {
   const wgpu::Device& device = provider_.device();
   const uint32_t bytes_per_row = (width * 4 + 255) & ~uint32_t(255);
   const uint64_t buffer_size = uint64_t(bytes_per_row) * height;
-  wgpu::BufferDescriptor buffer_desc;
+  wgpu::BufferDescriptor buffer_desc{};
   buffer_desc.label = "guest output capture";
   buffer_desc.size = buffer_size;
   buffer_desc.usage = wgpu::BufferUsage::MapRead | wgpu::BufferUsage::CopyDst;

@@ -95,7 +95,7 @@ bool WebGpuImmediateDrawer::Initialize() {
   module_desc.label = "immediate.wgsl";
   shader_ = device.CreateShaderModule(&module_desc);
 
-  std::array<wgpu::BindGroupLayoutEntry, 2> entries;
+  std::array<wgpu::BindGroupLayoutEntry, 2> entries{};
   entries[0].binding = 0;
   entries[0].visibility = wgpu::ShaderStage::Fragment;
   entries[0].texture.sampleType = wgpu::TextureSampleType::Float;
@@ -153,7 +153,7 @@ bool WebGpuImmediateDrawer::Initialize() {
 wgpu::BindGroup WebGpuImmediateDrawer::CreateTextureBindGroup(const wgpu::TextureView& view,
                                                               ImmediateTextureFilter filter,
                                                               bool is_repeated) {
-  std::array<wgpu::BindGroupEntry, 2> entries;
+  std::array<wgpu::BindGroupEntry, 2> entries{};
   entries[0].binding = 0;
   entries[0].textureView = view;
   entries[1].binding = 1;
@@ -195,7 +195,7 @@ bool WebGpuImmediateDrawer::EnsurePipelines(wgpu::TextureFormat format) {
   if (pipeline_format_ == format && pipeline_triangles_) {
     return true;
   }
-  std::array<wgpu::VertexAttribute, 3> attributes;
+  std::array<wgpu::VertexAttribute, 3> attributes{};
   attributes[0].format = wgpu::VertexFormat::Float32x2;
   attributes[0].offset = offsetof(Vertex, x);
   attributes[0].shaderLocation = 0;
@@ -249,7 +249,7 @@ uint64_t WebGpuImmediateDrawer::Append(const void* data, uint64_t size) {
     // Draws already recorded keep their reference to the old buffer.
     uint64_t new_size = std::max(buffer_size_ ? buffer_size_ * 2 : kInitialBufferSize,
                                  aligned_size);
-    wgpu::BufferDescriptor desc;
+    wgpu::BufferDescriptor desc{};
     desc.label = "immediate vertices and indices";
     desc.size = new_size;
     desc.usage =

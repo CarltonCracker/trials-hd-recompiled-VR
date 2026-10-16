@@ -204,7 +204,7 @@ bool WebGpuBackend::Initialize(memory::Memory& memory, const RegisterFile& regis
           upload.offset = offset;
           upload.source = frame_recorder_->index_ring();
         } else {
-          wgpu::BufferDescriptor desc;
+          wgpu::BufferDescriptor desc{};
           desc.label = "large guest memory upload";
           desc.size = size;
           desc.usage = wgpu::BufferUsage::CopySrc;
@@ -256,7 +256,7 @@ bool WebGpuBackend::Initialize(memory::Memory& memory, const RegisterFile& regis
       {wgsl_binding::kBoolLoopConstants, 160},
       {wgsl_binding::kFetchConstants, 768},
   }};
-  std::array<wgpu::BindGroupEntry, 5> draw_entries;
+  std::array<wgpu::BindGroupEntry, 5> draw_entries{};
   for (size_t i = 0; i < draw_entries.size(); ++i) {
     draw_entries[i].binding = kUniformWindows[i].first;
     draw_entries[i].buffer = frame_recorder_->uniform_ring();
@@ -269,7 +269,7 @@ bool WebGpuBackend::Initialize(memory::Memory& memory, const RegisterFile& regis
   draw_desc.entries = draw_entries.data();
   draw_bind_group_ = device.CreateBindGroup(&draw_desc);
 
-  wgpu::BindGroupEntry shared_entry;
+  wgpu::BindGroupEntry shared_entry{};
   shared_entry.binding = wgsl_binding::kSharedMemory;
   shared_entry.buffer = shared_memory_->buffer();
   wgpu::BindGroupDescriptor shared_desc;
@@ -290,14 +290,14 @@ bool WebGpuBackend::Initialize(memory::Memory& memory, const RegisterFile& regis
   module_desc.nextInChain = &wgsl;
   module_desc.label = "blit.wgsl";
   blit.module = device.CreateShaderModule(&module_desc);
-  std::array<wgpu::BindGroupLayoutEntry, 2> blit_entries;
+  std::array<wgpu::BindGroupLayoutEntry, 2> blit_entries{};
   blit_entries[0].binding = 0;
   blit_entries[0].visibility = wgpu::ShaderStage::Fragment;
   blit_entries[0].texture.sampleType = wgpu::TextureSampleType::UnfilterableFloat;
   blit_entries[1].binding = 1;
   blit_entries[1].visibility = wgpu::ShaderStage::Fragment;
   blit_entries[1].buffer.type = wgpu::BufferBindingType::Uniform;
-  wgpu::BindGroupLayoutEntry gamma_entry;
+  wgpu::BindGroupLayoutEntry gamma_entry{};
   gamma_entry.binding = 2;
   gamma_entry.visibility = wgpu::ShaderStage::Fragment;
   gamma_entry.buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
@@ -325,11 +325,11 @@ bool WebGpuBackend::Initialize(memory::Memory& memory, const RegisterFile& regis
   blit_desc.vertex.entryPoint = "vs_main";
   blit_desc.fragment = &blit_fragment;
   blit.pipeline = device.CreateRenderPipeline(&blit_desc);
-  wgpu::BufferDescriptor blit_constants_desc;
+  wgpu::BufferDescriptor blit_constants_desc{};
   blit_constants_desc.size = 16;
   blit_constants_desc.usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst;
   blit.constants = device.CreateBuffer(&blit_constants_desc);
-  wgpu::BufferDescriptor gamma_desc;
+  wgpu::BufferDescriptor gamma_desc{};
   gamma_desc.label = "gamma ramp";
   gamma_desc.size = 128 * 3 * 4;  // The larger of the two ramps.
   gamma_desc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
@@ -630,11 +630,11 @@ wgpu::BindGroup WebGpuBackend::GetTextureBindGroup(const RegisterFile& regs,
         wgpu::Sampler sampler = texture_cache_->GetSampler(
             fetch, shader.texture_bindings()[slots[i].first_binding].fetch_instr.attributes,
             shader.type() == xenos::ShaderType::kVertex);
-        wgpu::BindGroupEntry texture_entry;
+        wgpu::BindGroupEntry texture_entry{};
         texture_entry.binding = base + i;
         texture_entry.textureView = view;
         entries.push_back(texture_entry);
-        wgpu::BindGroupEntry sampler_entry;
+        wgpu::BindGroupEntry sampler_entry{};
         sampler_entry.binding = base + i + wgsl_binding::kSamplerOffset;
         sampler_entry.sampler = sampler;
         entries.push_back(sampler_entry);
@@ -1496,7 +1496,7 @@ void WebGpuBackend::Swap(const SwapSnapshot& swap) {
               int32_t(region.x), int32_t(region.y),
               int32_t(gamma_mode | (region.fill_x << 8) | (region.fill_y << 10)), 0};
           provider_.queue().WriteBuffer(blit.constants, 0, constants, sizeof(constants));
-          std::array<wgpu::BindGroupEntry, 3> entries;
+          std::array<wgpu::BindGroupEntry, 3> entries{};
           entries[0].binding = 0;
           entries[0].textureView = region.target->view;
           entries[1].binding = 1;

@@ -110,7 +110,7 @@ bool ResolveEngine::Initialize() {
   module_desc.label = "resolve.wgsl";
   module_ = device.CreateShaderModule(&module_desc);
   for (uint32_t i = 0; i < 4; ++i) {
-    std::array<wgpu::BindGroupLayoutEntry, 2> entries;
+    std::array<wgpu::BindGroupLayoutEntry, 2> entries{};
     entries[0].binding = i;
     entries[0].visibility = wgpu::ShaderStage::Fragment;
     SourceType type = SourceType(i);
@@ -252,7 +252,7 @@ bool ResolveEngine::Copy(const draw_util::ResolveInfo& info, RenderTarget& sourc
   const wgpu::TextureView& source_view = is_depth ? source->depth_only_view : source->view;
   wgpu::BindGroup& bind_group = bind_groups_[source_view.Get()];
   if (!bind_group) {
-    std::array<wgpu::BindGroupEntry, 2> entries;
+    std::array<wgpu::BindGroupEntry, 2> entries{};
     entries[0].binding = uint32_t(source_type);
     entries[0].textureView = source_view;
     entries[1].binding = 4;
@@ -349,7 +349,7 @@ void ResolveEngine::ReadBack(const draw_util::ResolveInfo& info, const wgpu::Tex
   uint32_t row_pitch = (width * host_bytes + 255) & ~uint32_t(255);
   uint64_t size = uint64_t(row_pitch) * height;
   if (!readback.buffer || readback.buffer.GetSize() != size) {
-    wgpu::BufferDescriptor buffer_desc;
+    wgpu::BufferDescriptor buffer_desc{};
     buffer_desc.label = "resolve readback";
     buffer_desc.size = size;
     buffer_desc.usage = wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::MapRead;
