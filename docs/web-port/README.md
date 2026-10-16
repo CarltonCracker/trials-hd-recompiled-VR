@@ -1859,7 +1859,7 @@ Every task's "Done when" implicitly includes **`tools/check_native.sh check` pas
 | W-L05 | claimed claude-opus-5.5 2026-10-15 | **Write tracking consumers**: `SharedMemory`, `PrimitiveProcessor` and the renderer's texture cache and memory mirror use the dirty bitmap on the web; debug assertion mode compares against chunk hashes (14.8). | W-L04, W-S09 | 8.3, renderer doc 8.3, 8.9 | WM4 ride shows no stale textures; assertion mode passes over `ride_middle_name_danger` |
 | W-L06 | claimed claude-opus-5.5 2026-10-15 | **GPU worker and yielding** (7.4): run the command processor on the canvas-owning pthread; JSPI yield at swap/ring waits (or the resumable loop if W-S05 fails); move presenter paint and ImGui drawing there (9.4). | W-L01, W-S05 | 7.3, 7.4, 9.4 | WM2: menus render and the settings overlay works |
 | W-L07 | claimed claude-opus-5.5 2026-10-15 | **Renderer web build** (section 9): `#if __EMSCRIPTEN__` in provider/presenter/mirror, canvas surface, feature and limit fallbacks (`Unorm16` → tier1, split mirror if W-S01 says so, timestamp degrade), async capture. | W-S01, W-L06 | 9 | Renderer builds with `--use-port=emdawnwebgpu`; WM2 check |
-| W-L08 | todo | **Input and app shell**: web `WindowedAppContext` (no SDL window), UI pthread driven by main-thread rAF messages, web input driver over the SAB, keyboard controls and rebinding, fullscreen/pointer lock, Exit Game behavior (8.7, 8.8). | W-L01 | 8.7, 8.8 | WM4 input part: keyboard and gamepad ride; settings menu usable with mouse and keyboard |
+| W-L08 | claimed claude-opus-5.5 2026-10-15 | **Input and app shell**: web `WindowedAppContext` (no SDL window), UI pthread driven by main-thread rAF messages, web input driver over the SAB, keyboard controls and rebinding, fullscreen/pointer lock, Exit Game behavior (8.7, 8.8). | W-L01 | 8.7, 8.8 | WM4 input part: keyboard and gamepad ride; settings menu usable with mouse and keyboard |
 | W-L09 | todo | **Split guest-memory mirror** (only if W-S01 shows < 512 MiB storage bindings): 4 × 128 MiB buffers, WGSL address → (binding, offset), index/vertex fetch and memexport paths updated, native unchanged unless `--webgpu_split_mirror`. | W-S01 | renderer doc 8.3, 9.1 | Native with the split forced passes golden scenes; web passes WM2 |
 | W-L10 | todo | **Files and import**: WasmFS + OPFS backend, VFS host-path device on OPFS, import flow (picker, drag-drop, extraction worker using W-S13), license metadata, saves/settings/shader storage in OPFS, `storage.persist()` (8.6). | W-L01, W-S13 | 8.6, `src/package_license.cpp` | WM3 |
 | W-L11 | todo | **Browser CPU cost reduction** for the GPU worker if W-S12 or WM4 shows it bound: render bundles for static passes, fewer bind-group changes, larger uniform rings, batching small uploads. | W-S12, WM4 | 9.6, renderer doc 7.5 | WM6 or a documented ceiling with profiles |
@@ -1885,6 +1885,10 @@ details of W-L04 to W-L09. The critical path is W-L01 → W-L02/W-L04 → W-L15 
 W-L06/W-L07 (graphics).
 
 ### 16.6 Notes log
+
+- 2026-10-15 (claude-opus-5.5): claimed **W-L08** (web input driver over W-S18's
+  `WebInputBlock`, window events, keyboard controls, canvas size/focus, Exit Game): the
+  WM2 scripted menu check and WM4 rides need input in the browser.
 
 - 2026-10-15 (claude-opus-5.5): **W-L06/W-L07 first stage + W-L05 delivery: the main menu
   renders in Chromium through the browser's WebGPU** (as built in 7.9.7). The renderer
