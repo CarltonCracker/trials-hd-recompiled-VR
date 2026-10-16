@@ -1,0 +1,34 @@
+# Opens settings with Back+Start, navigates/cancels a key binding, closes with B.
+# Final D-pad press must reach the game again (release gate regression).
+wait 35
+pad back 1
+pad start 1
+wait 0.15
+pad start 0
+pad back 0
+wait 1.5
+capture combo_open
+pad down 1
+wait 0.15
+pad down 0
+wait 0.5
+pad a 1
+wait 0.15
+pad a 0
+wait 1
+capture combo_waiting
+pad b 1
+wait 0.15
+pad b 0
+wait 1
+capture combo_cancelled
+pad b 1
+wait 0.15
+pad b 0
+wait 1.5
+capture combo_closed
+pad down 1
+wait 0.15
+pad down 0
+wait 0.8
+capture game_input_restored

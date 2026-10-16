@@ -45,6 +45,7 @@
 #include "web/null_graphics_system.h"
 #include "web/web_files.h"
 #include "web/web_input.h"
+#include <rex/input/web/web_input_driver.h>
 #if defined(TRIALSHD_WEB_WEBGPU)
 // The WebGPU renderer, linked in (src/gpu_webgpu/plugin_main.cpp).
 extern "C" uint32_t rex_gpu_abi_version(void);
@@ -78,6 +79,12 @@ class TrialsHdApp : public rex::ReXApp {
     return std::unique_ptr<TrialsHdApp>(new TrialsHdApp(ctx, "trials_hd",
         PPCImageConfig));
   }
+
+#if defined(__EMSCRIPTEN__)
+  bool SetupEnvironment() override {
+    return trials_hd::web::InitializeStorage() && rex::ReXApp::SetupEnvironment();
+  }
+#endif
 
   void Quit() {
     REXLOG_INFO("TrialsHdApp::Quit: requesting application exit");
@@ -175,6 +182,9 @@ class TrialsHdApp : public rex::ReXApp {
     trials_hd::web::InitializeInput();
 #if defined(TRIALSHD_WEB_WEBGPU)
     rex::system::RegisterStaticGpuPlugin("webgpu", rex_gpu_abi_version, rex_gpu_create);
+    if (rex::cvar::GetFlagSource("present_fps_limit") == rex::cvar::Source::kDefault) {
+      rex::cvar::SetFlagByName("present_fps_limit", "60");
+    }
     if (config.gpu_plugin.empty()) {
       config.gpu_plugin = "webgpu";
     }
@@ -245,6 +255,9 @@ class TrialsHdApp : public rex::ReXApp {
   // look next to the executable first, then in the working directory.
   void OnConfigurePaths(rex::PathConfig& paths) override {
 #if defined(__EMSCRIPTEN__)
+    if (auto root = trials_hd::web::PersistentDataRoot(); !root.empty()) {
+      paths.config_path = root / "trials_hd.toml";
+    }
     if (paths.game_data_root.empty()) {
       paths.game_data_root = trials_hd::web::MountServedAssets();
     }
@@ -308,9 +321,7 @@ class TrialsHdApp : public rex::ReXApp {
     rex::ui::UnregisterBind("bind_achievements");
     rex::ui::RegisterBind("bind_achievements", "F7", "Toggle achievements",
                           [this] { ToggleAchievements(); });
-#if !defined(__EMSCRIPTEN__)  // Web input comes from the page (W-L08).
     combo_watcher_ = std::jthread([this](std::stop_token stop) { WatchSettingsCombo(stop); });
-#endif
     (void)drawer;
   }
 
@@ -428,11 +439,45 @@ class TrialsHdApp : public rex::ReXApp {
 
   // Polls controllers for the menu shortcut (Guide, or Back + Start) and
   // toggles the menu on the UI thread; also ends the post-close input hold once
-  // every button and key is up. SDL's gamepad getters lock internally and the
-  // keyboard state is a plain array, so this is safe off the UI thread.
+  // every button and key is up. Native reads SDL; web reads atomic page snapshots.
   void WatchSettingsCombo(std::stop_token stop) {
 #if defined(__EMSCRIPTEN__)
-    (void)stop;
+    bool was_down = false;
+    bool ach_close_was_down = false;
+    while (!stop.stop_requested()) {
+      const bool holding_input = hold_input_until_released_.load();
+      bool shortcut = false;
+      bool any_button = trials_hd::web::AnyKeyDown();
+      bool ach_close = trials_hd::web::IsKeyDown(SDL_SCANCODE_ESCAPE) ||
+                       trials_hd::web::IsKeyDown(SDL_SCANCODE_BACKSPACE);
+      if (auto source = rex::input::web::GetGamepadSource()) {
+        for (uint32_t i = 0; i < 4; ++i) {
+          rex::input::web::WebGamepad pad;
+          if (!source(i, pad)) {
+            shortcut = was_down;
+            ach_close = ach_close_was_down;
+            any_button = true;  // Don't release the gate during a seqlock write.
+            break;
+          }
+          if (!pad.connected) continue;
+          const auto buttons = pad.buttons;
+          shortcut = shortcut || (buttons & (1u << 16)) ||
+                     ((buttons & (3u << 8)) == (3u << 8));
+          ach_close = ach_close || (buttons & ((1u << 1) | (1u << 8) | (1u << 16)));
+          any_button = any_button || buttons != 0;
+        }
+      }
+      if (shortcut && !was_down) {
+        app_context().CallInUIThreadDeferred([this] { ToggleGraphicsSettings(); });
+      }
+      was_down = shortcut;
+      if (achievements_open_.load() && ach_close && !ach_close_was_down) {
+        app_context().CallInUIThreadDeferred([this] { CloseAchievements(); });
+      }
+      ach_close_was_down = ach_close;
+      if (holding_input && !any_button) hold_input_until_released_ = false;
+      std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    }
 #else
     bool was_down = false;
     bool ach_close_was_down = false;

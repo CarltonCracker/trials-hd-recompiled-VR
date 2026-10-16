@@ -9,19 +9,37 @@
 <style>
   html, body { margin: 0; height: 100%; background: #000; color: #ccc; font: 12px monospace; }
   canvas { display: block; width: 100vw; height: 100vh; }
+  #import-panel { position: fixed; inset: 0; z-index: 2; background: #171717; padding: 10vh 10vw; font: 16px sans-serif; overflow: auto; }
+  #import-panel[hidden] { display: none; }
+  #import-panel label { display: block; margin: 24px 0; }
+  #import-status { white-space: pre-wrap; }
   #log { display: none; position: fixed; left: 0; right: 0; bottom: 0; max-height: 35vh; overflow: auto;
          margin: 0; padding: 4px 8px; background: rgba(0, 0, 0, 0.6); white-space: pre-wrap; }
 </style>
 </head>
 <body>
-<canvas id="canvas"></canvas>
+<canvas id="canvas" tabindex="0"></canvas>
 <pre id="log"></pre>
+<section id="import-panel" hidden aria-labelledby="import-title">
+  <h1 id="import-title">Trials HD — local web port</h1>
+  <p>Use your own legally obtained game. Nothing is uploaded. Never publish this build.</p>
+  <p id="import-status" role="status" aria-live="polite">Loading runtime...</p>
+  <label>Game package <input id="package-file" type="file"></label>
+  <label>Or extracted assets folder <input id="folder-files" type="file" webkitdirectory multiple></label>
+  <p>You can also drop the package or folder here. Include <code>package_license.toml</code> in extracted folders to preserve the package license; otherwise the game runs as a trial.</p>
+  <p>Controls: keyboard or standard gamepad. F1 opens settings; double-click the canvas for fullscreen.</p>
+  <p>Browser storage is local to this origin. Clearing site data deletes saves. Back up important progress.</p>
+  <button type="button" onclick="location.reload()">Reload / retry</button>
+</section>
 <script>
   // Runtime flags come from the page URL: ?log_level=info&web_assets_url=/assets
   // becomes --log_level=info --web_assets_url=/assets.
   const runtimeArguments = [];
   for (const [name, value] of new URLSearchParams(location.search)) {
     runtimeArguments.push(value === '' ? `--${name}` : `--${name}=${value}`);
+  }
+  if (!new URLSearchParams(location.search).has('log_file')) {
+    runtimeArguments.push('--log_file=/opfs/trials_hd/logs/trials_hd.log');
   }
   // The log is always in the console; page#log also shows it over the game.
   const logElement = document.getElementById('log');
@@ -38,26 +56,83 @@
     logElement.textContent = logLines.join('\n');
     logElement.scrollTop = logElement.scrollHeight;
   }
-  // Size the canvas in device pixels now: it moves to the GPU worker when the
-  // game starts (resizing afterwards is W-L08's).
+  // Initial device-pixel size; later sizes reach the GPU worker through input.js.
   const canvasElement = document.getElementById('canvas');
   canvasElement.width = Math.round(canvasElement.clientWidth * devicePixelRatio);
   canvasElement.height = Math.round(canvasElement.clientHeight * devicePixelRatio);
   // Read by headless checks (tools/web/cdp.py).
   window.trialsHd = { started: performance.now(), exitCode: null };
+  window.trialsHd.filesStatus = (text, error = false) => {
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    document.getElementById('import-panel').hidden = false;
+    document.getElementById('import-status').textContent = text;
+    if (error) window.trialsHd.storageError = text;
+    showLog(`web storage: ${text}`);
+  };
   var Module = {
     arguments: runtimeArguments,
+    noInitialRun: true,
     canvas: canvasElement,
     print: showLog,
     printErr: showLog,
+    onRuntimeInitialized: async () => {
+      if (window.trialsHd.startupError) return;
+      try {
+        const [{WebInput}, {startWithFiles}] = await Promise.all([
+          import('./input.js'), import('./import.js')
+        ]);
+        await startWithFiles(() => {
+          const input = new WebInput(canvasElement, Module.wasmMemory.buffer,
+                                     Number(Module._trials_hd_web_input_block()));
+          input.start();
+          window.trialsHd.input = input;
+          window.setSyntheticPadButton = (index, pressed) => input.setSyntheticButton(index, pressed);
+          window.setSyntheticPadAxis = (name, value) => input.setSyntheticAxis(name, value);
+          window.trialsHd.inputReady = true;
+          import('./audio.js').then(({WebAudio}) => {
+            const audio = window.trialsHd.audio = new WebAudio(Module);
+            return audio.start();
+          }).catch(error => {
+            window.trialsHd.audioError = String(error);
+            showLog(`web audio failed: ${error}`);
+          });
+          canvasElement.focus();
+          showLog('web: controller input ready; press a gamepad button to connect');
+          Module.callMain(runtimeArguments);
+        });
+      } catch (error) {
+        window.trialsHd.startupError = String(error);
+        window.trialsHd.filesStatus(String(error), true);
+      }
+    },
+    onAbort: (reason) => window.trialsHd.filesStatus(`Runtime stopped: ${reason}. Reload to retry.`, true),
     onExit: (code) => {
+      window.trialsHd.input?.stop();
+      window.trialsHd.audio?.stop();
       window.trialsHd.exitCode = code;
       showLog(`trials_hd exited with code ${code}`);
+      if (!window.trialsHd.storageError) {
+        window.trialsHd.filesStatus(code === 0 ? 'Game closed. Reload to play again; saves remain in browser storage.' :
+          `Game stopped with code ${code}. Reload to retry.`, code !== 0);
+      }
     },
   };
+  let browserError = '';
   if (!crossOriginIsolated) {
-    showLog('This page needs cross-origin isolation: serve it with tools/web/serve.py.');
+    browserError = 'Cross-origin isolation is required. Serve this build with tools/web/serve.py on localhost.';
+  } else if (typeof WebAssembly.Suspending !== 'function' ||
+             !WebAssembly.validate(Uint8Array.from([0,97,115,109,1,0,0,0,5,4,1,7,1,1]))) {
+    browserError = 'Shared Memory64 and JSPI are required. Use current desktop Chrome/Edge.';
+  } else if (!navigator.gpu) {
+    browserError = 'WebGPU is unavailable. Enable hardware WebGPU in current desktop Chrome/Edge.';
   }
+  if (browserError) {
+    window.trialsHd.startupError = browserError;
+    window.trialsHd.filesStatus(browserError, true);
+  }
+  window.addEventListener('error', event => {
+    if (!browserError) window.trialsHd.filesStatus(`Runtime error: ${event.message}. Check browser support and available memory.`, true);
+  });
 </script>
 {{{ SCRIPT }}}
 </body>

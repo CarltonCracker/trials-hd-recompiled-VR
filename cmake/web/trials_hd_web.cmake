@@ -315,6 +315,7 @@ set(TRIALSHD_WEB_SDK_INPUT
     input/state_merge.cpp
     input/mnk/mnk_input_driver.cpp
     input/nop/nop_input_driver.cpp
+    input/web/web_input_driver.cpp
 )
 set(TRIALSHD_WEB_SDK_UI
     ui/graphics_upload_buffer_pool.cpp
@@ -434,6 +435,8 @@ add_executable(trials_hd
     src/exit_button.cpp
     src/web/null_graphics_system.cpp
     src/web/web_files.cpp
+    src/web/web_input.cpp
+    tools/stfs_extract/stfs_extract.cpp
     $<TARGET_OBJECTS:trials_hd_web_sdk>
     $<TARGET_OBJECTS:trials_hd_web_imgui>
     $<TARGET_OBJECTS:trials_hd_web_recomp>
@@ -463,7 +466,7 @@ set(_web_link_flags
     -sSTACK_SIZE=8mb
     -sDEFAULT_PTHREAD_STACK_SIZE=4mb
     -sEXIT_RUNTIME=1
-    -sEXPORTED_RUNTIME_METHODS=callMain
+    -sEXPORTED_RUNTIME_METHODS=callMain,wasmMemory
     -Wno-pthreads-mem-growth
     # Function names in the module (profiles and stack traces); no code cost.
     --profiling-funcs
@@ -479,6 +482,8 @@ else()
     # The page: out/build/<preset>/web/trials_hd.html, served by tools/web/serve.py.
     list(APPEND _web_link_flags -sWASMFS -sENVIRONMENT=web,worker
          --shell-file ${_root}/web/shell.html)
+    configure_file(${_root}/web/input.js ${CMAKE_BINARY_DIR}/web/input.js COPYONLY)
+    configure_file(${_root}/web/import.js ${CMAKE_BINARY_DIR}/web/import.js COPYONLY)
     configure_file(${_root}/web/audio.js ${CMAKE_BINARY_DIR}/web/audio.js COPYONLY)
     configure_file(${_root}/web/audio_worklet.js ${CMAKE_BINARY_DIR}/web/audio_worklet.js COPYONLY)
     set_target_properties(trials_hd PROPERTIES

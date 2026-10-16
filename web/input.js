@@ -79,21 +79,33 @@ export class WebInput {
     this.sab = sab;
     this.byteOffset = byteOffset;
 
-    // Byte offsets for WebInputBlock
-    this.OFF_PAD_SEQ = byteOffset + 0;
-    this.OFF_PAD_COUNT = byteOffset + 4;
-    this.OFF_PADS = byteOffset + 8; // 4 * 32 bytes = 128 bytes
-    this.OFF_EVENT_HEAD = byteOffset + 136;
-    this.OFF_EVENT_TAIL = byteOffset + 140;
-    this.OFF_EVENTS = byteOffset + 144; // 256 * 16 bytes = 4096 bytes
-    this.OFF_CANVAS_WIDTH = byteOffset + 4240;
-    this.OFF_CANVAS_HEIGHT = byteOffset + 4244;
-    this.OFF_DPR = byteOffset + 4248;
-    this.OFF_VISIBLE = byteOffset + 4252;
+    // Byte offsets inside WebInputBlock. The views start at the block, so
+    // indices stay small: with Memory64 the block can lie above 2 GiB, where
+    // `offset >> 2` on the whole buffer would turn negative.
+    this.OFF_PAD_SEQ = 0;
+    this.OFF_PAD_COUNT = 4;
+    this.OFF_PADS = 8; // 4 * 32 bytes = 128 bytes
+    this.OFF_EVENT_HEAD = 136;
+    this.OFF_EVENT_TAIL = 140;
+    this.OFF_EVENTS = 144; // 256 * 16 bytes = 4096 bytes
+    this.OFF_CANVAS_WIDTH = 4240;
+    this.OFF_CANVAS_HEIGHT = 4244;
+    this.OFF_DPR = 4248;
+    this.OFF_VISIBLE = 4252;
+    const kBlockWords = 4256 / 4;
 
-    this.u32 = new Uint32Array(sab);
-    this.i32 = new Int32Array(sab);
-    this.f32 = new Float32Array(sab);
+    this.u32 = new Uint32Array(sab, byteOffset, kBlockWords);
+    this.i32 = new Int32Array(sab, byteOffset, kBlockWords);
+    this.f32 = new Float32Array(sab, byteOffset, kBlockWords);
+
+    // A scripted pad merged into pad 0 (tools/web/cdp.py --script drives it
+    // through window.setSyntheticPadButton / setSyntheticPadAxis).
+    this.synthetic = {
+      active: false,
+      buttons: 0,
+      axes: [0.0, 0.0, 0.0, 0.0],
+      triggers: [0.0, 0.0],
+    };
 
     this.running = false;
     this.rafId = null;
@@ -109,6 +121,8 @@ export class WebInput {
     this._onBlur = this.handleBlur.bind(this);
     this._onVisibilityChange = this.updateVisibility.bind(this);
     this._onResize = this.updateDimensions.bind(this);
+    this._onContextMenu = (event) => event.preventDefault();
+    this._onDoubleClick = () => this.toggleFullscreen();
     this._pollLoop = this.pollLoop.bind(this);
   }
 
@@ -125,7 +139,8 @@ export class WebInput {
       this.canvas.addEventListener('pointerdown', this._onPointerDown, { passive: false });
       this.canvas.addEventListener('pointerup', this._onPointerUp, { passive: false });
       this.canvas.addEventListener('wheel', this._onWheel, { passive: false });
-      this.canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+      this.canvas.addEventListener('contextmenu', this._onContextMenu);
+      this.canvas.addEventListener('dblclick', this._onDoubleClick);
     }
 
     window.addEventListener('focus', this._onFocus);
@@ -158,12 +173,23 @@ export class WebInput {
       this.canvas.removeEventListener('pointerdown', this._onPointerDown);
       this.canvas.removeEventListener('pointerup', this._onPointerUp);
       this.canvas.removeEventListener('wheel', this._onWheel);
+      this.canvas.removeEventListener('contextmenu', this._onContextMenu);
+      this.canvas.removeEventListener('dblclick', this._onDoubleClick);
     }
 
     window.removeEventListener('focus', this._onFocus);
     window.removeEventListener('blur', this._onBlur);
     document.removeEventListener('visibilitychange', this._onVisibilityChange);
     window.removeEventListener('resize', this._onResize);
+  }
+
+  async toggleFullscreen() {
+    try {
+      if (document.fullscreenElement) await document.exitFullscreen();
+      else await this.canvas.requestFullscreen();
+    } catch (error) {
+      console.warn('Fullscreen unavailable:', error);
+    }
   }
 
   updateDimensions() {
@@ -187,7 +213,7 @@ export class WebInput {
     const tail = Atomics.load(this.u32, this.OFF_EVENT_TAIL >> 2);
 
     // Ring buffer size: 256
-    if ((head - tail) >= 256) {
+    if (((head - tail) >>> 0) >= 256) {
       // Ring full: drop oldest event by advancing tail or drop newest
       return false;
     }
@@ -236,8 +262,9 @@ export class WebInput {
     if (!this.canvas) return { x: 0, y: 0 };
     const rect = this.canvas.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1.0;
-    const scaleX = (this.canvas.width / rect.width) || dpr;
-    const scaleY = (this.canvas.height / rect.height) || dpr;
+    // The GPU worker owns the transferred canvas; DOM width/height can be stale.
+    const scaleX = (Atomics.load(this.u32, this.OFF_CANVAS_WIDTH >> 2) / rect.width) || dpr;
+    const scaleY = (Atomics.load(this.u32, this.OFF_CANVAS_HEIGHT >> 2) / rect.height) || dpr;
     return {
       x: Math.round((e.clientX - rect.left) * scaleX),
       y: Math.round((e.clientY - rect.top) * scaleY),
@@ -252,6 +279,7 @@ export class WebInput {
   handlePointerDown(e) {
     const { x, y } = this.getCanvasCoords(e);
     const button = MOUSE_BUTTON[e.button] || 1;
+    this.canvas?.setPointerCapture(e.pointerId);
     this.pushEvent(EVENT_TYPE.POINTER_DOWN, button, x, y);
     if (this.canvas && document.activeElement !== this.canvas) {
       this.canvas.focus();
@@ -269,6 +297,7 @@ export class WebInput {
     // Standard delta scaling: 120 units per notch
     const deltaX = Math.round(e.deltaX);
     const deltaY = Math.round(e.deltaY);
+    this.pushEvent(EVENT_TYPE.POINTER_MOVE, e.buttons || 0, x, y);
     this.pushEvent(EVENT_TYPE.WHEEL, 0, deltaX, deltaY);
     e.preventDefault();
   }
@@ -334,10 +363,55 @@ export class WebInput {
       }
     }
 
+    if (this.synthetic.active) {
+      const base = this.OFF_PADS >> 2;
+      if (!this.u32[base + 0]) {
+        count++;
+        this.u32[base + 1] = 0;
+        for (let k = 2; k < 8; ++k) this.f32[base + k] = 0.0;
+      }
+      this.u32[base + 0] = 1;
+      this.u32[base + 1] = (this.u32[base + 1] | this.synthetic.buttons) >>> 0;
+      for (let k = 0; k < 4; ++k) {
+        if (this.synthetic.axes[k] !== 0.0) this.f32[base + 2 + k] = this.synthetic.axes[k];
+      }
+      for (let k = 0; k < 2; ++k) {
+        this.f32[base + 6 + k] = Math.max(this.f32[base + 6 + k], this.synthetic.triggers[k]);
+      }
+    }
+
     Atomics.store(this.u32, this.OFF_PAD_COUNT >> 2, count);
 
     // Seqlock: increment pad_seq to next even number to indicate update complete
     Atomics.store(this.u32, this.OFF_PAD_SEQ >> 2, (seq + 2) >>> 0);
+  }
+
+  // Standard-mapping button index (0 = A ... 15 = D-pad right), pressed or not.
+  setSyntheticButton(index, pressed) {
+    this.synthetic.active = true;
+    if (pressed) {
+      this.synthetic.buttons |= (1 << index);
+    } else {
+      this.synthetic.buttons &= ~(1 << index);
+    }
+    if (index === 6 || index === 7) {
+      this.synthetic.triggers[index - 6] = pressed ? 1.0 : 0.0;
+    }
+    this.pollGamepads();
+  }
+
+  // SDL raw axis values (as tests/headless scripts use): lx/ly/rx/ry in
+  // -32768..32767 (+y = down, as the Gamepad API), lt/rt in 0..32767.
+  setSyntheticAxis(name, raw) {
+    this.synthetic.active = true;
+    const value = Math.max(-1.0, Math.min(1.0, raw / 32767.0));
+    const axisIndex = { lx: 0, ly: 1, rx: 2, ry: 3 }[name];
+    if (axisIndex !== undefined) {
+      this.synthetic.axes[axisIndex] = value;
+    } else if (name === 'lt' || name === 'rt') {
+      this.synthetic.triggers[name === 'lt' ? 0 : 1] = Math.max(0.0, value);
+    }
+    this.pollGamepads();
   }
 
   pollLoop() {

@@ -80,6 +80,38 @@ If you prefer building directly with CMake:
    ```
 </details>
 
+### Local browser build (experimental)
+
+Build the native game first to generate C++ from your own `default.xex`, then install
+[Emscripten](https://emscripten.org/docs/getting_started/downloads.html) (tested: 6.0.12):
+
+```sh
+# Activates ~/emsdk automatically, or use an already activated toolchain.
+tools/web/build.sh
+python3 tools/web/serve.py out/build/web-wasm64-release/web
+```
+
+Open **http://127.0.0.1:8080** in desktop Chrome/Edge with hardware WebGPU, shared
+Memory64 and JSPI support (Chromium 154 on Linux is the tested target). Linux may
+require WebGPU flags; see [the web-port notes](docs/web-port/README.md#111-headless-chromium-with-hardware-webgpu-this-server).
+Other browsers and mobile are not verified.
+
+On first visit, select your **Trials HD base-game package** or extracted assets folder.
+Include `package_license.toml` in a folder import to preserve its package license;
+otherwise it runs as a trial. Import stays local; later visits reuse browser storage.
+Saves, profiles, settings, logs and caches also persist there. **Clearing site data
+deletes saves; changing the server origin/port uses separate storage.** Keep important
+saves backed up. Only one tab can use the game storage at a time.
+
+Keyboard and standard gamepads are supported; **F1** opens settings and a double-click
+on the canvas toggles fullscreen. Audio starts after a key press or click.
+
+**Never publish or host the build output:** its `.wasm` contains your recompiled game
+code. The included server binds to localhost. No game assets are bundled or uploaded.
+Browser gameplay, storage and audio acceptance checks are still in progress; the
+[web-port task board](docs/web-port/README.md#16-task-breakdown-for-agents-small-and-large-models)
+records the remaining gates.
+
 ### Adding DLC / Addons (Optional)
 
 Install DLC track packs (*Big Pack* and *Big Thrills*) into `assets/`:
@@ -152,7 +184,7 @@ Settings are saved to `trials_hd.toml` and can also be passed as command-line ar
 
 ## Save Data & Storage
 
-All game saves, user profiles, achievements, shader caches, logs, and configuration settings are stored locally in the build directory, right next to the executable and `trials_hd.toml`:
+Native builds store all game saves, user profiles, achievements, shader caches, logs, and configuration settings locally in the build directory, right next to the executable and `trials_hd.toml` (browser storage is described above):
 
 - **Configuration:** `trials_hd.toml` (graphics settings, display modes, keybindings)
 - **Save Data & Profiles:** `5841095A/` (track times, medals, unlocked bikes, and custom tracks)

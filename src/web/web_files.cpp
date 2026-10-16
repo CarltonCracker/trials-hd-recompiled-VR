@@ -3,8 +3,12 @@
 #include "web/web_files.h"
 
 #include <cerrno>
+#include <charconv>
 #include <cstring>
+#include <cstdlib>
+#include <fstream>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 
 #include <fcntl.h>
@@ -12,7 +16,9 @@
 #include <unistd.h>
 
 #if defined(TRIALSHD_WEB_WASMFS)
+#include <emscripten/emscripten.h>
 #include <emscripten/wasmfs.h>
+#include "tools/stfs_extract/stfs_extract.h"
 #endif
 
 #include <rex/cvar.h>
@@ -27,6 +33,14 @@ namespace trials_hd::web {
 namespace {
 
 constexpr const char* kMountPoint = "/assets";
+#if defined(TRIALSHD_WEB_WASMFS)
+constexpr const char* kStorageRoot = "/opfs/trials_hd";
+
+void StorageStatus(const std::string& text, bool error = false) {
+  MAIN_THREAD_EM_ASM({ window.trialsHd.filesStatus?.(UTF8ToString($0), !!$1); },
+                     text.c_str(), error);
+}
+#endif
 
 bool ReadWholeFile(const std::string& path, std::string& out) {
   int fd = open(path.c_str(), O_RDONLY | O_CREAT, 0444);
@@ -44,10 +58,83 @@ bool ReadWholeFile(const std::string& path, std::string& out) {
 
 }  // namespace
 
+std::filesystem::path PersistentDataRoot() {
+#if defined(TRIALSHD_WEB_WASMFS)
+  return kStorageRoot;
+#else
+  return {};
+#endif
+}
+
+bool InitializeStorage() {
+#if defined(TRIALSHD_WEB_WASMFS)
+  try {
+    auto backend = wasmfs_create_opfs_backend();
+    if (!backend || wasmfs_create_directory("/opfs", 0777, backend) != 0) {
+      throw std::runtime_error("Cannot mount browser storage");
+    }
+    const std::filesystem::path root(kStorageRoot);
+    for (const auto* dir : {"home", "cache", "logs"}) {
+      std::filesystem::create_directories(root / dir);
+    }
+    // Served assets remain a developer option; saves still persist in OPFS.
+    if (REXCVAR_GET(web_assets_url).empty()) {
+      const auto ready = root / "import-ready";
+      if (!std::filesystem::exists(ready)) {
+        const auto source = root / "package.stfs";
+        if (std::filesystem::exists(source)) {
+          stfs::StfsPackage package;
+          std::string error;
+          StorageStatus("Checking package...");
+          if (!package.Open(source, &error)) throw std::runtime_error(error);
+          if (package.title_id() != 0x5841095A || package.content_type() != 0x000D0000) {
+            throw std::runtime_error("Select the Trials HD base game, not a save or DLC package");
+          }
+          if (!package.ExtractAll(root / "assets", true,
+                [](const stfs::StfsEntry& entry, size_t index, size_t total) {
+                  StorageStatus("Extracting " + std::to_string(index + 1) + "/" +
+                                std::to_string(total) + ": " + entry.path);
+                }, &error)) throw std::runtime_error(error);
+          package.Close();
+          std::filesystem::remove(source);
+        }
+        for (const auto* name : {"default.xex", "data/data.pak", "data/data_menu.pak"}) {
+          if (!std::filesystem::is_regular_file(root / "assets" / name) ||
+              std::filesystem::file_size(root / "assets" / name) == 0) {
+            throw std::runtime_error(std::string("Incomplete game import: missing ") + name);
+          }
+        }
+        // Commit last, outside paths controlled by the imported package.
+        std::ofstream marker(ready);
+        marker << "1\n";
+        marker.close();
+        if (!marker) throw std::runtime_error("Cannot save import completion marker");
+      }
+    }
+    setenv("HOME", (root / "home").c_str(), 1);
+    setenv("XDG_DATA_HOME", (root / "home").c_str(), 1);
+    if (chdir(kStorageRoot) != 0) throw std::runtime_error("Cannot enter browser storage");
+    MAIN_THREAD_EM_ASM({
+      window.trialsHd.filesReady = true;
+      document.getElementById('import-panel').hidden = true;
+    });
+    return true;
+  } catch (const std::exception& error) {
+    StorageStatus(std::string("Import/storage failed: ") + error.what() +
+                  ". Reload to try again; existing saves are retained.", true);
+    REXLOG_ERROR("web storage: {}", error.what());
+    return false;
+  }
+#else
+  return true;
+#endif
+}
+
 std::filesystem::path MountServedAssets() {
   std::string url = REXCVAR_GET(web_assets_url);
   if (url.empty()) {
-    return {};
+    const auto root = PersistentDataRoot();
+    return root.empty() ? root : root / "assets";
   }
 #if !defined(TRIALSHD_WEB_WASMFS)
   // The Node development build reads the host file system (--game_data_root).
@@ -76,15 +163,30 @@ std::filesystem::path MountServedAssets() {
   uint64_t bytes = 0;
   while (std::getline(lines, line)) {
     size_t space = line.find(' ');
-    if (space == std::string::npos) {
-      continue;
+    uint64_t size = 0;
+    const auto parsed = std::from_chars(
+        line.data(), line.data() + (space == std::string::npos ? 0 : space), size);
+    const std::filesystem::path relative(space == std::string::npos ? "" : line.substr(space + 1));
+    bool safe = !relative.empty() && !relative.is_absolute() &&
+                relative.string().find_first_of("\\:") == std::string::npos &&
+                relative.string().find('\0') == std::string::npos;
+    for (const auto& part : relative) {
+      if (part == "." || part == ".." || part.empty()) safe = false;
     }
-    std::filesystem::path path = std::filesystem::path(kMountPoint) / line.substr(space + 1);
+    if (space == std::string::npos || parsed.ec != std::errc{} ||
+        parsed.ptr != line.data() + space || !safe || size > UINT64_MAX - bytes) {
+      REXLOG_ERROR("web: invalid asset manifest entry");
+      return {};
+    }
+    std::filesystem::path path = std::filesystem::path(kMountPoint) / relative;
     std::string dir;
     for (const auto& part : path.parent_path()) {
       dir = dir == "/" || dir.empty() ? "/" + part.string() : dir + "/" + part.string();
       if (dir != "/") {
-        mkdir(dir.c_str(), 0777);  // EEXIST is fine.
+        if (mkdir(dir.c_str(), 0777) != 0 && errno != EEXIST) {
+          REXLOG_ERROR("web: cannot create {}: {}", dir, std::strerror(errno));
+          return {};
+        }
       }
     }
     int fd = open(path.c_str(), O_WRONLY | O_CREAT, 0444);
@@ -94,7 +196,7 @@ std::filesystem::path MountServedAssets() {
     }
     close(fd);
     ++files;
-    bytes += std::stoull(line.substr(0, space));
+    bytes += size;
   }
   REXLOG_INFO("web: mounted {} ({} files, {:.1f} MiB, fetched on first read) at {}", url, files,
               double(bytes) / (1024 * 1024), kMountPoint);

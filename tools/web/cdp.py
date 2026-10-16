@@ -14,6 +14,7 @@ commit them: they can contain game data).
 import argparse
 import asyncio
 import base64
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -180,13 +181,17 @@ async def run_headless_script(s, script_path, out_dir):
             btn = c_args[0].lower()
             val = int(c_args[1])
             idx = PAD_BUTTON_MAP.get(btn, 0)
-            expr = f"if (window.setSyntheticPadButton) window.setSyntheticPadButton({idx}, {val});"
-            await s.call("Runtime.evaluate", {"expression": expr}, session=s.page_session)
+            expr = f"window.setSyntheticPadButton({idx}, {val});"
+            result = await s.call("Runtime.evaluate", {"expression": expr}, session=s.page_session)
+            if "exceptionDetails" in result:
+                raise RuntimeError(f"Controller button injection failed: {result['exceptionDetails']}")
         elif cmd == "axis":
             axis = c_args[0].lower()
             raw_val = float(c_args[1])
-            expr = f"if (window.setSyntheticPadAxis) window.setSyntheticPadAxis('{axis}', {raw_val});"
-            await s.call("Runtime.evaluate", {"expression": expr}, session=s.page_session)
+            expr = f"window.setSyntheticPadAxis('{axis}', {raw_val});"
+            result = await s.call("Runtime.evaluate", {"expression": expr}, session=s.page_session)
+            if "exceptionDetails" in result:
+                raise RuntimeError(f"Controller axis injection failed: {result['exceptionDetails']}")
         elif cmd == "capture":
             name = c_args[0]
             shot = await s.call("Page.captureScreenshot", {"format": "png"}, session=s.page_session)
@@ -220,6 +225,9 @@ async def drive(s, args):
         await s.call("Emulation.setDeviceMetricsOverride", {
             "width": width, "height": height, "deviceScaleFactor": 1, "mobile": False},
             session=s.page_session)
+    if getattr(args, "init_js", None):
+        await s.call("Page.addScriptToEvaluateOnNewDocument", {
+            "source": args.init_js.read_text()}, session=s.page_session)
     await s.call("Page.navigate", {"url": args.url}, session=s.page_session)
     started = time.monotonic()
     exit_code = None
@@ -242,8 +250,15 @@ async def drive(s, args):
             if not args.until:
                 break
 
-    if script_task and not script_task.done():
-        script_task.cancel()
+    if script_task:
+        if not script_task.done():
+            script_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await script_task
+            if exit_code is None:
+                raise RuntimeError("Headless script did not complete before the deadline")
+        else:
+            await script_task
 
     elapsed = time.monotonic() - started
     result = None
@@ -251,6 +266,8 @@ async def drive(s, args):
         value = await s.call("Runtime.evaluate", {
             "expression": args.eval, "returnByValue": True, "awaitPromise": True},
             session=s.page_session)
+        if "exceptionDetails" in value:
+            raise RuntimeError(f"Page evaluation failed: {value['exceptionDetails']}")
         result = value.get("result", {}).get("value")
     if args.screenshot:
         shot = await s.call("Page.captureScreenshot", {"format": "png"}, session=s.page_session)
@@ -268,7 +285,8 @@ async def drive(s, args):
         print(f"{s.exceptions} uncaught exception(s), see the console file")
     if args.eval:
         print("eval:", json.dumps(result))
-    return 0 if (s.matched is not None or not args.until) else 1
+    success = (s.matched is not None or not args.until) and not s.exceptions
+    return 0 if success and exit_code in (None, 0) else 1
 
 
 async def run(args):
@@ -315,6 +333,7 @@ def main():
     parser.add_argument("--eval", help="JavaScript expression to evaluate at the end")
     parser.add_argument("--screenshot", type=Path, help="save a PNG of the page at the end")
     parser.add_argument("--script", type=Path, help="run a tests/headless/*.txt script against the page")
+    parser.add_argument("--init-js", type=Path, help="test fixture to inject before page scripts run")
     parser.add_argument("--out-dir", type=Path, default=Path("out/run"), help="output directory for captures")
     parser.add_argument("--viewport", help="exact page size in CSS pixels, e.g. 1280x720")
     parser.add_argument("--chromium", default="chromium")

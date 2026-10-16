@@ -1101,12 +1101,31 @@ background overlay) captured at a different phase. The WM2 check needs the scrip
 - WasmFS with the OPFS backend mounted at `/opfs`. Layout:
   `/opfs/trials_hd/assets/` (game data, including `default.xex` and
   `package_license.toml`), `/opfs/trials_hd/home/` (`HOME`/`XDG_DATA_HOME` for saves and
-  profiles), `/opfs/trials_hd/trials_hd.toml` (settings; `GetExecutableFolder()` returns
-  `/opfs/trials_hd` on the web), `/opfs/trials_hd/cache/` (shader storage).
+  profiles), `/opfs/trials_hd/trials_hd.toml` (settings; explicit web config path),
+  `/opfs/trials_hd/cache/` (shader storage), `/opfs/trials_hd/logs/` (logs).
 - Startup arguments come from the page URL query (`?log_level=info&draw_resolution_scale_x=2`)
   plus `--game_data_root=/opfs/trials_hd/assets`.
-- Import (W-L10): a dedicated wasm entry `trials_hd_import(path_or_handle)` runs in a worker
-  with the C++ STFS extractor (W-S13); progress goes to the page through a shared counter.
+- Import (W-L10, implementation 2026-10-16): `web/import.js` holds a page-lifetime
+  Web Lock and gates `Module.callMain` (`noInitialRun`). On first run it streams the
+  selected package to OPFS `/trials_hd/package.stfs`, or validated folder files to
+  `/trials_hd/assets/`. `TrialsHdApp::SetupEnvironment` mounts WasmFS OPFS and extracts
+  the package on the proxied-main pthread before configuration/runtime setup.
+  This reuses the game module and avoids a second wasm runtime/extraction worker.
+  Package title/content type and required files are checked. `/trials_hd/import-ready`
+  is written last, outside package-controlled paths; reload skips completed imports.
+  Failed first imports can be retried, deleting only incomplete assets/source package,
+  never saves/settings/cache. Import UI does not replace completed games. Progress
+  is proxied to the main-thread page; `storage.persist()` is requested after copy.
+  `OnConfigurePaths` sets the persistent config path; user/cache defaults follow it,
+  and the shell defaults the log to `/opfs/trials_hd/logs/trials_hd.log`.
+  Browser package verification passed: invalid import retry → actual package →
+  reload without import → retained save sentinel → second-tab lock → rendered menu
+  (`tools/web/tests/storage_browser.py`, `out/web-storage/menu-persistence.*`).
+  The imported menu is **35.0 dB vs native nav_0**, above the 33 dB gate. The actual
+  folder-picker path passes the same browser checks (`--folder`); JS assertions also
+  cover required files/path traversal/duplicates.
+  A served manifest containing `1 ../escape.bin` is rejected in the real browser.
+  First package extraction took about 50 s here; subsequent visits skip extraction.
 
 #### 7.9.9 Audio
 
@@ -1638,7 +1657,7 @@ profile per thread with guest functions named `__imp__sub_<address>`.
 | WM0 | todo | Spikes answered: limits, JSPI in pthreads, Memory64 cost, MMIO completeness, fibers | W-S01–W-S08 done, section 14 questions 1–5 answered |
 | WM1 | done 2026-10-15 (W-L15; null GPU, Chromium 154) | Runtime boots headless in the browser to the first guest frame (no graphics: GPU plugin stubbed) | Console shows the guest reaching the main menu's first swap |
 | WM2 | todo | Menus render through the browser's WebGPU | `main_menu_nav` golden captures within 40 dB of native |
-| WM3 | todo | Game data import and persistence | Fresh profile → pick package → plays; reload → no re-import |
+| WM3 | done 2026-10-16 (W-L10) | Game data import and persistence | Fresh profile → pick package → plays; reload → no re-import |
 | WM4 | todo | Rides render; input from keyboard and gamepad | `ride_middle_name_danger` completes; `check_fps_log.py 60` passes in Chromium |
 | WM5 | todo | Audio | Music and effects audible; no underruns over a 2-minute ride |
 | WM6 | todo | 60 FPS at 720p in desktop Chrome (RX 6600) | 3 runs, min ≥ 55 FPS riding, logged in 4.3-style table |
@@ -1845,7 +1864,7 @@ Every task's "Done when" implicitly includes **`tools/check_native.sh check` pas
 | W-S10 | review | S | Header portability patch (SDK patch, guarded): `REX_PLATFORM_EMSCRIPTEN` in `platform.h`; enable the portable `vsl`/`vslo`/`vsro` branches for `__wasm__`; extend the chrono shim to `__EMSCRIPTEN__`; allow `dynlib.h` with no native library names. (Section 6 items 1, 3, 4, 6.) | — | Native Linux build unchanged (`git diff` of generated objects not needed; just builds and boots); `em++` of `trials_hd_recomp.0.cpp` gets past those three errors |
 | W-S11 | review | S | wasm `FPSCRPlatform` (section 6 item 2): shadow register for `getcsr`/`setcsr`, no-op flush; log (debug builds) when a guest rounding mode other than nearest is set. Also log natively which rounding modes the 5 `storeFromGuest` sites set during rides. | W-S10 | Natively: modes listed in 14.6; wasm: header compiles |
 | W-S12 | review | S | Browser WebGPU draw-cost benchmark page: 1,500 draws/frame with per-draw `setBindGroup` (dynamic offsets) and `setPipeline` changes like the renderer (renderer doc 7.5); report ms/frame in Chromium here vs the same program natively with Dawn (`tools/webgpu_smoke` can host the native half). | W-S04 | Table in 9.6 |
-| W-S13 | review: must fix import validation (W-L17) | S | Port `tools/stfs_extract.py` to C++ (`tools/stfs_extract/stfs_extract.cpp`, library + CLI), byte-identical output on the user's package. | — | `cmp -r` of both extractions is empty; CLI added to native CMake as an optional tool |
+| W-S13 | done 2026-10-16 c3414c7 (W-L17 review fixes) | S | Port `tools/stfs_extract.py` to C++ (`tools/stfs_extract/stfs_extract.cpp`, library + CLI), byte-identical output on the user's package. | — | `cmp -r` of both extractions is empty; CLI added to native CMake as an optional tool |
 | W-S14 | done 2026-10-15 9b5a087 | S | `tools/web/serve.py`: static server on `127.0.0.1:8080` with COOP/COEP/CORP headers, `application/wasm`, brotli/gzip pre-compressed files, no directory listing outside the build folder. | — | `curl -I` shows the headers; a test page reports `crossOriginIsolated === true` |
 | W-S15 | done 2026-10-15 (with W-L15; script runner: W-S19) | S | `tools/web/cdp.py`: minimal CDP client (stdlib + `websockets` from `.venv`): launch Chromium with 11.1 flags, open URL, stream console to a file, `evaluate` JS, screenshot, and run `tests/headless/*.txt` commands through a page hook. | W-S14 | Runs a demo script against W-S04's page and saves a screenshot |
 | W-S16 | blocked: W-L10 | M | Pipeline warm-up: on startup, read the OPFS shader storage and create pipelines with `createRenderPipelineAsync` before the menu appears (design note from W-L10). | W-L10 | First menu frame has no shader-compile stalls > 50 ms in the console timing log |
@@ -1864,16 +1883,16 @@ Every task's "Done when" implicitly includes **`tools/check_native.sh check` pas
 | W-L05 | claimed claude-opus-5.5 2026-10-15 | **Write tracking consumers**: `SharedMemory`, `PrimitiveProcessor` and the renderer's texture cache and memory mirror use the dirty bitmap on the web; debug assertion mode compares against chunk hashes (14.8). | W-L04, W-S09 | 8.3, renderer doc 8.3, 8.9 | WM4 ride shows no stale textures; assertion mode passes over `ride_middle_name_danger` |
 | W-L06 | claimed claude-opus-5.5 2026-10-15 | **GPU worker and yielding** (7.4): run the command processor on the canvas-owning pthread; JSPI yield at swap/ring waits (or the resumable loop if W-S05 fails); move presenter paint and ImGui drawing there (9.4). | W-L01, W-S05 | 7.3, 7.4, 9.4 | WM2: menus render and the settings overlay works |
 | W-L07 | claimed claude-opus-5.5 2026-10-15 | **Renderer web build** (section 9): `#if __EMSCRIPTEN__` in provider/presenter/mirror, canvas surface, feature and limit fallbacks (`Unorm16` → tier1, split mirror if W-S01 says so, timestamp degrade), async capture. | W-S01, W-L06 | 9 | Renderer builds with `--use-port=emdawnwebgpu`; WM2 check |
-| W-L08 | claimed pi-gpt 2026-10-15 (transferred from Claude; controller priority) | **Input and app shell**: web `WindowedAppContext` (no SDL window), UI pthread driven by main-thread rAF messages, web input driver over the SAB, keyboard controls and rebinding, fullscreen/pointer lock, Exit Game behavior (8.7, 8.8). | W-L01 | 8.7, 8.8 | WM4 input part: keyboard and gamepad ride; settings menu usable with mouse and keyboard |
+| W-L08 | claimed claude-opus-5.5 2026-10-16 (taken over from pi-gpt, out of usage) | **Input and app shell**: web `WindowedAppContext` (no SDL window), UI pthread driven by main-thread rAF messages, web input driver over the SAB, keyboard controls and rebinding, fullscreen/pointer lock, Exit Game behavior (8.7, 8.8). | W-L01 | 8.7, 8.8 | WM4 input part: keyboard and gamepad ride; settings menu usable with mouse and keyboard |
 | W-L09 | todo | **Split guest-memory mirror** (only if W-S01 shows < 512 MiB storage bindings): 4 × 128 MiB buffers, WGSL address → (binding, offset), index/vertex fetch and memexport paths updated, native unchanged unless `--webgpu_split_mirror`. | W-S01 | renderer doc 8.3, 9.1 | Native with the split forced passes golden scenes; web passes WM2 |
-| W-L10 | todo | **Files and import**: WasmFS + OPFS backend, VFS host-path device on OPFS, import flow (picker, drag-drop, extraction worker using W-S13), license metadata, saves/settings/shader storage in OPFS, `storage.persist()` (8.6). | W-L01, W-S13 | 8.6, `src/package_license.cpp` | WM3 |
+| W-L10 | done 2026-10-16 (pi-gpt; committed by claude-opus-5.5, 16.6) | **Files and import**: WasmFS + OPFS backend, VFS host-path device on OPFS, import flow (picker, drag-drop, extraction worker using W-S13), license metadata, saves/settings/shader storage in OPFS, `storage.persist()` (8.6). | W-L01, W-S13 | 8.6, `src/package_license.cpp` | WM3 |
 | W-L11 | todo | **Browser CPU cost reduction** for the GPU worker if W-S12 or WM4 shows it bound: render bundles for static passes, fewer bind-group changes, larger uniform rings, batching small uploads. | W-S12, WM4 | 9.6, renderer doc 7.5 | WM6 or a documented ceiling with profiles |
 | W-L12 | claimed claude-opus-5.5 2026-10-16 | **Audio**: FFmpeg for wasm (XMA only), web audio driver with an AudioWorklet and SAB ring, AudioContext unlock on first gesture (8.5). | W-L01 | 8.5, SDK `src/audio/` | WM5 |
 | W-L13 | todo | **Option B (wasm32 remapped window)** if W-L03 or Safari requires it: heap range limits in the SDK, segment table macro, 32-bit pointer audit. | W-L03 | 7.1 | Same golden checks as WM2/WM4 in a wasm32 build |
 | W-L14 | claimed pi-gpt 2026-10-15 (W-S13 first; W-L16 verification still running) | **Review gate** for small-model work: review each `review` task within a day; check native builds still pass. | — | 16.1 | Ongoing |
 | W-L15 | review 2026-10-15 (needs macOS check) | **Web build system** (10.1, 10.2): `web-wasm64-release` preset, `TRIALSHD_WEB` (OFF by default, `FATAL_ERROR` without Emscripten, 7.8), static WebGPU renderer library, third-party subset, shell HTML, link flags; boots to WM1 with the GPU plugin stubbed. Also: kernel/threading web layer (timers thread, affinity no-ops, exception handler and `dlopen` compiled out, fibers per W-S08, sockets stubbed). | W-L01, W-L02, W-L04, W-S10, W-S11 | 3.5, 8.2, 8.4, 10 | WM1 |
 | W-L16 | review 2026-10-15 (needs macOS check) | **Fast exact `fma` on wasm.** Wasm has no fused multiply-add; `std::fma` is musl's software routine, ~30% of the game's job-thread time in the W-L15 Node profile (`fma` + `normalize` under `sub_826697D0` and friends). 6,183 of the 6,440 generated `std::fma` calls are single-precision (`fmadds` family: `double(float(std::fma(a, b, c)))`). When `a` and `b` are float-representable, `a*b` is exact in double (48 of 53 bits), so `a*b + c` (with `-ffp-contract=off`) is bit-identical to `fma(a, b, c)`: checked 2026-10-15 over 198,959,703 random cases including NaN/Inf/subnormals and near-cancellation, 0 mismatches. Emit the single-precision forms through a macro (`REX_FMA_S`) that is `std::fma` natively (identity, as W-L02's macros) and a guarded fast path on the web; keep `std::fma` for the rest. | W-L02, W-L15 | 3.3, W-L02's identity-macro process | Native generated-code diff reviewed (macro names only) and golden scenes pass; web: same output in a W-L04-style unit test over the generated forms; profile share of `fma` < 5% |
-| W-L17 | claimed pi-gpt 2026-10-15 | **Harden STFS import boundary** from W-L14 review: reject escaping paths, cyclic/invalid parents and truncated file tables/chains; report filesystem/write failures; add synthetic malformed-package regressions before the browser import uses it. | W-S13 | `tools/stfs_extract/`, 8.6 | Synthetic negative cases rejected without writes outside target or hangs; actual package still byte-identical to Python; native and wasm64 checks pass |
+| W-L17 | done 2026-10-16 c3414c7 | **Harden STFS import boundary** from W-L14 review: reject escaping paths, cyclic/invalid parents and truncated file tables/chains; report filesystem/write failures; add synthetic malformed-package regressions before the browser import uses it. | W-S13 | `tools/stfs_extract/`, 8.6 | Synthetic negative cases rejected without writes outside target or hangs; actual package still byte-identical to Python; native and wasm64 checks pass |
 
 ### 16.5 Order and parallelism
 
@@ -1895,6 +1914,31 @@ details of W-L04 to W-L09. The critical path is W-L01 → W-L02/W-L04 → W-L15 
 W-L06/W-L07 (graphics).
 
 ### 16.6 Notes log
+
+- 2026-10-16 (claude-opus-5.5): **pi-gpt ran out of usage; Claude takes over W-L08** and
+  committed pi-gpt's finished, uncommitted work as-is (W-L08 input/settings, W-L10 storage and
+  import, `tools/web/build.sh`, the README web section, tests). Checked before committing:
+  `node tools/web/tests/{import,input,shell}.mjs` pass; `test_cdp_controller.py` 6/6 and
+  `test_serve.py` 10/10 (run from `tools/web`); in Chromium `controller_settings.txt` opens
+  settings with Back+Start, Down+A waits for a key, B cancels, B closes, and the game's D-pad
+  works afterwards; pi-gpt's `storage_browser.py` package and folder runs passed earlier (16.6
+  below). Native: `tools/check_native.sh check out/native_baseline_claude` with these changes
+  and the descriptor fix: `webgpu: 9 captures`, `worst 44.0 dB`; `vulkan: 9 captures`, `worst
+  37.4 dB`; `NATIVE CHECK PASSED`.
+
+- 2026-10-16 (claude-opus-5.5): **track-select stall fixed** (`a18d559`): emdawnwebgpu's
+  `webgpu_cpp.h` (unlike native Dawn's) has no default for `RenderPassDescriptor::
+  colorAttachmentCount`, `FragmentState::targetCount`, `PipelineLayoutDescriptor::
+  bindGroupLayoutCount`, `VertexBufferLayout::attributeCount`, `ConstantEntry::value`. The
+  depth-only EDRAM transfer pass left the count as stack garbage and the binding's JS looped
+  over millions of attachments. Found with the stall watchdog plus a JS step word: the worker
+  was in `makeColorAttachments` with count > 10^6. All such descriptors are now `{}`.
+  **Rule for the web renderer: value-initialize every `wgpu::` descriptor.** After the fix:
+  `controller_ride.txt` 4/4 runs ride at 60 FPS (~1,400 draws, 20 resolves per frame);
+  `ride_middle_name_danger.txt` in Chromium with `log_simulation_rate=true`:
+  `check_fps_log.py 60` → `fixed 60.01 Hz; real rendering 60.0 FPS; guest swaps 60.0 FPS`;
+  the ride frames match native visually (explosions, particles, lighting; ~2 s later on the
+  track, so PSNR is not meaningful); audio over the 131 s run: 0 underruns, peak 0.50.
 
 - 2026-10-16 (claude-opus-5.5): **overlays, canvas resize, page events and audio in the
   browser** (W-L06/W-L07 stage, W-L12 first stage). SDK `rex/ui/web.h` + `ui/web/web_ui.cpp`:
@@ -1921,6 +1965,35 @@ W-L06/W-L07 (graphics).
   the mixer/DPI edits (web-only files): `webgpu: 9 captures`, `worst 42.3 dB`; `vulkan: 9
   captures`, `worst 41.2 dB`; `NATIVE CHECK PASSED`.
 
+- 2026-10-16 (pi-gpt): W-L08 acceptance exposed two remaining web stubs:
+  settings `FeedGamepadNavigation` never read a pad, and the disabled settings
+  watcher never released `hold_input_until_released_` after closing an overlay.
+  Added guarded web-source navigation, Back+Start/Guide toggles, B/Back close,
+  and delivered-key snapshots for the release gate; native SDL branches stay intact.
+  `controller_settings.txt` exercises open, navigate, cancel, close and a subsequent
+  in-game D-pad press. Real-driver key snapshot assertions and browser checks are
+  running. CDP now treats nonzero exits/uncaught exceptions as failures and allows
+  a clean game exit to end a script early (six unit cases pass).
+
+- 2026-10-16 (pi-gpt): W-L10 package path passes the real browser end-to-end test:
+  failed import retry, base package extraction (license mask 0x1), reload without
+  reimport, retained save sentinel, second-tab storage exclusion, and actual main menu
+  (not just splash). Screenshot **35.0 dB vs native**, passing 33 dB. Artifacts:
+  `out/web-storage/menu-persistence.{log,png}`. The separate directory-picker run
+  (`storage_browser.py --folder`) passes all the same checks through the main menu;
+  artifacts: `out/web-storage/folder-persistence.{log,png}`. Source tests pass for import traversal,
+  duplicates/required files, input wrap/coordinates/fullscreen, shell capability
+  diagnostics, three CDP controller cases and ten server cases. Browser manifest
+  escape rejection passes. Native gate already passed; no game artifacts committed.
+
+- 2026-10-16 (pi-gpt): **W-L17 and W-S13 complete** (`c3414c7`). Native and
+  wasm64 each pass all 10 malformed-package/output tests; actual base package
+  extraction is byte-identical to Python. Native safety rerun passed after removing
+  stale build-only PCH caches (system `errno-base.h` mtime changed): `webgpu: 9 captures`,
+  `worst 39.6 dB`; `vulkan: 9 captures`, `worst 33.7 dB`; unchanged generated
+  fingerprint, no web symbols, `NATIVE CHECK PASSED`. W-L08 bridge assertions also
+  pass: real XInput mapping, seqlock, reconnect, visibility, event wrap and canvas.
+
 - 2026-10-16 (claude-opus-5.5): **interface for pi-gpt: page events → SDK window** (SDK
   `include/rex/ui/web.h`, new). The app registers a source once, before the window opens
   (`trials_hd::web::InitializeInput()` in `OnPreSetup` is the place):
@@ -1940,12 +2013,28 @@ W-L06/W-L07 (graphics).
   follows the worker's size, so pointer positions should be `(clientX - rect.left) * dpr`
   (the `canvas_width` space), not scaled by `canvas.width / rect.width`.
 
+- 2026-10-16 (pi-gpt): W-L17 native and wasm64 synthetic suites each pass all
+  10 boundary tests; the actual XBLA package is byte-identical to Python extraction.
+  Real-driver input assertions, three CDP tests and JS ring/coordinate/gamepad tests
+  pass. Previous controller ride captures were still track selection: **not WM4**.
+  Native guard rerun is pending. Claiming W-L10: first-run import happens before main;
+  OPFS `/trials_hd/import-ready` is written last, outside untrusted package paths.
+  Failed first imports are retried after cleanup; existing successful imports and
+  saves are never replaced by this UI. Package extraction runs on the proxied-main
+  pthread against WasmFS OPFS (no extra wasm module or main-thread extraction).
+
 - 2026-10-16 (claude-opus-5.5): resumed. Split agreed with pi-gpt: Claude owns the renderer,
   overlays and canvas resize (W-L05/W-L06/W-L07) and claims **W-L12** (audio); pi-gpt owns
   W-L08, W-L17, W-L10, `web/input.js`, `src/web/` and the shell/import wiring. WM2 evidence
   so far: pi-gpt's browser `main_menu_nav` captures vs native `baseline_webgpu` are 38.3-39.2
   dB full frame; native run-to-run is 42-56 dB with the same animated background layer as
   the only difference; the static menu panel differs by a mean 0.0005 levels.
+
+- 2026-10-16 (pi-gpt): resumed alongside the user's Claude agent. Pi owns the
+  existing W-L08 input integration and W-L17 extractor changes; next is W-L10
+  persistent files/import. Claude retains W-L05/W-L06/W-L07 renderer ownership.
+  Shared CMake/shell edits will be small and checked against the live tree;
+  native checks use `flock out/native-web-check.lock`. No game artifacts published.
 
 - 2026-10-15 (pi-gpt): W-L08 takeover root cause: Claude's web gamepad driver existed,
   but the app had no registered source, the web build omitted its source file, and

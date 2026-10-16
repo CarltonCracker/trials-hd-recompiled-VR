@@ -18,6 +18,10 @@
 #include <rex/logging.h>
 
 #include "keyboard_controls.h"
+#if defined(__EMSCRIPTEN__)
+#include <cmath>
+#include <rex/input/web/web_input_driver.h>
+#endif
 
 REXCVAR_DEFINE_INT32(display_width, 0, "Display",
                      "Window width, or fullscreen mode width (0 = desktop resolution)")
@@ -258,7 +262,27 @@ void GraphicsSettingsDialog::FeedGamepadNavigation(ImGuiIO& io) {
   }
   io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
   bool down[kNavButtons.size()] = {};
-#if !defined(__EMSCRIPTEN__)  // Web gamepads come from the page (W-L08).
+#if defined(__EMSCRIPTEN__)
+  if (auto source = rex::input::web::GetGamepadSource()) {
+    constexpr uint32_t buttons[] = {12, 13, 14, 15, 0, 1};
+    for (uint32_t i = 0; i < 4; ++i) {
+      rex::input::web::WebGamepad pad;
+      if (!source(i, pad)) return;  // Keep held navigation keys during a seqlock write.
+      if (!pad.connected) continue;
+      for (size_t b = 0; b < kNavButtons.size(); ++b) {
+        down[b] = down[b] || (pad.buttons & (1u << buttons[b]));
+      }
+      if (std::isfinite(pad.axes[1])) {
+        down[0] = down[0] || pad.axes[1] < -0.5f;
+        down[1] = down[1] || pad.axes[1] > 0.5f;
+      }
+      if (std::isfinite(pad.axes[0])) {
+        down[2] = down[2] || pad.axes[0] < -0.5f;
+        down[3] = down[3] || pad.axes[0] > 0.5f;
+      }
+    }
+  }
+#else
   int count = 0;
   if (SDL_JoystickID* ids = SDL_GetGamepads(&count)) {
     for (int i = 0; i < count; ++i) {
@@ -399,6 +423,11 @@ void GraphicsSettingsDialog::OnDraw(ImGuiIO& io) {
 
   ImGui::SeparatorText("Graphics");
 
+#if defined(__EMSCRIPTEN__)
+  label("Renderer");
+  ImGui::TextUnformatted("WebGPU (browser-selected adapter)");
+  ImGui::TextDisabled("Resize the browser window; double-click the canvas for fullscreen.");
+#else
   // Renderer (Vulkan / WebGPU)
   std::string cur_renderer = REXCVAR_GET(gpu_plugin);
   if (cur_renderer.empty()) {
@@ -490,6 +519,8 @@ void GraphicsSettingsDialog::OnDraw(ImGuiIO& io) {
     ImGui::EndCombo();
   }
 
+#endif
+
   // Render resolution (internal draw scale of the 1280x720 guest frame)
   const int scale = std::clamp(GetInt("draw_resolution_scale_x"), 1, kMaxRenderScale);
   auto scale_label = [](int s) {
@@ -535,6 +566,10 @@ void GraphicsSettingsDialog::OnDraw(ImGuiIO& io) {
         "limit rendering to your display refresh rate.");
   }
 
+#if defined(__EMSCRIPTEN__)
+  label("VSync");
+  ImGui::TextUnformatted("Browser managed");
+#else
   // VSync
   bool vsync = REXCVAR_GET(host_vsync);
   label("VSync");
@@ -542,6 +577,7 @@ void GraphicsSettingsDialog::OnDraw(ImGuiIO& io) {
     rex::cvar::SetFlagByName("host_vsync", vsync ? "true" : "false");
   }
   restart_note(vsync != g_startup_vsync);
+#endif
 
   ImGui::Separator();
   if (ImGui::Button("Save")) {
