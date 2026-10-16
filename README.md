@@ -80,6 +80,14 @@ If you prefer building directly with CMake:
    ```
 </details>
 
+### Adding DLC / Addons (Optional)
+
+Install DLC track packs (*Big Pack* and *Big Thrills*) into `assets/`:
+
+```sh
+./add_dlc.sh "/path/to/addon_folder_or_package"
+```
+
 ---
 
 ## Running

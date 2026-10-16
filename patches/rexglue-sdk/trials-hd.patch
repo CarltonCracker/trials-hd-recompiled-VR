@@ -40,6 +40,8 @@ commit by CMake at configure time; regenerate with tools/export_sdk_patch.sh).
 - ui: dialogs say whether they need continuous repaint; the always-present
   achievement toast only does while showing one (the window was repainted
   ~1400 times per second with VSync off)
+- xam: ContentManager discovers DLC packages and headers from game_data_root / "content"
+  and game_data_root in addition to user_data_root
 
 diff --git a/include/rex/graphics/command_processor.h b/include/rex/graphics/command_processor.h
 index da8e432..74b87ff 100644
@@ -13744,3 +13746,238 @@ index 23645ef..c8c2328 100644
      switch (surface_type) {
  #if REX_PLATFORM_ANDROID
        case Surface::kTypeIndex_AndroidNativeWindow: {
+diff --git a/include/rex/system/xam/content_manager.h b/include/rex/system/xam/content_manager.h
+index 949d185..fd86cab 100644
+--- a/include/rex/system/xam/content_manager.h
++++ b/include/rex/system/xam/content_manager.h
+@@ -183,6 +183,7 @@ class ContentManager {
+   X_RESULT InstallContent(const std::filesystem::path& package_path);
+ 
+  private:
++  std::vector<std::filesystem::path> GetContentRoots() const;
+   std::filesystem::path ResolvePackageRoot(uint64_t xuid, XContentType content_type,
+                                            uint32_t title_id = -1);
+   std::filesystem::path ResolvePackagePath(uint64_t xuid, const XCONTENT_AGGREGATE_DATA& data);
+diff --git a/src/system/xam/content_manager.cpp b/src/system/xam/content_manager.cpp
+index bd6c797..d44104d 100644
+--- a/src/system/xam/content_manager.cpp
++++ b/src/system/xam/content_manager.cpp
+@@ -13,12 +13,14 @@
+ #include <cstring>
+ #include <queue>
+ #include <string>
++#include <unordered_set>
+ 
+ #include <fmt/format.h>
+ 
+ #include <rex/filesystem.h>
+ #include <rex/filesystem/devices/host_path_device.h>
+ #include <rex/filesystem/devices/stfs_container_device.h>
++#include <rex/runtime.h>
+ #include <rex/string.h>
+ #include <rex/system/kernel_state.h>
+ #include <rex/system/xam/content_device.h>
+@@ -61,23 +63,35 @@ ContentPackage::~ContentPackage() {
+ 
+ void ContentPackage::LoadPackageLicenseMask(const std::filesystem::path header_path) {
+   if (!std::filesystem::exists(header_path)) {
++    if (license_ == 0) {
++      license_ = 1;
++    }
+     return;
+   }
+ 
+   auto file = rex::filesystem::OpenFile(header_path, "rb");
+   if (!file) {
++    if (license_ == 0) {
++      license_ = 1;
++    }
+     return;
+   }
+ 
+   auto file_size = std::filesystem::file_size(header_path);
+   if (file_size < sizeof(XCONTENT_AGGREGATE_DATA) + sizeof(license_)) {
+     fclose(file);
++    if (license_ == 0) {
++      license_ = 1;
++    }
+     return;
+   }
+ 
+   fseek(file, sizeof(XCONTENT_AGGREGATE_DATA), SEEK_SET);
+   fread(&license_, 1, sizeof(license_), file);
+   fclose(file);
++  if (license_ == 0) {
++    license_ = 1;
++  }
+ }
+ 
+ ContentManager::ContentManager(KernelState* kernel_state, const std::filesystem::path& root_path)
+@@ -85,6 +99,31 @@ ContentManager::ContentManager(KernelState* kernel_state, const std::filesystem:
+ 
+ ContentManager::~ContentManager() = default;
+ 
++std::vector<std::filesystem::path> ContentManager::GetContentRoots() const {
++  std::vector<std::filesystem::path> roots;
++  auto add_root = [&](const std::filesystem::path& p) {
++    if (p.empty()) return;
++    for (const auto& existing : roots) {
++      if (existing == p) {
++        return;
++      }
++    }
++    roots.push_back(p);
++  };
++
++  add_root(root_path_);
++
++  if (kernel_state_ && kernel_state_->emulator()) {
++    const auto& game_data = kernel_state_->emulator()->game_data_root();
++    if (!game_data.empty()) {
++      add_root(game_data / "content");
++      add_root(game_data);
++    }
++  }
++
++  return roots;
++}
++
+ std::filesystem::path ContentManager::ResolvePackageRoot(uint64_t xuid, XContentType content_type,
+                                                          uint32_t title_id) {
+   if (title_id == kCurrentlyRunningTitleId) {
+@@ -93,10 +132,16 @@ std::filesystem::path ContentManager::ResolvePackageRoot(uint64_t xuid, XContent
+   auto xuid_str = fmt::format("{:016X}", xuid);
+   auto title_id_str = fmt::format("{:08X}", title_id);
+   auto content_type_str = fmt::format("{:08X}", uint32_t(content_type));
++  auto rel_root = std::filesystem::path(xuid_str) / title_id_str / content_type_str;
++
++  for (const auto& root : GetContentRoots()) {
++    auto full_path = root / rel_root;
++    if (std::filesystem::exists(full_path)) {
++      return full_path;
++    }
++  }
+ 
+-  // Package root path:
+-  // content_root/xuid/title_id/content_type/
+-  return root_path_ / xuid_str / title_id_str / content_type_str;
++  return root_path_ / rel_root;
+ }
+ 
+ std::filesystem::path ContentManager::ResolvePackagePath(uint64_t xuid,
+@@ -108,10 +153,22 @@ std::filesystem::path ContentManager::ResolvePackagePath(uint64_t xuid,
+     used_xuid = 0;
+   }
+ 
+-  // Content path:
+-  // content_root/xuid/title_id/content_type/data_file_name/
+-  auto package_root = ResolvePackageRoot(used_xuid, data.content_type, data.title_id);
+-  return package_root / rex::to_path(data.file_name());
++  uint32_t tid = (data.title_id == kCurrentlyRunningTitleId) ? kernel_state_->title_id()
++                                                             : uint32_t(data.title_id);
++  auto xuid_str = fmt::format("{:016X}", used_xuid);
++  auto title_id_str = fmt::format("{:08X}", tid);
++  auto content_type_str = fmt::format("{:08X}", uint32_t(data.content_type.get()));
++  auto rel_path = std::filesystem::path(xuid_str) / title_id_str / content_type_str /
++                  rex::to_path(data.file_name());
++
++  for (const auto& root : GetContentRoots()) {
++    auto full_path = root / rel_path;
++    if (std::filesystem::exists(full_path)) {
++      return full_path;
++    }
++  }
++
++  return root_path_ / rel_path;
+ }
+ 
+ std::filesystem::path ContentManager::ResolvePackageHeaderPath(const std::string_view file_name,
+@@ -129,44 +186,65 @@ std::filesystem::path ContentManager::ResolvePackageHeaderPath(const std::string
+   auto title_id_str = fmt::format("{:08X}", title_id);
+   auto content_type_str = fmt::format("{:08X}", uint32_t(content_type));
+   std::string final_name = std::string(file_name) + ".header";
++  auto rel_header = std::filesystem::path(xuid_str) / title_id_str / kGameContentHeaderDirName /
++                    content_type_str / final_name;
+ 
+-  // Header root path:
+-  // content_root/xuid/title_id/Headers/content_type/filename.header
+-  return root_path_ / xuid_str / title_id_str / kGameContentHeaderDirName / content_type_str /
+-         final_name;
++  for (const auto& root : GetContentRoots()) {
++    auto full_path = root / rel_header;
++    if (std::filesystem::exists(full_path)) {
++      return full_path;
++    }
++  }
++
++  return root_path_ / rel_header;
+ }
+ 
+ std::vector<XCONTENT_AGGREGATE_DATA> ContentManager::ListContent(uint32_t device_id, uint64_t xuid,
+                                                                  XContentType content_type,
+                                                                  uint32_t title_id) {
+   std::vector<XCONTENT_AGGREGATE_DATA> result;
++  std::unordered_set<std::string> seen_packages;
+ 
+   if (title_id == kCurrentlyRunningTitleId) {
+     title_id = kernel_state_->title_id();
+   }
+ 
+-  // Search path:
+-  // content_root/xuid/title_id/type_name/*
+-  auto package_root = ResolvePackageRoot(xuid, content_type, title_id);
+-  auto file_infos = rex::filesystem::ListFiles(package_root);
+-  for (const auto& file_info : file_infos) {
+-    if (file_info.type != rex::filesystem::FileInfo::Type::kDirectory) {
+-      // Directories only.
++  auto xuid_str = fmt::format("{:016X}", xuid);
++  auto title_id_str = fmt::format("{:08X}", title_id);
++  auto content_type_str = fmt::format("{:08X}", uint32_t(content_type));
++  auto rel_root = std::filesystem::path(xuid_str) / title_id_str / content_type_str;
++
++  for (const auto& root : GetContentRoots()) {
++    auto package_root = root / rel_root;
++    if (!std::filesystem::exists(package_root)) {
+       continue;
+     }
+ 
+-    XCONTENT_AGGREGATE_DATA content_data;
+-    if (XSUCCEEDED(ReadContentHeaderFile(rex::path_to_utf8(file_info.name), xuid, title_id,
+-                                         content_type, content_data))) {
+-      result.emplace_back(std::move(content_data));
+-    } else {
+-      content_data.device_id = device_id;
+-      content_data.content_type = content_type;
+-      content_data.set_display_name(rex::path_to_utf16(file_info.name));
+-      content_data.set_file_name(rex::path_to_utf8(file_info.name));
+-      content_data.title_id = title_id;
+-      content_data.xuid = xuid;
+-      result.emplace_back(std::move(content_data));
++    auto file_infos = rex::filesystem::ListFiles(package_root);
++    for (const auto& file_info : file_infos) {
++      if (file_info.type != rex::filesystem::FileInfo::Type::kDirectory) {
++        // Directories only.
++        continue;
++      }
++
++      auto fname = rex::path_to_utf8(file_info.name);
++      if (seen_packages.count(fname)) {
++        continue;
++      }
++      seen_packages.insert(fname);
++
++      XCONTENT_AGGREGATE_DATA content_data;
++      if (XSUCCEEDED(ReadContentHeaderFile(fname, xuid, title_id, content_type, content_data))) {
++        result.emplace_back(std::move(content_data));
++      } else {
++        content_data.device_id = device_id;
++        content_data.content_type = content_type;
++        content_data.set_display_name(rex::path_to_utf16(file_info.name));
++        content_data.set_file_name(fname);
++        content_data.title_id = title_id;
++        content_data.xuid = xuid;
++        result.emplace_back(std::move(content_data));
++      }
+     }
+   }
+ 
