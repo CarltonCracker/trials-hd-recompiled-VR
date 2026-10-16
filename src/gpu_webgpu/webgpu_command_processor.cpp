@@ -189,7 +189,6 @@ bool WebGpuCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   // A resolve is a draw in EDRAM copy mode (as in the Vulkan backend, it also
   // counts as a draw in the log).
   if (register_file_->Get<reg::RB_MODECONTROL>().edram_mode == xenos::EdramMode::kCopy) {
-    backend_->Draw(draw);
     return IssueCopy();
   }
   bool result = backend_->Draw(draw);

@@ -3,8 +3,12 @@
 #include "texture_cache.h"
 
 #include <algorithm>
+#include <array>
+#include <condition_variable>
 #include <cstring>
+#include <functional>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 #include <rex/graphics/pipeline/texture/conversion.h>
@@ -32,6 +36,100 @@ enum class Conversion {
   kFixed16,      // 16-bit fixed point to float32 (per component).
   kDepth24,      // 24-bit depth (unorm or 20e4) to float32.
   kUnsupported,
+};
+
+class TextureDecodePool {
+ public:
+  static TextureDecodePool& Instance() {
+    static TextureDecodePool pool;
+    return pool;
+  }
+
+  template <typename F>
+  void ParallelFor(uint32_t count, F&& func) {
+    if (count <= 1 || workers_.empty()) {
+      for (uint32_t i = 0; i < count; ++i) {
+        func(i);
+      }
+      return;
+    }
+
+    {
+      std::unique_lock lock(mutex_);
+      current_func_ = [&](uint32_t idx) { func(idx); };
+      tasks_total_ = count;
+      next_task_ = 0;
+      tasks_remaining_ = count;
+      generation_++;
+      cv_start_.notify_all();
+    }
+
+    while (true) {
+      uint32_t idx = next_task_.fetch_add(1, std::memory_order_relaxed);
+      if (idx >= count) break;
+      func(idx);
+      if (tasks_remaining_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        std::lock_guard lk(mutex_);
+        cv_done_.notify_one();
+      }
+    }
+
+    std::unique_lock lock(mutex_);
+    cv_done_.wait(lock, [&]() { return tasks_remaining_.load(std::memory_order_acquire) == 0; });
+  }
+
+ private:
+  TextureDecodePool() {
+    uint32_t threads = std::clamp(std::thread::hardware_concurrency(), 2u, 8u) - 1;
+    stop_ = false;
+    workers_.reserve(threads);
+    for (uint32_t i = 0; i < threads; ++i) {
+      workers_.emplace_back([this]() {
+        uint64_t last_gen = 0;
+        while (true) {
+          std::unique_lock lock(mutex_);
+          cv_start_.wait(lock, [this, &last_gen]() {
+            return stop_ || generation_ > last_gen;
+          });
+          if (stop_) break;
+          last_gen = generation_;
+          lock.unlock();
+
+          while (true) {
+            uint32_t idx = next_task_.fetch_add(1, std::memory_order_relaxed);
+            if (idx >= tasks_total_) break;
+            current_func_(idx);
+            if (tasks_remaining_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+              std::lock_guard lk(mutex_);
+              cv_done_.notify_one();
+            }
+          }
+        }
+      });
+    }
+  }
+
+  ~TextureDecodePool() {
+    {
+      std::lock_guard lock(mutex_);
+      stop_ = true;
+    }
+    cv_start_.notify_all();
+    for (auto& t : workers_) {
+      if (t.joinable()) t.join();
+    }
+  }
+
+  std::vector<std::thread> workers_;
+  std::mutex mutex_;
+  std::condition_variable cv_start_;
+  std::condition_variable cv_done_;
+  std::function<void(uint32_t)> current_func_;
+  uint32_t tasks_total_ = 0;
+  std::atomic<uint32_t> next_task_{0};
+  std::atomic<uint32_t> tasks_remaining_{0};
+  uint64_t generation_ = 0;
+  bool stop_ = false;
 };
 
 struct HostFormat {
@@ -225,7 +323,7 @@ void TextureCache::AliasWatchCallback(const std::unique_lock<std::recursive_mute
 
 wgpu::Texture TextureCache::GetOrCreateResolveAlias(uint32_t address, wgpu::TextureFormat format,
     uint32_t width, uint32_t height, uint32_t guest_start, uint32_t guest_length,
-    uint32_t scale_x, uint32_t scale_y) {
+    uint32_t scale_x, uint32_t scale_y, wgpu::TextureView* view_out) {
   wgpu::Limits limits;
   provider_.device().GetLimits(&limits);
   if (!width || !height || width > limits.maxTextureDimension2D || height > limits.maxTextureDimension2D ||
@@ -258,6 +356,9 @@ wgpu::Texture TextureCache::GetOrCreateResolveAlias(uint32_t address, wgpu::Text
   }
   alias.guest_start = guest_start; alias.guest_length = end - guest_start; alias.dirty = false;
   alias.scale_x = scale_x; alias.scale_y = scale_y; alias.sampled_dirty = true;
+  if (view_out) {
+    *view_out = alias.view;
+  }
   return alias.texture;
 }
 
@@ -467,9 +568,11 @@ bool TextureCache::LoadTexture(Texture& texture) {
   texture.loaded = true;
 
   uint32_t bytes_per_block = info->bytes_per_block();
+  if (bytes_per_block > 32) {
+    return false;
+  }
   uint32_t bytes_per_block_log2 = rex::log2_floor(bytes_per_block);
-  std::vector<uint8_t> swapped(bytes_per_block);
-  std::vector<uint8_t> level_data;
+  alignas(16) std::array<uint8_t, 32> swapped{};
   for (uint32_t level = 0; level < level_count; ++level) {
     uint32_t level_width = std::max(width >> level, uint32_t(1));
     uint32_t level_height = std::max(height >> level, uint32_t(1));
@@ -492,28 +595,70 @@ bool TextureCache::LoadTexture(Texture& texture) {
     }
     uint32_t pitch_blocks = storage.row_pitch_bytes / bytes_per_block;
     uint32_t host_row_bytes = blocks_x * host.host_bytes_per_block;
-    level_data.resize(size_t(host_row_bytes) * blocks_y);
-    for (uint32_t layer = 0; layer < layers; ++layer) {
+    size_t slice_size = size_t(host_row_bytes) * blocks_y;
+    staging_buffer_.resize(slice_size * layers);
+
+    auto decode_slice = [&](uint32_t layer, uint32_t y_start, uint32_t y_end) {
       uint32_t layer_address = level_address + storage.array_slice_stride_bytes * layer;
-      for (uint32_t y = 0; y < blocks_y; ++y) {
-        for (uint32_t x = 0; x < blocks_x; ++x) {
-          uint32_t sx = x + offset_x, sy = y + offset_y;
-          uint32_t offset = key.tiled
-                                ? uint32_t(texture_util::GetTiledOffset2D(
-                                      int32_t(sx), int32_t(sy), pitch_blocks, bytes_per_block_log2))
-                                : sy * storage.row_pitch_bytes + sx * bytes_per_block;
-          uint32_t address = layer_address + offset;
-          if (address + bytes_per_block > 0x20000000) {
-            continue;
+      uint8_t* layer_data = staging_buffer_.data() + size_t(layer) * slice_size;
+      if (!key.tiled && host.conversion == Conversion::kCopy) {
+        uint32_t row_bytes = blocks_x * bytes_per_block;
+        for (uint32_t y = y_start; y < y_end; ++y) {
+          uint32_t sy = y + offset_y;
+          uint32_t address = layer_address + sy * storage.row_pitch_bytes + offset_x * bytes_per_block;
+          if (address + row_bytes <= 0x20000000) {
+            texture_conversion::CopySwapBlock(xenos::Endian(key.endianness),
+                                              layer_data + size_t(y) * host_row_bytes,
+                                              guest + address, row_bytes);
           }
-          texture_conversion::CopySwapBlock(xenos::Endian(key.endianness), swapped.data(),
-                                            guest + address, bytes_per_block);
-          ConvertBlock(host.conversion, format, host.components,
-                       swapped.data(), bytes_per_block,
-                       level_data.data() + size_t(y) * host_row_bytes +
-                           size_t(x) * host.host_bytes_per_block);
+        }
+      } else {
+        alignas(16) std::array<uint8_t, 32> swapped{};
+        for (uint32_t y = y_start; y < y_end; ++y) {
+          for (uint32_t x = 0; x < blocks_x; ++x) {
+            uint32_t sx = x + offset_x, sy = y + offset_y;
+            uint32_t offset = key.tiled
+                                  ? uint32_t(texture_util::GetTiledOffset2D(
+                                        int32_t(sx), int32_t(sy), pitch_blocks, bytes_per_block_log2))
+                                  : sy * storage.row_pitch_bytes + sx * bytes_per_block;
+            uint32_t address = layer_address + offset;
+            if (address + bytes_per_block > 0x20000000) {
+              continue;
+            }
+            uint8_t* dest = layer_data + size_t(y) * host_row_bytes +
+                            size_t(x) * host.host_bytes_per_block;
+            if (host.conversion == Conversion::kCopy) {
+              texture_conversion::CopySwapBlock(xenos::Endian(key.endianness), dest,
+                                                guest + address, bytes_per_block);
+            } else {
+              texture_conversion::CopySwapBlock(xenos::Endian(key.endianness), swapped.data(),
+                                                guest + address, bytes_per_block);
+              ConvertBlock(host.conversion, format, host.components,
+                           swapped.data(), bytes_per_block, dest);
+            }
+          }
         }
       }
+    };
+
+    if (layers > 1) {
+      TextureDecodePool::Instance().ParallelFor(layers, [&](uint32_t layer) {
+        decode_slice(layer, 0, blocks_y);
+      });
+    } else if (slice_size >= 64 * 1024 && blocks_y >= 32) {
+      uint32_t chunk_rows = 16;
+      uint32_t num_chunks = (blocks_y + chunk_rows - 1) / chunk_rows;
+      TextureDecodePool::Instance().ParallelFor(num_chunks, [&](uint32_t chunk) {
+        uint32_t y_start = chunk * chunk_rows;
+        uint32_t y_end = std::min(y_start + chunk_rows, blocks_y);
+        decode_slice(0, y_start, y_end);
+      });
+    } else {
+      decode_slice(0, 0, blocks_y);
+    }
+
+    for (uint32_t layer = 0; layer < layers; ++layer) {
+      uint8_t* layer_data = staging_buffer_.data() + size_t(layer) * slice_size;
       wgpu::TexelCopyTextureInfo destination;
       destination.texture = texture.texture;
       destination.mipLevel = level;
@@ -522,7 +667,7 @@ bool TextureCache::LoadTexture(Texture& texture) {
       data_layout.bytesPerRow = host_row_bytes;
       data_layout.rowsPerImage = blocks_y;
       wgpu::Extent3D extent = {blocks_x * info->block_width, blocks_y * info->block_height, 1};
-      provider_.queue().WriteTexture(&destination, level_data.data(), level_data.size(),
+      provider_.queue().WriteTexture(&destination, layer_data, slice_size,
                                      &data_layout, &extent);
     }
   }

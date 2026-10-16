@@ -126,6 +126,8 @@ class PipelineCache {
   };
   std::unordered_map<ModuleKey, wgpu::ShaderModule, ModuleKeyHash> modules_;
   std::unordered_map<PipelineKey, wgpu::RenderPipeline, PipelineKeyHash> pipelines_;
+  PipelineKey last_key_{};
+  wgpu::RenderPipeline last_pipeline_ = nullptr;
 
   wgpu::BindGroupLayout draw_layout_;
   wgpu::BindGroupLayout shared_memory_layout_;

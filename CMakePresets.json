@@ -11,8 +11,8 @@
         "CMAKE_CXX_COMPILER": "clang++",
         "REXSDK_DIR": "${sourceDir}/thirdparty/rexglue-sdk",
         "SDL_X11_XTEST": "OFF",
-        "CMAKE_C_FLAGS": "-march=x86-64-v2",
-        "CMAKE_CXX_FLAGS": "-march=x86-64-v2"
+        "CMAKE_C_FLAGS": "-march=x86-64-v3",
+        "CMAKE_CXX_FLAGS": "-march=x86-64-v3"
       },
       "condition": {
         "type": "equals",
@@ -70,7 +70,10 @@
       "displayName": "Linux AMD64 Release",
       "inherits": "linux-base",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release"
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_INTERPROCEDURAL_OPTIMIZATION": "ON",
+        "CMAKE_C_FLAGS": "-march=x86-64-v3 -flto=thin",
+        "CMAKE_CXX_FLAGS": "-march=x86-64-v3 -flto=thin"
       }
     },
     {
@@ -78,7 +81,32 @@
       "displayName": "Linux AMD64 RelWithDebInfo",
       "inherits": "linux-base",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_INTERPROCEDURAL_OPTIMIZATION": "ON",
+        "CMAKE_C_FLAGS": "-march=x86-64-v3 -flto=thin",
+        "CMAKE_CXX_FLAGS": "-march=x86-64-v3 -flto=thin"
+      }
+    },
+    {
+      "name": "linux-amd64-pgo-generate",
+      "displayName": "Linux AMD64 PGO Generate",
+      "inherits": "linux-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_INTERPROCEDURAL_OPTIMIZATION": "ON",
+        "CMAKE_C_FLAGS": "-march=x86-64-v3 -flto=thin -resource-dir=/home/braden/.local/lib/clang_resource_20 -fprofile-generate=${sourceDir}/out/pgo_profiles",
+        "CMAKE_CXX_FLAGS": "-march=x86-64-v3 -flto=thin -resource-dir=/home/braden/.local/lib/clang_resource_20 -fprofile-generate=${sourceDir}/out/pgo_profiles"
+      }
+    },
+    {
+      "name": "linux-amd64-pgo-use",
+      "displayName": "Linux AMD64 PGO Use",
+      "inherits": "linux-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_INTERPROCEDURAL_OPTIMIZATION": "ON",
+        "CMAKE_C_FLAGS": "-march=x86-64-v3 -flto=thin -resource-dir=/home/braden/.local/lib/clang_resource_20 -fprofile-use=${sourceDir}/out/pgo_profiles/trials_hd.profdata -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date",
+        "CMAKE_CXX_FLAGS": "-march=x86-64-v3 -flto=thin -resource-dir=/home/braden/.local/lib/clang_resource_20 -fprofile-use=${sourceDir}/out/pgo_profiles/trials_hd.profdata -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date"
       }
     },
     {
@@ -94,7 +122,10 @@
       "displayName": "macOS ARM64 Release",
       "inherits": "mac-arm64-base",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release"
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_INTERPROCEDURAL_OPTIMIZATION": "ON",
+        "CMAKE_C_FLAGS": "-mcpu=apple-m3 -flto=thin",
+        "CMAKE_CXX_FLAGS": "-mcpu=apple-m3 -flto=thin"
       }
     },
     {
@@ -102,7 +133,10 @@
       "displayName": "macOS ARM64 RelWithDebInfo",
       "inherits": "mac-arm64-base",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_INTERPROCEDURAL_OPTIMIZATION": "ON",
+        "CMAKE_C_FLAGS": "-mcpu=apple-m3 -flto=thin",
+        "CMAKE_CXX_FLAGS": "-mcpu=apple-m3 -flto=thin"
       }
     },
     {
@@ -118,7 +152,10 @@
       "displayName": "macOS AMD64 Release",
       "inherits": "mac-amd64-base",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release"
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_INTERPROCEDURAL_OPTIMIZATION": "ON",
+        "CMAKE_C_FLAGS": "-march=x86-64-v3 -flto=thin",
+        "CMAKE_CXX_FLAGS": "-march=x86-64-v3 -flto=thin"
       }
     },
     {
@@ -126,7 +163,10 @@
       "displayName": "macOS AMD64 RelWithDebInfo",
       "inherits": "mac-amd64-base",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_INTERPROCEDURAL_OPTIMIZATION": "ON",
+        "CMAKE_C_FLAGS": "-march=x86-64-v3 -flto=thin",
+        "CMAKE_CXX_FLAGS": "-march=x86-64-v3 -flto=thin"
       }
     },
     {
@@ -163,6 +203,14 @@
     {
       "name": "linux-amd64-relwithdebinfo",
       "configurePreset": "linux-amd64-relwithdebinfo"
+    },
+    {
+      "name": "linux-amd64-pgo-generate",
+      "configurePreset": "linux-amd64-pgo-generate"
+    },
+    {
+      "name": "linux-amd64-pgo-use",
+      "configurePreset": "linux-amd64-pgo-use"
     },
     {
       "name": "mac-arm64-debug",

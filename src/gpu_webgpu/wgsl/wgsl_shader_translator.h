@@ -117,7 +117,7 @@ class WgslShaderTranslator : public ShaderTranslator {
     // Index of the first fetch instruction (for filter overrides).
     size_t first_binding = 0;
   };
-  static std::vector<TextureSlot> GetTextureSlots(const Shader& shader);
+  static const std::vector<TextureSlot>& GetTextureSlots(const Shader& shader);
   static uint32_t GetTextureBindingNumber(xenos::ShaderType type, uint32_t slot) {
     return (type == xenos::ShaderType::kVertex ? wgsl_binding::kVertexTextureBase : 0) + slot;
   }

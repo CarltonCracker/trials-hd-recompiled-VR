@@ -10,6 +10,12 @@
 #include <mutex>
 #include <unordered_map>
 
+#include "../flat_hash_map.h"
+
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+#endif
+
 #include <rex/cvar.h>
 #include <rex/graphics/pipeline/shader/shader.h>
 #include <rex/graphics/registers.h>
@@ -111,6 +117,8 @@ struct BlitResources {
   wgpu::RenderPipeline pipeline;
   wgpu::Buffer constants;
   wgpu::Buffer gamma_ramp;
+  WGPUTextureView last_view = nullptr;
+  wgpu::BindGroup bind_group;
 };
 
 }  // namespace
@@ -118,7 +126,7 @@ struct BlitResources {
 struct UniformCache {
   uint64_t submission = UINT64_MAX;
   uint32_t offset = 0;
-  std::vector<uint8_t> data;
+  uint32_t size = 0;
 };
 
 // Render pass state last set (valid while pass_serial matches).
@@ -128,23 +136,25 @@ struct PassState {
   std::array<uint32_t, 5> offsets = {};
   WGPUBindGroup texture_bind_group = nullptr;
   std::array<float, 6> viewport = {};
-  std::array<uint32_t, 4> scissor = {};
+  uint64_t scissor_xy = UINT64_MAX;
+  uint64_t scissor_wh = UINT64_MAX;
   uint32_t stencil_reference = UINT32_MAX;
-  std::array<float, 4> blend_constant = {};
+  uint64_t blend_rg = UINT64_MAX;
+  uint64_t blend_ba = UINT64_MAX;
 };
 
 struct WebGpuBackendState {
-  std::unordered_map<uint32_t, ResolvedRegion> resolved_regions;
+  trials_hd::FlatHashMap<uint32_t, ResolvedRegion> resolved_regions;
   BlitResources blit;
   // Texture bind groups by (layout, views, samplers).
-  std::unordered_map<uint64_t, wgpu::BindGroup> texture_bind_groups;
+  trials_hd::FlatHashMap<uint64_t, wgpu::BindGroup> texture_bind_groups;
   // By shaders and fetch constants (see GetTextureBindGroup).
   struct FastTextureBindGroup {
     uint64_t epoch;
     wgpu::BindGroup bind_group;
     uint32_t resolution_scaled;
   };
-  std::unordered_map<uint64_t, FastTextureBindGroup> texture_bind_groups_fast;
+  trials_hd::FlatHashMap<uint64_t, FastTextureBindGroup> texture_bind_groups_fast;
   // Per group 0 binding: the last upload, reused while it is in the ring.
   std::array<UniformCache, 5> uniforms;
   PassState pass;
@@ -164,6 +174,8 @@ WebGpuBackend::~WebGpuBackend() {
   shared_memory_bind_group_ = nullptr;
   shared_memory_rw_bind_group_ = nullptr;
   State().texture_bind_groups.clear();
+  State().blit.bind_group = nullptr;
+  State().blit.last_view = nullptr;
   resolve_engine_.reset();
   texture_cache_.reset();
   render_target_cache_.reset();
@@ -531,13 +543,13 @@ bool IsStripTopology(wgpu::PrimitiveTopology topology) {
 // is identical and still in the current submission's ring.
 uint32_t UploadUniformsCached(FrameRecorder& recorder, UniformCache& cache, const void* data,
                               uint32_t size) {
-  if (cache.submission == recorder.submission_count() && cache.data.size() == size &&
-      !std::memcmp(cache.data.data(), data, size)) {
+  if (cache.submission == recorder.submission_count() && cache.size == size &&
+      recorder.CompareUniforms(cache.offset, data, size)) {
     return cache.offset;
   }
   cache.offset = recorder.UploadUniforms(data, size);
   cache.submission = recorder.submission_count();
-  cache.data.assign(static_cast<const uint8_t*>(data), static_cast<const uint8_t*>(data) + size);
+  cache.size = size;
   return cache.offset;
 }
 
@@ -548,13 +560,14 @@ uint32_t PackFloatConstants(const RegisterFile& regs, const Shader& shader, uint
   const auto* registers = reinterpret_cast<const float*>(&regs.values[XE_GPU_REG_SHADER_CONSTANT_000_X]);
   uint32_t count = 0;
   if (map.float_dynamic_addressing) {
-    for (uint32_t i = 0; i < 256; ++i) {
-      uint32_t index = base + i;
-      if (index < 512) {
-        std::memcpy(&out[i * 4], &registers[index * 4], 16);
-      } else {
-        std::memset(&out[i * 4], 0, 16);
+    if (base < 512) {
+      uint32_t copy_count = std::min(256u, 512u - base);
+      std::memcpy(&out[0], &registers[base * 4], copy_count * 16);
+      if (copy_count < 256) {
+        std::memset(&out[copy_count * 4], 0, (256 - copy_count) * 16);
       }
+    } else {
+      std::memset(&out[0], 0, 256 * 16);
     }
     return 256;
   }
@@ -562,14 +575,40 @@ uint32_t PackFloatConstants(const RegisterFile& regs, const Shader& shader, uint
     uint64_t bits = map.float_bitmap[block];
     uint32_t bit;
     while (rex::bit_scan_forward(bits, &bit)) {
-      bits &= ~(uint64_t(1) << bit);
+      uint32_t run = std::countr_one(bits >> bit);
       uint32_t index = base + block * 64 + bit;
-      if (index < 512) {
-        std::memcpy(&out[count * 4], &registers[index * 4], 16);
+      if (run == 1) {
+#if defined(__x86_64__) || defined(_M_X64)
+        if (index < 512) {
+          _mm_storeu_ps(&out[count * 4], _mm_loadu_ps(&registers[index * 4]));
+        } else {
+          _mm_storeu_ps(&out[count * 4], _mm_setzero_ps());
+        }
+#else
+        if (index < 512) {
+          std::memcpy(&out[count * 4], &registers[index * 4], 16);
+        } else {
+          std::memset(&out[count * 4], 0, 16);
+        }
+#endif
+        count++;
       } else {
-        std::memset(&out[count * 4], 0, 16);
+        if (index + run <= 512) {
+          std::memcpy(&out[count * 4], &registers[index * 4], run * 16);
+        } else {
+          uint32_t valid = (index < 512) ? (512 - index) : 0;
+          if (valid > 0) {
+            std::memcpy(&out[count * 4], &registers[index * 4], valid * 16);
+          }
+          std::memset(&out[(count + valid) * 4], 0, (run - valid) * 16);
+        }
+        count += run;
       }
-      ++count;
+      if (run == 64 || bit + run >= 64) {
+        bits = 0;
+      } else {
+        bits &= ~(((1ULL << run) - 1ULL) << bit);
+      }
     }
   }
   return std::max(count, uint32_t(1));
@@ -615,10 +654,11 @@ wgpu::BindGroup WebGpuBackend::GetTextureBindGroup(const RegisterFile& regs,
       resolution_scaled_out = fast_it->second.resolution_scaled;
       return fast_it->second.bind_group;
     }
-    std::vector<wgpu::BindGroupEntry> entries;
+    std::array<wgpu::BindGroupEntry, 64> entries;
+    size_t entry_count = 0;
     uint64_t bind_group_hash = texture_signature.value;
     auto add_stage = [&](const Shader& shader, uint32_t base) {
-      auto slots = WgslShaderTranslator::GetTextureSlots(shader);
+      const auto& slots = WgslShaderTranslator::GetTextureSlots(shader);
       for (uint32_t i = 0; i < slots.size(); ++i) {
         xenos::xe_gpu_texture_fetch_t fetch = regs.GetTextureFetch(slots[i].fetch_constant);
         bool resolution_scaled;
@@ -630,14 +670,17 @@ wgpu::BindGroup WebGpuBackend::GetTextureBindGroup(const RegisterFile& regs,
         wgpu::Sampler sampler = texture_cache_->GetSampler(
             fetch, shader.texture_bindings()[slots[i].first_binding].fetch_instr.attributes,
             shader.type() == xenos::ShaderType::kVertex);
-        wgpu::BindGroupEntry texture_entry{};
-        texture_entry.binding = base + i;
-        texture_entry.textureView = view;
-        entries.push_back(texture_entry);
-        wgpu::BindGroupEntry sampler_entry{};
-        sampler_entry.binding = base + i + wgsl_binding::kSamplerOffset;
-        sampler_entry.sampler = sampler;
-        entries.push_back(sampler_entry);
+        if (entry_count + 2 <= entries.size()) {
+          wgpu::BindGroupEntry& texture_entry = entries[entry_count++];
+          texture_entry = {};
+          texture_entry.binding = base + i;
+          texture_entry.textureView = view;
+
+          wgpu::BindGroupEntry& sampler_entry = entries[entry_count++];
+          sampler_entry = {};
+          sampler_entry.binding = base + i + wgsl_binding::kSamplerOffset;
+          sampler_entry.sampler = sampler;
+        }
         bind_group_hash = (bind_group_hash * 0x100000001B3ull) ^ uint64_t(uintptr_t(view.Get()));
         bind_group_hash = (bind_group_hash * 0x100000001B3ull) ^ uint64_t(uintptr_t(sampler.Get()));
       }
@@ -654,7 +697,7 @@ wgpu::BindGroup WebGpuBackend::GetTextureBindGroup(const RegisterFile& regs,
       wgpu::BindGroupDescriptor desc;
       desc.label = "textures";
       desc.layout = pipeline_cache_->GetTextureBindGroupLayout(texture_signature);
-      desc.entryCount = entries.size();
+      desc.entryCount = entry_count;
       desc.entries = entries.data();
       texture_bind_group = provider_.device().CreateBindGroup(&desc);
       bind_groups.emplace(bind_group_hash, texture_bind_group);
@@ -1022,6 +1065,11 @@ bool WebGpuBackend::Draw(const DrawSnapshot& draw) {
   if (fresh_pass) {
     state = {};
     state.pass_serial = frame_recorder_->pass_serial();
+    state.scissor_xy = UINT64_MAX;
+    state.scissor_wh = UINT64_MAX;
+    state.blend_rg = UINT64_MAX;
+    state.blend_ba = UINT64_MAX;
+    state.stencil_reference = UINT32_MAX;
     pass.SetBindGroup(1, shared_memory_bind_group_);
   }
   if (fresh_pass || state.pipeline != pipeline.Get()) {
@@ -1036,18 +1084,28 @@ bool WebGpuBackend::Draw(const DrawSnapshot& draw) {
     pass.SetBindGroup(2, texture_bind_group);
     state.texture_bind_group = texture_bind_group.Get();
   }
-  std::array<float, 6> viewport_state = {float(viewport_x), float(viewport_y),
-                                         float(viewport_width), float(viewport_height),
-                                         viewport.z_min, viewport.z_max};
-  if (fresh_pass || state.viewport != viewport_state) {
-    pass.SetViewport(viewport_state[0], viewport_state[1], viewport_state[2], viewport_state[3],
-                     viewport_state[4], viewport_state[5]);
-    state.viewport = viewport_state;
+  if (fresh_pass ||
+      state.viewport[0] != float(viewport_x) ||
+      state.viewport[1] != float(viewport_y) ||
+      state.viewport[2] != float(viewport_width) ||
+      state.viewport[3] != float(viewport_height) ||
+      state.viewport[4] != viewport.z_min ||
+      state.viewport[5] != viewport.z_max) {
+    state.viewport[0] = float(viewport_x);
+    state.viewport[1] = float(viewport_y);
+    state.viewport[2] = float(viewport_width);
+    state.viewport[3] = float(viewport_height);
+    state.viewport[4] = viewport.z_min;
+    state.viewport[5] = viewport.z_max;
+    pass.SetViewport(state.viewport[0], state.viewport[1], state.viewport[2],
+                     state.viewport[3], state.viewport[4], state.viewport[5]);
   }
-  std::array<uint32_t, 4> scissor_state = {scissor_x, scissor_y, scissor_width, scissor_height};
-  if (fresh_pass || state.scissor != scissor_state) {
+  const uint64_t sc_xy = (uint64_t(scissor_y) << 32) | scissor_x;
+  const uint64_t sc_wh = (uint64_t(scissor_height) << 32) | scissor_width;
+  if (fresh_pass || state.scissor_xy != sc_xy || state.scissor_wh != sc_wh) {
+    state.scissor_xy = sc_xy;
+    state.scissor_wh = sc_wh;
     pass.SetScissorRect(scissor_x, scissor_y, scissor_width, scissor_height);
-    state.scissor = scissor_state;
   }
   if (targets.depth) {
     uint32_t stencil_reference = regs.Get<reg::RB_STENCILREFMASK>().stencilref;
@@ -1056,13 +1114,18 @@ bool WebGpuBackend::Draw(const DrawSnapshot& draw) {
       state.stencil_reference = stencil_reference;
     }
   }
-  std::array<float, 4> blend_state = {
-      regs.Get<float>(XE_GPU_REG_RB_BLEND_RED), regs.Get<float>(XE_GPU_REG_RB_BLEND_GREEN),
-      regs.Get<float>(XE_GPU_REG_RB_BLEND_BLUE), regs.Get<float>(XE_GPU_REG_RB_BLEND_ALPHA)};
-  if (fresh_pass || state.blend_constant != blend_state) {
-    wgpu::Color blend_constant = {blend_state[0], blend_state[1], blend_state[2], blend_state[3]};
+  const uint64_t blend_rg = uint64_t(regs.values[XE_GPU_REG_RB_BLEND_RED]) |
+                            (uint64_t(regs.values[XE_GPU_REG_RB_BLEND_GREEN]) << 32);
+  const uint64_t blend_ba = uint64_t(regs.values[XE_GPU_REG_RB_BLEND_BLUE]) |
+                            (uint64_t(regs.values[XE_GPU_REG_RB_BLEND_ALPHA]) << 32);
+  if (fresh_pass || state.blend_rg != blend_rg || state.blend_ba != blend_ba) {
+    state.blend_rg = blend_rg;
+    state.blend_ba = blend_ba;
+    wgpu::Color blend_constant = {regs.Get<float>(XE_GPU_REG_RB_BLEND_RED),
+                                  regs.Get<float>(XE_GPU_REG_RB_BLEND_GREEN),
+                                  regs.Get<float>(XE_GPU_REG_RB_BLEND_BLUE),
+                                  regs.Get<float>(XE_GPU_REG_RB_BLEND_ALPHA)};
     pass.SetBlendConstant(&blend_constant);
-    state.blend_constant = blend_state;
   }
 
   uint32_t count = primitive.host_draw_vertex_count;
@@ -1496,19 +1559,23 @@ void WebGpuBackend::Swap(const SwapSnapshot& swap) {
               int32_t(region.x), int32_t(region.y),
               int32_t(gamma_mode | (region.fill_x << 8) | (region.fill_y << 10)), 0};
           provider_.queue().WriteBuffer(blit.constants, 0, constants, sizeof(constants));
-          std::array<wgpu::BindGroupEntry, 3> entries{};
-          entries[0].binding = 0;
-          entries[0].textureView = region.target->view;
-          entries[1].binding = 1;
-          entries[1].buffer = blit.constants;
-          entries[2].binding = 2;
-          entries[2].buffer = blit.gamma_ramp;
-          wgpu::BindGroupDescriptor bind_group_desc;
-          bind_group_desc.layout = blit.layout;
-          bind_group_desc.entryCount = entries.size();
-          bind_group_desc.entries = entries.data();
+          if (!blit.bind_group || blit.last_view != region.target->view.Get()) {
+            std::array<wgpu::BindGroupEntry, 3> entries{};
+            entries[0].binding = 0;
+            entries[0].textureView = region.target->view;
+            entries[1].binding = 1;
+            entries[1].buffer = blit.constants;
+            entries[2].binding = 2;
+            entries[2].buffer = blit.gamma_ramp;
+            wgpu::BindGroupDescriptor bind_group_desc;
+            bind_group_desc.layout = blit.layout;
+            bind_group_desc.entryCount = entries.size();
+            bind_group_desc.entries = entries.data();
+            blit.bind_group = provider_.device().CreateBindGroup(&bind_group_desc);
+            blit.last_view = region.target->view.Get();
+          }
           pass.SetPipeline(blit.pipeline);
-          pass.SetBindGroup(0, provider_.device().CreateBindGroup(&bind_group_desc));
+          pass.SetBindGroup(0, blit.bind_group);
           pass.Draw(3);
         }
         pass.End();

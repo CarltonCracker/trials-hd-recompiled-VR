@@ -63,6 +63,13 @@ class FrameRecorder {
   // Copies data into the ring (zero-padded to the alignment) and returns its
   // offset. Submits first if the ring is full, which ends the render pass.
   uint32_t UploadUniforms(const void* data, uint32_t size);
+  // Compares uniform data previously uploaded at `offset` with `data`.
+  bool CompareUniforms(uint32_t offset, const void* data, uint32_t size) const {
+    if (uint64_t(offset) + size > uniform_staging_.size()) {
+      return false;
+    }
+    return std::memcmp(uniform_staging_.data() + offset, data, size) == 0;
+  }
   // Submits now if fewer than `size` bytes (plus alignment) are left, so the
   // following uploads of one draw never cause a submission.
   void ReserveUniforms(uint32_t size);

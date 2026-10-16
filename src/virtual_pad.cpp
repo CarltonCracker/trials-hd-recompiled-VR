@@ -73,6 +73,10 @@ void Apply(SDL_Joystick* joystick, const std::string& line,
     for (const auto& [n, button] : kButtons) {
       if (n == name) {
         SDL_SetJoystickVirtualButton(joystick, button, value != 0);
+        SDL_UpdateJoysticks();
+        SDL_Event ev{};
+        ev.type = SDL_EVENT_USER;
+        SDL_PushEvent(&ev);
         return;
       }
     }
@@ -80,6 +84,10 @@ void Apply(SDL_Joystick* joystick, const std::string& line,
     for (const auto& [n, axis] : kAxes) {
       if (n == name) {
         SDL_SetJoystickVirtualAxis(joystick, axis, Sint16(SDL_clamp(value, -32768, 32767)));
+        SDL_UpdateJoysticks();
+        SDL_Event ev{};
+        ev.type = SDL_EVENT_USER;
+        SDL_PushEvent(&ev);
         return;
       }
     }
@@ -94,6 +102,7 @@ void StartVirtualPadFromEnvironment(std::function<void(const std::string&)> on_c
   if (!fifo || !*fifo) {
     return;
   }
+  SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
   SDL_InitSubSystem(SDL_INIT_GAMEPAD);
 
   SDL_VirtualJoystickDesc desc;
@@ -110,7 +119,15 @@ void StartVirtualPadFromEnvironment(std::function<void(const std::string&)> on_c
     REXLOG_ERROR("virtual pad: could not attach: {}", SDL_GetError());
     return;
   }
-  REXLOG_INFO("virtual pad attached, reading commands from {}", fifo);
+  char guid_str[64];
+  SDL_GUIDToString(SDL_GetJoystickGUID(joystick), guid_str, sizeof(guid_str));
+  std::string mapping = std::string(guid_str) +
+      ",trials_hd virtual pad,a:b0,b:b1,x:b2,y:b3,back:b4,guide:b5,start:b6,"
+      "leftstick:b7,rightstick:b8,leftshoulder:b9,rightshoulder:b10,"
+      "dpup:b11,dpdown:b12,dpleft:b13,dpright:b14,"
+      "leftx:a0,lefty:a1,rightx:a2,righty:a3,lefttrigger:a4,righttrigger:a5,";
+  bool mapped = SDL_SetGamepadMapping(id, mapping.c_str());
+  REXLOG_INFO("virtual pad attached, mapped={}, reading commands from {}", mapped, fifo);
 
   std::thread([joystick, path = std::string(fifo), on_capture = std::move(on_capture)] {
     for (;;) {

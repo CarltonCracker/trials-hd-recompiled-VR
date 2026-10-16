@@ -4,6 +4,8 @@
 
 #include "wgsl/wgsl_shader_translator.h"
 
+#include <shared_mutex>
+#include <unordered_map>
 #include <fmt/format.h>
 
 #include <rex/graphics/xenos.h>
@@ -140,8 +142,23 @@ uint64_t WgslShaderTranslator::GetDefaultPixelShaderModification(
   return modification.value;
 }
 
-std::vector<WgslShaderTranslator::TextureSlot> WgslShaderTranslator::GetTextureSlots(
+const std::vector<WgslShaderTranslator::TextureSlot>& WgslShaderTranslator::GetTextureSlots(
     const Shader& shader) {
+  static std::shared_mutex s_mutex;
+  static std::unordered_map<uint64_t, std::vector<TextureSlot>> s_cache;
+  const uint64_t hash = shader.ucode_data_hash();
+  {
+    std::shared_lock lock(s_mutex);
+    auto it = s_cache.find(hash);
+    if (it != s_cache.end()) {
+      return it->second;
+    }
+  }
+  std::unique_lock lock(s_mutex);
+  auto it = s_cache.find(hash);
+  if (it != s_cache.end()) {
+    return it->second;
+  }
   std::vector<TextureSlot> slots;
   const auto& bindings = shader.texture_bindings();
   for (size_t i = 0; i < bindings.size(); ++i) {
@@ -157,7 +174,7 @@ std::vector<WgslShaderTranslator::TextureSlot> WgslShaderTranslator::GetTextureS
       slot.first_binding = i;
     }
   }
-  return slots;
+  return s_cache.emplace(hash, std::move(slots)).first->second;
 }
 
 uint32_t WgslShaderTranslator::GetFloatConstantArraySize(const Shader& shader) {
@@ -281,7 +298,7 @@ void WgslShaderTranslator::EmitDeclarations(std::string& out) const {
         wgsl_binding::kGroupSharedMemory, wgsl_binding::kSharedMemory,
         modification().memexport_compute ? "read_write" : "read");
   }
-  std::vector<TextureSlot> slots = GetTextureSlots(shader);
+  const auto& slots = GetTextureSlots(shader);
   for (uint32_t i = 0; i < slots.size(); ++i) {
     uint32_t binding = GetTextureBindingNumber(shader.type(), i);
     out += fmt::format("@group({}) @binding({}) var xe_texture_{}: {};\n",
