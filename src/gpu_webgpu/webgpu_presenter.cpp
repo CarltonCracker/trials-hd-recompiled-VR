@@ -282,17 +282,25 @@ bool WebGpuPresenter::PaintToCanvas() {
   provider_.RunDeferredReleases();
   // The canvas belongs to this worker, so only this worker can resize it:
   // follow the page's displayed size in device pixels.
-  ::rex::ui::web::CanvasState canvas;
-  if (::rex::ui::web::GetCanvasState(canvas) && canvas.width && canvas.height &&
-      (canvas.width != surface_config_.width || canvas.height != surface_config_.height)) {
-    uint32_t max_size = provider_.limits().maxTextureDimension2D;
-    emscripten_set_canvas_element_size(kCanvasSelector, int(std::min(canvas.width, max_size)),
-                                       int(std::min(canvas.height, max_size)));
-  }
+  // Only when the size really differs: setting an OffscreenCanvas's size
+  // resets it, and Firefox then stops showing its frames on the page.
   int width = 0;
   int height = 0;
-  if (emscripten_get_canvas_element_size(kCanvasSelector, &width, &height) != EMSCRIPTEN_RESULT_SUCCESS ||
-      width <= 0 || height <= 0) {
+  if (emscripten_get_canvas_element_size(kCanvasSelector, &width, &height) != EMSCRIPTEN_RESULT_SUCCESS) {
+    return false;
+  }
+  ::rex::ui::web::CanvasState canvas;
+  if (::rex::ui::web::GetCanvasState(canvas) && canvas.width && canvas.height) {
+    const uint32_t max_size = provider_.limits().maxTextureDimension2D;
+    const int wanted_width = int(std::min(canvas.width, max_size));
+    const int wanted_height = int(std::min(canvas.height, max_size));
+    if (wanted_width != width || wanted_height != height) {
+      emscripten_set_canvas_element_size(kCanvasSelector, wanted_width, wanted_height);
+      width = wanted_width;
+      height = wanted_height;
+    }
+  }
+  if (width <= 0 || height <= 0) {
     return false;
   }
   {
@@ -315,14 +323,11 @@ bool WebGpuPresenter::PaintToCanvas() {
         !surface_config_.device) {
       wgpu::SurfaceCapabilities caps;
       wgpu_surface_.GetCapabilities(provider_.adapter(), &caps);
+      // The browser's preferred canvas format comes first
+      // (getPreferredCanvasFormat); others can miss the browser's fast
+      // presentation path, and Firefox on Linux then shows nothing.
       wgpu::TextureFormat format = caps.formatCount ? caps.formats[0]
                                                     : wgpu::TextureFormat::BGRA8Unorm;
-      for (size_t i = 0; i < caps.formatCount; ++i) {
-        if (IsPreferredSurfaceFormat(caps.formats[i])) {
-          format = caps.formats[i];
-          break;
-        }
-      }
       wgpu::SurfaceConfiguration config;
       config.device = provider_.device();
       config.format = format;

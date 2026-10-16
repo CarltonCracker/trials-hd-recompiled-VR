@@ -1661,8 +1661,8 @@ profile per thread with guest functions named `__imp__sub_<address>`.
 | WM4 | done 2026-10-16 (16.6) | Rides render; input from keyboard and gamepad | `ride_middle_name_danger` completes; `check_fps_log.py 60` passes in Chromium |
 | WM5 | done 2026-10-16 (measured, 16.6; listening check by the user) | Audio | Music and effects audible; no underruns over a 2-minute ride |
 | WM6 | todo | 60 FPS at 720p in desktop Chrome (RX 6600) | 3 runs, min ≥ 55 FPS riding, logged in 4.3-style table |
-| WM7 | todo | Firefox desktop | WM2–WM5 checks pass in Firefox |
-| WM8 | todo | Safari (macOS) | WM2–WM5 checks pass, or a documented blocker |
+| WM7 | deferred 2026-10-16 (user: Chrome-based browsers first; Firefox 158 runs it, 16.6) | Firefox desktop | WM2–WM5 checks pass in Firefox |
+| WM8 | deferred 2026-10-16 (user: Chrome-based browsers first) | Safari (macOS) | WM2–WM5 checks pass, or a documented blocker |
 
 ---
 
@@ -1914,6 +1914,18 @@ details of W-L04 to W-L09. The critical path is W-L01 → W-L02/W-L04 → W-L15 
 W-L06/W-L07 (graphics).
 
 ### 16.6 Notes log
+
+- 2026-10-16 (claude-opus-5.5): **Firefox (WM7) explored, then deferred** at the user's request
+  (Chrome-based browsers first). Firefox 158 (Linux tarball) has shared Memory64, JSPI and
+  wasm exceptions by default; WebGPU needs `dom.webgpu.enabled` on Linux (2 GiB storage
+  bindings, no `texture-formats-tier1`). Two fixes made it run: `web/webgpu_compat.js`
+  (`--pre-js`: emdawnwebgpu passes the whole >2 GiB heap view to `setBindGroup`, which
+  Firefox rejects) and the canvas is only resized when its size really changes. The game
+  then boots and renders in Firefox (seen on an Xvfb display); Firefox's own screenshots of a
+  worker-presented WebGPU canvas are black, so `tools/web/bidi.py` (WebDriver BiDi runner for
+  the headless scripts) grabs the display with `--headful` under `xvfb-run`. Not verified
+  further: menu captures under Xvfb were still black/splash (timing or capture), WM2-WM5 not
+  checked in Firefox. The presenter now also takes the browser's preferred canvas format.
 
 - 2026-10-16 (claude-opus-5.5): **W-L12 and WM5 done.** `ride_middle_name_danger.txt` in
   Chromium (131 s): **0 underruns**, worklet consumption exactly real time (heartbeat 49,280

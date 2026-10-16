@@ -450,8 +450,11 @@ if(TRIALSHD_WEB_WEBGPU)
     # JSPI: every pthread entry can suspend, so the GPU worker's WebGPU waits
     # (WaitAny) and its per-frame yield return to the browser's event loop.
     # The command processor's thread receives the page's canvas (7.9.5).
+    # web/webgpu_compat.js shims WebGPU calls some browsers reject (Firefox).
     target_link_options(trials_hd PRIVATE
-        --use-port=emdawnwebgpu -sJSPI -sOFFSCREENCANVAS_SUPPORT)
+        --use-port=emdawnwebgpu -sJSPI -sOFFSCREENCANVAS_SUPPORT
+        --pre-js=${_root}/web/webgpu_compat.js)
+    set_property(TARGET trials_hd APPEND PROPERTY LINK_DEPENDS ${_root}/web/webgpu_compat.js)
 endif()
 
 # Linear memory: the 2.75 GiB guest window (7.9.2) plus the host heap. A pool
