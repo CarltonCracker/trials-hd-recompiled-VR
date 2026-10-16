@@ -6,23 +6,73 @@
 #include <cstdint>
 #include <cstring>
 
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+#include <immintrin.h>
+#endif
+
 namespace trials_hd {
 using RenderMatrix = std::array<float, 16>;
 using RenderPoint = std::array<float, 3>;
 
+inline float FastLength(float x, float y, float z) {
+  return std::sqrt(x * x + y * y + z * z);
+}
+
+inline float FastLengthSq(float x, float y, float z) {
+  return x * x + y * y + z * z;
+}
+
 // Row-vector transform (D3D layout, translation in elements 12..14).
 inline RenderPoint TransformPoint(const RenderMatrix& m, const RenderPoint& p) {
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+  const __m128 p0 = _mm_set1_ps(p[0]);
+  const __m128 p1 = _mm_set1_ps(p[1]);
+  const __m128 p2 = _mm_set1_ps(p[2]);
+  const __m128 m0 = _mm_loadu_ps(&m[0]);
+  const __m128 m1 = _mm_loadu_ps(&m[4]);
+  const __m128 m2 = _mm_loadu_ps(&m[8]);
+  const __m128 m3 = _mm_loadu_ps(&m[12]);
+  const __m128 res = _mm_add_ps(
+      _mm_add_ps(_mm_mul_ps(p0, m0), _mm_mul_ps(p1, m1)),
+      _mm_add_ps(_mm_mul_ps(p2, m2), m3));
+  alignas(16) float tmp[4];
+  _mm_store_ps(tmp, res);
+  return {tmp[0], tmp[1], tmp[2]};
+#else
   RenderPoint out;
   for (int j = 0; j < 3; ++j) out[j] = p[0] * m[j] + p[1] * m[4 + j] + p[2] * m[8 + j] + m[12 + j];
   return out;
+#endif
 }
 
 inline RenderMatrix Multiply(const RenderMatrix& a, const RenderMatrix& b) {
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+  RenderMatrix out;
+  const __m128 b0 = _mm_loadu_ps(&b[0]);
+  const __m128 b1 = _mm_loadu_ps(&b[4]);
+  const __m128 b2 = _mm_loadu_ps(&b[8]);
+  const __m128 b3 = _mm_loadu_ps(&b[12]);
+
+  for (int r = 0; r < 4; ++r) {
+    const __m128 a_row = _mm_loadu_ps(&a[r * 4]);
+    const __m128 a0 = _mm_shuffle_ps(a_row, a_row, _MM_SHUFFLE(0, 0, 0, 0));
+    const __m128 a1 = _mm_shuffle_ps(a_row, a_row, _MM_SHUFFLE(1, 1, 1, 1));
+    const __m128 a2 = _mm_shuffle_ps(a_row, a_row, _MM_SHUFFLE(2, 2, 2, 2));
+    const __m128 a3 = _mm_shuffle_ps(a_row, a_row, _MM_SHUFFLE(3, 3, 3, 3));
+
+    __m128 row = _mm_add_ps(
+        _mm_add_ps(_mm_mul_ps(a0, b0), _mm_mul_ps(a1, b1)),
+        _mm_add_ps(_mm_mul_ps(a2, b2), _mm_mul_ps(a3, b3)));
+    _mm_storeu_ps(&out[r * 4], row);
+  }
+  return out;
+#else
   RenderMatrix out{};
   for (int r = 0; r < 4; ++r)
     for (int c = 0; c < 4; ++c)
       for (int k = 0; k < 4; ++k) out[r * 4 + c] += a[r * 4 + k] * b[k * 4 + c];
   return out;
+#endif
 }
 
 inline uint64_t CameraPoseKey(uint32_t camera, uint32_t pass,
@@ -51,7 +101,7 @@ inline bool Rotation(const RenderMatrix& m, std::array<float, 4>& q,
       std::abs(m[11]) > 1e-6f || std::abs(m[15] - 1) > 1e-6f) return false;
   float r[3][3];
   for (int i = 0; i < 3; ++i) {
-    scale[i] = std::hypot(m[i * 4], m[i * 4 + 1], m[i * 4 + 2]);
+    scale[i] = FastLength(m[i * 4], m[i * 4 + 1], m[i * 4 + 2]);
     if (!std::isfinite(scale[i]) || scale[i] < 1e-6f) return false;
     for (int j = 0; j < 3; ++j) r[i][j] = m[i * 4 + j] / scale[i];
   }
@@ -157,7 +207,7 @@ class PivotEstimate {
                           mc[0][2] * (mc[1][0] * mc[2][1] - mc[1][1] * mc[2][0])) / det);
     }
     if (std::isfinite(pivot[0] + pivot[1] + pivot[2]) &&
-        std::hypot(pivot[0], pivot[1], pivot[2]) < kMaxPivot) {
+        FastLengthSq(pivot[0], pivot[1], pivot[2]) < kMaxPivot * kMaxPivot) {
       pivot_ = pivot;
     }
   }
@@ -184,7 +234,8 @@ class PoseHistory {
     const auto moved = TransformPoint(pose, pivot), last = TransformPoint(current_, pivot);
     // shortcut: >2-unit jumps snap as teleports; use explicit reset signals to blend faster debris.
     if (!valid_ || (tick != tick_ && tick != tick_ + 1) ||
-        std::hypot(moved[0] - last[0], moved[1] - last[1], moved[2] - last[2]) > kPoseSnapDistance) {
+        FastLengthSq(moved[0] - last[0], moved[1] - last[1], moved[2] - last[2]) >
+            kPoseSnapDistance * kPoseSnapDistance) {
       previous_ = pose;
       consecutive_ = 1;
     } else if (tick != tick_) {
@@ -203,7 +254,7 @@ class PoseHistory {
     float basis = 0;
     for (int r = 0; r < 3; ++r)
       for (int c = 0; c < 3; ++c) basis += std::abs(pose[r * 4 + c] - current_[r * 4 + c]);
-    return std::hypot(pose[12] - current_[12], pose[13] - current_[13], pose[14] - current_[14]) +
+    return FastLength(pose[12] - current_[12], pose[13] - current_[13], pose[14] - current_[14]) +
            basis;
   }
  private:

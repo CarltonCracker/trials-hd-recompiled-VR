@@ -94,6 +94,8 @@ Options:
   --release             Build Release configuration
   --debug               Build Debug configuration
   --relwithdebinfo      Build RelWithDebInfo configuration (default)
+  --pgo-generate        Build with PGO instrumentation (-fprofile-generate)
+  --pgo-use             Build with PGO profile optimization (-fprofile-use)
   -j, --jobs N          Compile with N parallel jobs (default: $DEFAULT_JOBS)
   --clean               Clean the current preset build directory
   --clean-all           Delete out/build entirely
@@ -105,6 +107,8 @@ Examples:
   ./build.sh                                          # Build if assets/ is already present
   ./build.sh --game "Trials HD (XBLA)"                # Extract assets (if missing) and build
   ./build.sh --release -j8                            # Optimized release build with 8 jobs
+  ./build.sh --pgo-generate                           # Build PGO instrumentation binary
+  ./build.sh --pgo-use                                # Build PGO-optimized binary
   ./build.sh --clean                                  # Fresh rebuild
 EOF
 }
@@ -133,6 +137,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --relwithdebinfo|relwithdebinfo)
       CONFIG="relwithdebinfo"
+      shift
+      ;;
+    --pgo-generate|pgo-generate)
+      CONFIG="pgo-generate"
+      shift
+      ;;
+    --pgo-use|pgo-use)
+      CONFIG="pgo-use"
       shift
       ;;
     -j)

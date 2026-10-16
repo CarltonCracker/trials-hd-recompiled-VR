@@ -231,7 +231,7 @@ void WgslShaderTranslator::ProcessTextureFetchInstruction(
     return;
   }
   uint32_t fetch = instr.operands[1].storage_index;
-  std::vector<TextureSlot> slots = GetTextureSlots(current_shader());
+  const auto& slots = GetTextureSlots(current_shader());
   uint32_t slot = UINT32_MAX;
   for (uint32_t i = 0; i < slots.size(); ++i) {
     if (slots[i].fetch_constant == fetch) {

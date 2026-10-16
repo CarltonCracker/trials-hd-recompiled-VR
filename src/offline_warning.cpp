@@ -1,13 +1,18 @@
 // trials_hd - no "Offline warning" before each track.
 //
 // When a profile is signed in without Xbox LIVE, the game's sign-in poll
-// (sub_8261ECE0) sets that player's bit in a "not warned yet" mask, and the
-// pre-track setup run on picking a bike (sub_8263B570) then shows the
-// PRETRACK_OFFLINE_WARNING message box ("Any scores achieved while offline
-// cannot be saved to Xbox LIVE leaderboards...") and clears the bit. Xbox LIVE
-// never exists here, so clear the mask first: the game takes its own
-// "already warned" path. The message box code is reachable only through that
-// bit, and the mask is read nowhere else.
+// (sub_8261ECE0) sets that player's bit in a "not warned yet" mask at
+// 0x82768498, and the pre-track setup run on picking a bike (sub_8263B570)
+// then shows the PRETRACK_OFFLINE_WARNING message box ("Any scores achieved
+// while offline cannot be saved to Xbox LIVE leaderboards...") and clears the bit.
+//
+// On systems without a signed-in profile (e.g. guest play), sub_8263B570 naturally
+// bypassed the warning because 0x82768494 had bit 0 clear. However, with a local
+// user profile signed in, ReXGlue returns signin_state = 1 (eXUserSigninState_SignedInLocally)
+// without Live connectivity, causing the game to flag the offline warning pending bit.
+//
+// We clear the mask both on sign-in status polls (sub_8261ECE0) and immediately
+// before pre-track setup (sub_8263B570) so the game takes its own already-warned path.
 
 #include <cstdint>
 

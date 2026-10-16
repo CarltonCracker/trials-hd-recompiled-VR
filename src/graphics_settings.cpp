@@ -210,8 +210,31 @@ void ApplyDisplayMode() {
   g_refresh_rate.store(refresh_rate);
 }
 
+float DisplayRefreshRate() {
+  float rate = g_refresh_rate.load();
+  if (rate <= 0.0f) {
+    if (SDL_Window* window = FindGameWindow()) {
+      const SDL_DisplayID display = SDL_GetDisplayForWindow(window);
+      if (const SDL_DisplayMode* desktop = SDL_GetDesktopDisplayMode(display)) {
+        rate = desktop->refresh_rate;
+        if (rate > 0.0f) {
+          g_refresh_rate.store(rate);
+        }
+      }
+    } else {
+      if (const SDL_DisplayMode* desktop = SDL_GetDesktopDisplayMode(SDL_GetPrimaryDisplay())) {
+        rate = desktop->refresh_rate;
+        if (rate > 0.0f) {
+          g_refresh_rate.store(rate);
+        }
+      }
+    }
+  }
+  return rate;
+}
+
 float VsyncRefreshRate() {
-  return g_startup_vsync ? g_refresh_rate.load() : 0.0f;
+  return g_startup_vsync ? DisplayRefreshRate() : 0.0f;
 }
 
 GraphicsSettingsDialog::GraphicsSettingsDialog(rex::ui::ImGuiDrawer* drawer,

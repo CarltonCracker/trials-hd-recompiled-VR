@@ -11,6 +11,11 @@
 #include <rex/ppc/context.h>
 #include <rex/ppc/func.h>
 
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+#include <immintrin.h>
+#endif
+
+#include "flat_hash_map.h"
 #include "frame_clock.h"
 #include "graphics_settings.h"
 #include "render_pose.h"
@@ -54,20 +59,42 @@ std::atomic<float> g_render_alpha{1.f};
 thread_local uint32_t g_draw_renderer = 0;
 thread_local uint32_t g_draw_frame = 0, g_pose_log_frames = 0, g_pose_log_second = 0;
 thread_local std::array<uint32_t, 4> g_pose_scene{};
-thread_local std::unordered_map<uint64_t, trials_hd::PoseHistory> g_model_poses;
-thread_local std::unordered_map<uint64_t, trials_hd::PoseTracks> g_camera_poses;
+thread_local trials_hd::FlatHashMap<uint64_t, trials_hd::PoseHistory> g_model_poses;
+thread_local trials_hd::FlatHashMap<uint64_t, trials_hd::PoseTracks> g_camera_poses;
 thread_local bool g_logged_rigid = false, g_logged_skin = false;
 
 uint32_t Word(uint8_t* base, uint32_t address) {
   return rex::memory::load_and_swap<uint32_t>(base + address);
 }
 trials_hd::RenderMatrix Matrix(uint8_t* base, uint32_t address) {
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+  trials_hd::RenderMatrix matrix;
+  const __m128i mask = _mm_set_epi8(12, 13, 14, 15, 8, 9, 10, 11, 4, 5, 6, 7, 0, 1, 2, 3);
+  const uint8_t* ptr = base + address;
+  for (int i = 0; i < 4; ++i) {
+    __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(ptr + i * 16));
+    v = _mm_shuffle_epi8(v, mask);
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(&matrix[i * 4]), v);
+  }
+  return matrix;
+#else
   trials_hd::RenderMatrix matrix;
   for (uint32_t i = 0; i < 16; ++i) matrix[i] = Float(base, address + i * 4);
   return matrix;
+#endif
 }
 void StoreMatrix(uint8_t* base, uint32_t address, const trials_hd::RenderMatrix& matrix) {
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+  const __m128i mask = _mm_set_epi8(12, 13, 14, 15, 8, 9, 10, 11, 4, 5, 6, 7, 0, 1, 2, 3);
+  uint8_t* ptr = base + address;
+  for (int i = 0; i < 4; ++i) {
+    __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&matrix[i * 4]));
+    v = _mm_shuffle_epi8(v, mask);
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(ptr + i * 16), v);
+  }
+#else
   for (uint32_t i = 0; i < 16; ++i) StoreFloat(base, address + i * 4, matrix[i]);
+#endif
 }
 
 void DrawInterpolated(PPCContext& ctx, uint8_t* base, void (*draw)(PPCContext&, uint8_t*)) {
@@ -136,6 +163,20 @@ uint32_t Game(uint8_t* base) {
   return rex::memory::load_and_swap<uint32_t>(base + kApplication);
 }
 
+inline PPCFunc* LookupDirectFunction(uint8_t* base, uint32_t target) {
+  constexpr uint32_t kCodeBase = 0x820F0000;
+  constexpr uint32_t kCodeSize = 0x607EC8;
+  constexpr uint32_t kThunkReserve = 0x10000;
+  constexpr uint64_t kTableOffset = 0x82000000ull + 0x830000ull;
+  if ((target - kCodeBase) < (kCodeSize + kThunkReserve)) [[likely]] {
+    auto* func_ptr = *reinterpret_cast<PPCFunc**>(base + kTableOffset + (uint64_t(target - kCodeBase) * 2));
+    if (func_ptr) {
+      return func_ptr;
+    }
+  }
+  return rex::runtime::ResolveIndirectFunction(target);
+}
+
 void CallVirtual(PPCContext& ctx, uint8_t* base, uint32_t object, uint32_t slot,
                  uint32_t argument, uint32_t return_address) {
   if (!object) return;
@@ -144,7 +185,7 @@ void CallVirtual(PPCContext& ctx, uint8_t* base, uint32_t object, uint32_t slot,
   ctx.r3.u64 = object;
   ctx.r4.u64 = argument;
   ctx.lr = return_address;
-  rex::runtime::ResolveIndirectFunction(function)(ctx, base);
+  LookupDirectFunction(base, function)(ctx, base);
 }
 
 bool Running(uint8_t* base) {
@@ -294,10 +335,41 @@ extern "C" REX_FUNC(sub_825E7FC0) {
   for (uint32_t i = 0; i < 2; ++i) StoreFloat(base, kScrollPhase + i * 4, phases[i]);
 }
 
+inline void AccurateWaitUntil(std::chrono::steady_clock::time_point deadline) {
+  auto now = std::chrono::steady_clock::now();
+  if (now >= deadline) return;
+
+  // Phase 1: Coarse sleep when remaining time > 1.5ms.
+  // Sleep until 1ms before deadline to ensure we never oversleep past the deadline due to OS scheduler granularity.
+  while (deadline - now > std::chrono::microseconds(1500)) {
+    std::this_thread::sleep_until(deadline - std::chrono::microseconds(1000));
+    now = std::chrono::steady_clock::now();
+  }
+
+  // Phase 2: Hybrid yield / _mm_pause spin-wait for sub-millisecond precision.
+  while (now < deadline) {
+    if (deadline - now > std::chrono::microseconds(200)) {
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+      for (int i = 0; i < 8; ++i) {
+        _mm_pause();
+      }
+#endif
+      std::this_thread::yield();
+    } else {
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+      _mm_pause();
+#else
+      std::this_thread::yield();
+#endif
+    }
+    now = std::chrono::steady_clock::now();
+  }
+}
+
 // Strong override: generated code and address registration both resolve here.
 extern "C" REX_FUNC(sub_82664F98) {
   // Latch the applied startup mode, not fps_unlock's pending restart-required value.
-  g_unlocked_loop.store(rex::cvar::GetFlagByName("present_fps_limit_guest_paced") == "true");
+  g_unlocked_loop.store(rex::cvar::Query<bool>("present_fps_limit_guest_paced"));
   if (!Unlocked()) {
     __imp__sub_82664F98(ctx, base);
     return;
@@ -310,7 +382,24 @@ extern "C" REX_FUNC(sub_82664F98) {
   auto previous = std::chrono::steady_clock::now();
   auto report_time = previous;
   auto next_render = previous;
-  double last_rate = 0;
+  auto query_rate = []() -> double {
+    double r = std::max(rex::cvar::Query<int32_t>("present_fps_limit"), 0);
+    const double vsync_refresh = trials_hd::VsyncRefreshRate();
+    if (vsync_refresh > 0 && (r == 0 || r > vsync_refresh)) {
+      r = vsync_refresh;
+    } else if (r == 0) {
+      // Unlimited mode: pace to active display's refresh rate (e.g. 240 Hz) when a high-refresh
+      // display is available, delivering smooth 200+ FPS without flood-saturating the GPU queue.
+      const double display_refresh = trials_hd::DisplayRefreshRate();
+      if (display_refresh >= 120.0) {
+        r = display_refresh;
+      }
+    }
+    return r;
+  };
+  double rate = query_rate();
+  double last_rate = -1;
+  uint32_t rate_counter = 0;
   uint32_t ticks = 0, renders = 0;
   uint32_t last_state_table = 0;
   bool initialized = false;
@@ -320,9 +409,9 @@ extern "C" REX_FUNC(sub_82664F98) {
     // With VSync, the presenter shows only the newest frame at each refresh, so
     // rendering faster than the display would show an uneven subset of the
     // interpolated frames: cap at the refresh rate too.
-    double rate = std::max(std::atoi(rex::cvar::GetFlagByName("present_fps_limit").c_str()), 0);
-    if (const double refresh = trials_hd::VsyncRefreshRate(); refresh > 0 && (rate == 0 || rate > refresh)) {
-      rate = refresh;
+    if (++rate_counter >= 32) {
+      rate_counter = 0;
+      rate = query_rate();
     }
     if (rate != last_rate) {
       next_render = std::chrono::steady_clock::now();
@@ -330,7 +419,7 @@ extern "C" REX_FUNC(sub_82664F98) {
       REXLOG_INFO("FPS unlock: rendering {}", rate > 0 ? fmt::format("at up to {:.2f} FPS", rate) : "uncapped");
     }
     if (rate > 0 && initialized) {
-      std::this_thread::sleep_until(std::min(next_render, previous + clock.UntilNextStep()));
+      AccurateWaitUntil(std::min(next_render, previous + clock.UntilNextStep()));
     }
     const auto now = std::chrono::steady_clock::now();
     const auto steps = clock.Advance(now - previous);

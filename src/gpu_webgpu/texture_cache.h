@@ -60,7 +60,7 @@ class TextureCache {
   // (physical address). Replaces any previous alias at the address.
   wgpu::Texture GetOrCreateResolveAlias(uint32_t address, wgpu::TextureFormat format,
       uint32_t width, uint32_t height, uint32_t guest_start, uint32_t guest_length,
-      uint32_t scale_x, uint32_t scale_y);
+      uint32_t scale_x, uint32_t scale_y, wgpu::TextureView* view_out = nullptr);
   // Resolve aliases are dropped when the CPU writes the memory again.
 
   size_t texture_count() const { return textures_.size(); }
@@ -147,6 +147,7 @@ class TextureCache {
   std::atomic<uint64_t> epoch_{0};
   wgpu::TextureView black_2d_;
   wgpu::TextureView black_cube_;
+  std::vector<uint8_t> staging_buffer_;
 };
 
 }  // namespace rex::graphics::webgpu

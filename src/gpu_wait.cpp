@@ -18,10 +18,22 @@
 REX_EXTERN(__imp__sub_8212BB58);
 REX_EXTERN(__imp__sub_8212BC68);
 
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+#define REX_CPU_PAUSE() _mm_pause()
+#elif defined(__aarch64__) || defined(_M_ARM64)
+#define REX_CPU_PAUSE() __asm__ __volatile__("isb" ::: "memory")
+#else
+#define REX_CPU_PAUSE() ((void)0)
+#endif
+
 namespace {
-// Iterations of pure spinning before sleeping (short waits stay as fast as
-// before).
-constexpr uint32_t kSpinIterations = 256;
+// Progressive backoff: spin with CPU pause for short waits, yield to let the
+// command processor finish without kernel sleep latency, and only sleep if the GPU
+// is stalled for a prolonged duration.
+constexpr uint32_t kPauseIterations = 256;
+constexpr uint32_t kYieldIterations = 4096;
+constexpr uint32_t kSpinYieldIterations = 65536;
 constexpr auto kSleep = std::chrono::microseconds(20);
 thread_local uint32_t g_wait_iterations = 0;
 }  // namespace
@@ -35,7 +47,17 @@ extern "C" REX_FUNC(sub_8212BB58) {
 // One wait iteration; returns 0 when the GPU is considered hung.
 extern "C" REX_FUNC(sub_8212BC68) {
   __imp__sub_8212BC68(ctx, base);
-  if (++g_wait_iterations > kSpinIterations) {
+  ++g_wait_iterations;
+  if (g_wait_iterations <= kPauseIterations) {
+    REX_CPU_PAUSE();
+  } else if (g_wait_iterations <= kYieldIterations) {
+    std::this_thread::yield();
+  } else if (g_wait_iterations <= kSpinYieldIterations) {
+    for (int i = 0; i < 8; ++i) {
+      REX_CPU_PAUSE();
+    }
+    std::this_thread::yield();
+  } else {
     std::this_thread::sleep_for(kSleep);
   }
 }

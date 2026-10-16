@@ -301,6 +301,15 @@ class TrialsHdApp : public rex::ReXApp {
     }
     REXLOG_INFO("readback_memexport = {}", rex::cvar::GetFlagByName("readback_memexport"));
 
+    // For Vulkan: avoid splitting each frame into multiple queue submissions.
+    // Batching primary buffers into a single submission per frame (matching WebGPU)
+    // eliminates vkQueueSubmit overhead, fence thrashing, and pipeline stalls.
+    if (rex::cvar::GetFlagSource("vulkan_submit_on_primary_buffer_end") == rex::cvar::Source::kDefault) {
+      rex::cvar::SetFlagByName("vulkan_submit_on_primary_buffer_end", "false");
+    }
+    REXLOG_INFO("vulkan_submit_on_primary_buffer_end = {}",
+                rex::cvar::GetFlagByName("vulkan_submit_on_primary_buffer_end"));
+
     // Auto exposure: the game reads its small luminance resolves (8x8..64x64)
     // back on the CPU; without readback the exposure never adapts and lit
     // scenes blow out. Read back only small resolves, one frame late (no GPU

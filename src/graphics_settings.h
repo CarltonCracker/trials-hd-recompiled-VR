@@ -26,6 +26,10 @@ void ApplyDisplayMode();
 // with VSync off or before the window exists. Any thread.
 float VsyncRefreshRate();
 
+// Refresh rate (Hz) of the active desktop display the game presents to (e.g. 240 Hz),
+// or 0 before the window or display exists. Any thread.
+float DisplayRefreshRate();
+
 // Owns itself once shown: Close() deletes it after the current frame, and
 // on_closed runs just before that so the owner can drop its pointer.
 class GraphicsSettingsDialog : public rex::ui::ImGuiDialog {

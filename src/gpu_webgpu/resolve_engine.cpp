@@ -9,6 +9,10 @@
 #include <cstring>
 #include <vector>
 
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+#include <immintrin.h>
+#endif
+
 #include <rex/graphics/flags.h>
 #include <rex/graphics/pipeline/texture/util.h>
 #include <rex/graphics/xenos.h>
@@ -216,10 +220,11 @@ bool ResolveEngine::Copy(const draw_util::ResolveInfo& info, RenderTarget& sourc
   height = std::min(height, dest_height - dest_y);
   DestFormat dest_format = GetDestFormat(xenos::TextureFormat(info.copy_dest_info.copy_dest_format),
                                          info.copy_dest_info.copy_dest_number);
+  wgpu::TextureView alias_view;
   wgpu::Texture alias = texture_cache_.GetOrCreateResolveAlias(
       info.copy_dest_base, dest_format.format, dest_width, dest_height,
-      info.copy_dest_extent_start, info.copy_dest_extent_length, scale_x, scale_y);
-  if (!alias) {
+      info.copy_dest_extent_start, info.copy_dest_extent_length, scale_x, scale_y, &alias_view);
+  if (!alias || !alias_view) {
     return false;
   }
 
@@ -267,7 +272,7 @@ bool ResolveEngine::Copy(const draw_util::ResolveInfo& info, RenderTarget& sourc
 
   frame_recorder_.EndRenderPass();
   wgpu::RenderPassColorAttachment attachment;
-  attachment.view = alias.CreateView();
+  attachment.view = alias_view;
   attachment.loadOp = wgpu::LoadOp::Load;
   attachment.storeOp = wgpu::StoreOp::Store;
   wgpu::RenderPassDescriptor pass_desc;
@@ -396,6 +401,109 @@ void ResolveEngine::WriteToGuest(const Readback& readback) {
   // averaged (each holds a differently positioned sample of the same guest
   // pixel; a single one biases the game's luminance measurement).
   uint32_t scale_x = readback.scale_x, scale_y = readback.scale_y;
+  // 1x Native fast-path: no downsampling or averaging required.
+  if (scale_x == 1 && scale_y == 1) {
+    for (uint32_t y = 0; y < readback.height; ++y) {
+      const uint8_t* row = host + y * readback.row_pitch;
+      const int32_t dest_y = int32_t(readback.dest_y + y);
+      for (uint32_t x = 0; x < readback.width; ++x) {
+        uint32_t value;
+        if (is_16_16) {
+          float components[2];
+          std::memcpy(components, row + x * readback.host_bytes, sizeof(components));
+          value = (uint32_t(components[0]) & 0xFFFF) | (uint32_t(components[1]) << 16);
+        } else {
+          std::memcpy(&value, row + x * 4, 4);
+        }
+        int32_t offset =
+            texture_util::GetTiledOffset2D(int32_t(readback.dest_x + x),
+                                           dest_y, pitch, 2) -
+            int32_t(start);
+        if (offset < 0 || uint32_t(offset) + 4 > info.copy_dest_extent_length) {
+          continue;
+        }
+        value = xenos::GpuSwap(value, endian);
+        std::memcpy(guest + offset, &value, 4);
+      }
+    }
+    return;
+  }
+
+  // 2x Downsampling fast-path: accelerated 2x2 box filtering using SIMD/bit shifts.
+  if (scale_x == 2 && scale_y == 2) {
+    const uint32_t guest_h = readback.height >> 1;
+    const uint32_t guest_w = readback.width >> 1;
+    for (uint32_t y = 0; y < guest_h; ++y) {
+      const uint8_t* row0 = host + (y * 2) * readback.row_pitch;
+      const uint8_t* row1 = host + (y * 2 + 1) * readback.row_pitch;
+      const int32_t dest_y = int32_t((readback.dest_y >> 1) + y);
+      for (uint32_t x = 0; x < guest_w; ++x) {
+        uint32_t value;
+        if (is_16_16) {
+          float components[2];
+          std::memcpy(components, row0 + (x * 2) * readback.host_bytes, sizeof(components));
+          value = (uint32_t(components[0]) & 0xFFFF) | (uint32_t(components[1]) << 16);
+        } else if (is_10_10_10_2) {
+          uint32_t p0, p1, p2, p3;
+          std::memcpy(&p0, row0 + x * 8, 4);
+          std::memcpy(&p1, row0 + x * 8 + 4, 4);
+          std::memcpy(&p2, row1 + x * 8, 4);
+          std::memcpy(&p3, row1 + x * 8 + 4, 4);
+          uint32_t s0 = (p0 & 0x3FF) + (p1 & 0x3FF) + (p2 & 0x3FF) + (p3 & 0x3FF);
+          uint32_t s1 = ((p0 >> 10) & 0x3FF) + ((p1 >> 10) & 0x3FF) + ((p2 >> 10) & 0x3FF) + ((p3 >> 10) & 0x3FF);
+          uint32_t s2 = ((p0 >> 20) & 0x3FF) + ((p1 >> 20) & 0x3FF) + ((p2 >> 20) & 0x3FF) + ((p3 >> 20) & 0x3FF);
+          uint32_t s3 = (p0 >> 30) + (p1 >> 30) + (p2 >> 30) + (p3 >> 30);
+          value = ((s0 + 2) >> 2) | (((s1 + 2) >> 2) << 10) |
+                  (((s2 + 2) >> 2) << 20) | (((s3 + 2) >> 2) << 30);
+        } else if (is_32_float) {
+          float f0, f1, f2, f3;
+          std::memcpy(&f0, row0 + x * 8, 4);
+          std::memcpy(&f1, row0 + x * 8 + 4, 4);
+          std::memcpy(&f2, row1 + x * 8, 4);
+          std::memcpy(&f3, row1 + x * 8 + 4, 4);
+          float sum = (f0 + f1 + f2 + f3) * 0.25f;
+          value = std::bit_cast<uint32_t>(sum);
+        } else {
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+          uint32_t p0, p1, p2, p3;
+          std::memcpy(&p0, row0 + x * 8, 4);
+          std::memcpy(&p1, row0 + x * 8 + 4, 4);
+          std::memcpy(&p2, row1 + x * 8, 4);
+          std::memcpy(&p3, row1 + x * 8 + 4, 4);
+          __m128i a = _mm_cvtsi32_si128(p0);
+          __m128i b = _mm_cvtsi32_si128(p1);
+          __m128i c = _mm_cvtsi32_si128(p2);
+          __m128i d = _mm_cvtsi32_si128(p3);
+          __m128i avg_row0 = _mm_avg_epu8(a, b);
+          __m128i avg_row1 = _mm_avg_epu8(c, d);
+          __m128i avg = _mm_avg_epu8(avg_row0, avg_row1);
+          value = _mm_cvtsi128_si32(avg);
+#else
+          uint32_t sums[4];
+          for (uint32_t c = 0; c < 4; ++c) {
+            sums[c] = uint32_t(row0[x * 8 + c]) + uint32_t(row0[x * 8 + 4 + c]) +
+                      uint32_t(row1[x * 8 + c]) + uint32_t(row1[x * 8 + 4 + c]);
+          }
+          value = ((sums[0] + 2) >> 2) |
+                  (((sums[1] + 2) >> 2) << 8) |
+                  (((sums[2] + 2) >> 2) << 16) |
+                  (((sums[3] + 2) >> 2) << 24);
+#endif
+        }
+        int32_t offset =
+            texture_util::GetTiledOffset2D(int32_t((readback.dest_x >> 1) + x),
+                                           dest_y, pitch, 2) -
+            int32_t(start);
+        if (offset < 0 || uint32_t(offset) + 4 > info.copy_dest_extent_length) {
+          continue;
+        }
+        value = xenos::GpuSwap(value, endian);
+        std::memcpy(guest + offset, &value, 4);
+      }
+    }
+    return;
+  }
+
   for (uint32_t y = 0; y < readback.height / scale_y; ++y) {
     for (uint32_t x = 0; x < readback.width / scale_x; ++x) {
       uint32_t value;

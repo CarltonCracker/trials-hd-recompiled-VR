@@ -39,13 +39,13 @@ constexpr char kNullPixelShader[] = "@fragment fn main() {}\n";
 TextureLayoutSignature TextureLayoutSignature::Get(const Shader& vertex_shader,
                                                    const Shader* pixel_shader) {
   TextureLayoutSignature signature;
-  auto vertex_slots = WgslShaderTranslator::GetTextureSlots(vertex_shader);
+  const auto& vertex_slots = WgslShaderTranslator::GetTextureSlots(vertex_shader);
   signature.vertex_count = uint32_t(vertex_slots.size());
   for (uint32_t i = 0; i < vertex_slots.size(); ++i) {
     signature.vertex_cube_mask |= uint32_t(vertex_slots[i].is_cube) << i;
   }
   if (pixel_shader) {
-    auto pixel_slots = WgslShaderTranslator::GetTextureSlots(*pixel_shader);
+    const auto& pixel_slots = WgslShaderTranslator::GetTextureSlots(*pixel_shader);
     signature.pixel_count = uint32_t(pixel_slots.size());
     for (uint32_t i = 0; i < pixel_slots.size(); ++i) {
       signature.pixel_cube_mask |= uint32_t(pixel_slots[i].is_cube) << i;
@@ -117,6 +117,7 @@ PipelineCache::PipelineCache(ui::webgpu::WebGpuProvider& provider) : provider_(p
 
 PipelineCache::~PipelineCache() {
   std::lock_guard lock(provider_.device_mutex());
+  last_pipeline_ = nullptr;
   pipelines_.clear();
   modules_.clear();
 }
@@ -269,8 +270,13 @@ wgpu::ComputePipeline PipelineCache::GetMemExportPipeline(Shader& vertex_shader,
 
 wgpu::RenderPipeline PipelineCache::GetPipeline(const PipelineKey& key, Shader& vertex_shader,
                                                 Shader* pixel_shader) {
+  if (last_pipeline_ && last_key_ == key) {
+    return last_pipeline_;
+  }
   auto it = pipelines_.find(key);
   if (it != pipelines_.end()) {
+    last_key_ = key;
+    last_pipeline_ = it->second;
     return it->second;
   }
   wgpu::ShaderModule vertex_module =
@@ -345,6 +351,8 @@ wgpu::RenderPipeline PipelineCache::GetPipeline(const PipelineKey& key, Shader& 
     pipeline = provider_.device().CreateRenderPipeline(&desc);
   }
   pipelines_.emplace(key, pipeline);
+  last_key_ = key;
+  last_pipeline_ = pipeline;
   return pipeline;
 }
 
