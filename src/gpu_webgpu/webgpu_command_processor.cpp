@@ -13,6 +13,7 @@
 #include <rex/logging.h>
 
 #include "pipeline_cache.h"
+#include "web_phase.h"
 #include "webgpu_backend.h"
 #include "webgpu_provider.h"
 
@@ -41,10 +42,19 @@ REXCVAR_DECLARE(int32_t, draw_resolution_scale_y);
 
 namespace rex::graphics::webgpu {
 
+#if defined(__EMSCRIPTEN__)
+std::atomic<const char*> g_web_phase{"setup"};
+#endif
+
 namespace {
 
 std::atomic<uint32_t> g_draws_since_report{0};
 std::atomic<uint32_t> g_copies_since_report{0};
+
+#if defined(__EMSCRIPTEN__)
+std::atomic<uint64_t> g_web_swaps{0};
+std::atomic<uint64_t> g_web_draws{0};
+#endif
 
 }  // namespace
 
@@ -70,10 +80,58 @@ bool WebGpuCommandProcessor::SetupContext() {
     REXGPU_ERROR("WebGPU: failed to initialize the backend");
     return false;
   }
+#if defined(__EMSCRIPTEN__)
+  SetWebPhase("command processor");
+  stall_watchdog_ = std::jthread([this](std::stop_token stop) { StallWatchdog(stop); });
+#endif
   return true;
 }
 
+#if defined(__EMSCRIPTEN__)
+void WebGpuCommandProcessor::PrepareForWait() {
+  SetWebPhase(read_ptr_index_ == write_ptr_index_.load(std::memory_order_relaxed)
+                  ? "idle (ring empty)"
+                  : "WAIT_REG_MEM");
+  CommandProcessor::PrepareForWait();
+}
+
+void WebGpuCommandProcessor::ReturnFromWait() {
+  CommandProcessor::ReturnFromWait();
+  SetWebPhase("command processor");
+}
+
+void WebGpuCommandProcessor::StallWatchdog(std::stop_token stop) {
+  using clock = std::chrono::steady_clock;
+  uint64_t last_swaps = g_web_swaps.load(std::memory_order_relaxed);
+  clock::time_point last_change = clock::now();
+  clock::time_point last_report{};
+  while (!stop.stop_requested()) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    const clock::time_point now = clock::now();
+    const uint64_t swaps = g_web_swaps.load(std::memory_order_relaxed);
+    if (swaps != last_swaps) {
+      last_swaps = swaps;
+      last_change = now;
+      continue;
+    }
+    if (now - last_change >= std::chrono::seconds(3) &&
+        now - last_report >= std::chrono::seconds(5)) {
+      last_report = now;
+      REXGPU_WARN(
+          "web: no guest swap for {:.1f} s; GPU worker: {}; ring read {} write {}; draws {}",
+          std::chrono::duration<double>(now - last_change).count(),
+          g_web_phase.load(std::memory_order_relaxed), read_ptr_index_,
+          write_ptr_index_.load(std::memory_order_relaxed),
+          g_web_draws.load(std::memory_order_relaxed));
+    }
+  }
+}
+#endif
+
 void WebGpuCommandProcessor::ShutdownContext() {
+#if defined(__EMSCRIPTEN__)
+  stall_watchdog_ = {};
+#endif
   backend_.reset();
 #if defined(__EMSCRIPTEN__)
   provider_ = nullptr;
@@ -95,6 +153,10 @@ bool WebGpuCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   // this draw reads guest memory, as the write faults would natively (7.9.3).
   memory_->DeliverPhysicalWrites();
 #endif
+#if defined(__EMSCRIPTEN__)
+  g_web_draws.fetch_add(1, std::memory_order_relaxed);
+#endif
+  SetWebPhase("draw");
   DrawSnapshot draw;
   draw.regs = register_file_;
   draw.primitive_type = prim_type;
@@ -122,7 +184,9 @@ bool WebGpuCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
     backend_->Draw(draw);
     return IssueCopy();
   }
-  return backend_->Draw(draw);
+  bool result = backend_->Draw(draw);
+  SetWebPhase("command processor");
+  return result;
 }
 
 bool WebGpuCommandProcessor::IssueCopy() {
@@ -130,6 +194,7 @@ bool WebGpuCommandProcessor::IssueCopy() {
 #if defined(__EMSCRIPTEN__)
   memory_->DeliverPhysicalWrites();
 #endif
+  SetWebPhase("resolve");
   ResolveSnapshot resolve;
   resolve.regs = register_file_;
   resolve.frame_index = frame_index_;
@@ -142,7 +207,9 @@ bool WebGpuCommandProcessor::IssueCopy() {
                                  false, false, resolve.info)) {
     return true;  // Dropped, as in the other backends.
   }
-  return backend_->Resolve(resolve);
+  bool result = backend_->Resolve(resolve);
+  SetWebPhase("command processor");
+  return result;
 }
 
 void WebGpuCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
@@ -204,15 +271,20 @@ void WebGpuCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
   kernel::xboxkrnl::VdQueryVideoMode(&video_mode);
   swap.display_width = std::max(uint32_t(1), uint32_t(video_mode.display_width));
   swap.display_height = std::max(uint32_t(1), uint32_t(video_mode.display_height));
+  SetWebPhase("swap");
   backend_->Swap(swap);
 #if defined(__EMSCRIPTEN__)
   // Draw the frame to the canvas and return to the event loop once, which is
   // when the browser shows it (and runs pending WebGPU callbacks).
   if (auto* presenter =
           static_cast<ui::webgpu::WebGpuPresenter*>(graphics_system_->presenter())) {
+    SetWebPhase("paint");
     presenter->PaintToCanvas();
   }
+  SetWebPhase("yield to the event loop");
   ::rex::thread::web::YieldToEventLoop();
+  SetWebPhase("command processor");
+  g_web_swaps.fetch_add(1, std::memory_order_relaxed);
 #endif
 }
 

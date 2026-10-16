@@ -307,6 +307,7 @@ set(TRIALSHD_WEB_SDK_AUDIO
     audio/xma_decoder.cpp
     audio/xma_register_file.cpp
     audio/nop/nop_audio_system.cpp
+    audio/web/web_audio_driver.cpp
 )
 set(TRIALSHD_WEB_SDK_INPUT
     input/input_system.cpp
@@ -336,6 +337,8 @@ set(TRIALSHD_WEB_SDK_UI
     ui/overlay/console_overlay.cpp
     ui/overlay/console_commands.cpp
     ui/overlay/settings_overlay.cpp
+    ui/sdl_virtual_key.cpp
+    ui/web/web_ui.cpp
     ui/web/window_web.cpp
     ui/web/windowed_app_context_web.cpp
     # The app shell (rexglue_configure_target compiles these into the game).
@@ -476,6 +479,8 @@ else()
     # The page: out/build/<preset>/web/trials_hd.html, served by tools/web/serve.py.
     list(APPEND _web_link_flags -sWASMFS -sENVIRONMENT=web,worker
          --shell-file ${_root}/web/shell.html)
+    configure_file(${_root}/web/audio.js ${CMAKE_BINARY_DIR}/web/audio.js COPYONLY)
+    configure_file(${_root}/web/audio_worklet.js ${CMAKE_BINARY_DIR}/web/audio_worklet.js COPYONLY)
     set_target_properties(trials_hd PROPERTIES
         SUFFIX ".html"
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/web

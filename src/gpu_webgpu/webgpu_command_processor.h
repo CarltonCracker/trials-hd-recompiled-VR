@@ -7,6 +7,10 @@
 
 #include <cstdint>
 #include <memory>
+#if defined(__EMSCRIPTEN__)
+#include <atomic>
+#include <thread>
+#endif
 
 #include <rex/graphics/command_processor.h>
 
@@ -38,8 +42,18 @@ class WebGpuCommandProcessor final : public CommandProcessor {
   bool IssueDraw(xenos::PrimitiveType prim_type, uint32_t index_count,
                  IndexBufferInfo* index_buffer_info, bool major_mode_explicit) override;
   bool IssueCopy() override;
+#if defined(__EMSCRIPTEN__)
+  void PrepareForWait() override;
+  void ReturnFromWait() override;
+#endif
 
  private:
+#if defined(__EMSCRIPTEN__)
+  // Web: logs where the GPU worker is when guest swaps stop (a hang there
+  // shows nothing else in the browser).
+  void StallWatchdog(std::stop_token stop);
+  std::jthread stall_watchdog_;
+#endif
   ui::webgpu::WebGpuProvider* provider_ = nullptr;
   std::unique_ptr<WebGpuBackend> backend_;
 

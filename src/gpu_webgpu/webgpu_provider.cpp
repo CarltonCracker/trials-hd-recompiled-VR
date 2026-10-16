@@ -108,6 +108,9 @@ std::unique_ptr<WebGpuProvider> WebGpuProvider::Create(bool with_presentation) {
 
 WebGpuProvider::~WebGpuProvider() {
   std::lock_guard lock(device_mutex_);
+#if defined(__EMSCRIPTEN__)
+  RunDeferredReleases();
+#endif
   queue_ = nullptr;
   if (device_) {
     device_.Destroy();
@@ -116,6 +119,18 @@ WebGpuProvider::~WebGpuProvider() {
   adapter_ = nullptr;
   instance_ = nullptr;
 }
+
+#if defined(__EMSCRIPTEN__)
+void WebGpuProvider::RunDeferredReleases() {
+  std::vector<std::unique_ptr<DeferredReleaseBase>> releases;
+  {
+    std::lock_guard lock(deferred_release_mutex_);
+    releases.swap(deferred_releases_);
+  }
+  std::lock_guard lock(device_mutex_);
+  releases.clear();
+}
+#endif
 
 bool WebGpuProvider::Initialize() {
   static constexpr auto kTimedWaitAny = wgpu::InstanceFeatureName::TimedWaitAny;

@@ -53,6 +53,95 @@ commit by CMake at configure time; regenerate with tools/export_sdk_patch.sh).
   override them in a static link; console logging; xxHash/RenderDoc/
   disruptorplus portability (all guarded; native code unchanged)
 
+diff --git a/include/rex/audio/web/web_audio_driver.h b/include/rex/audio/web/web_audio_driver.h
+new file mode 100644
+index 0000000..ca49f59
+--- /dev/null
++++ b/include/rex/audio/web/web_audio_driver.h
+@@ -0,0 +1,83 @@
++/**
++ * @file        audio/web/web_audio_driver.h
++ * @brief       Audio output of the web (Emscripten) build: a shared-memory ring
++ *              read by the page's AudioWorklet
++ *
++ * The drivers' frames (6-channel big-endian) are mixed to interleaved stereo
++ * and written into WebAudioRing, which lives in the wasm memory (a
++ * SharedArrayBuffer); the page's AudioWorklet (web/audio_worklet.js in Trials
++ * HD Recompiled) plays from it. The ring's fill paces the guest like the SDL
++ * device callback does natively: one client-semaphore release per frame
++ * mixed. While nothing plays the ring (no user gesture yet, a suspended
++ * AudioContext), frames are dropped at the playback rate instead so the
++ * game's audio threads keep their normal speed.
++ */
++
++#pragma once
++
++#include <rex/platform.h>
++
++#if !REX_PLATFORM_EMSCRIPTEN
++#error "rex/audio/web/web_audio_driver.h is for the web (Emscripten) build only"
++#endif
++
++#include <atomic>
++#include <cstddef>
++#include <cstdint>
++#include <deque>
++#include <mutex>
++#include <vector>
++
++#include <rex/audio/audio_driver.h>
++#include <rex/thread.h>
++
++namespace rex::audio::web {
++
++// Shared with web/audio_worklet.js; little-endian, offsets fixed.
++struct WebAudioRing {
++  static constexpr uint32_t kCapacityFrames = 8192;
++  static constexpr uint32_t kChannels = 2;
++
++  std::atomic<uint32_t> write_frame;  // 0: frames written in total (producer)
++  std::atomic<uint32_t> read_frame;   // 4: frames read in total (worklet)
++  uint32_t capacity_frames;           // 8
++  uint32_t sample_rate;               // 12
++  uint32_t channels;                  // 16
++  std::atomic<uint32_t> underruns;    // 20: worklet: quanta short of data while being fed
++  std::atomic<uint32_t> heartbeat;   // 24: worklet: +1 per render quantum while running
++  std::atomic<uint32_t> peak_milli;   // 28: worklet: max |sample| * 1000 played
++  float samples[kCapacityFrames * kChannels];  // 32: interleaved L R
++};
++static_assert(offsetof(WebAudioRing, samples) == 32);
++
++// The one ring (static storage, so inside the initial wasm memory).
++WebAudioRing& GetWebAudioRing();
++
++// One guest audio client. The game opens several (music, effects, ...);
++// natively the OS mixes their streams, here one mixer thread does: each
++// playback period it takes one queued frame from every client, sums them into
++// the ring and releases each of those clients' semaphores.
++class WebAudioDriver : public AudioDriver {
++ public:
++  WebAudioDriver(memory::Memory* memory, rex::thread::Semaphore* semaphore);
++  ~WebAudioDriver() override;
++
++  void SubmitFrame(uint32_t frame_ptr) override;
++
++  static constexpr uint32_t kFrameRate = 48000;
++  static constexpr uint32_t kGuestChannels = 6;
++  static constexpr uint32_t kChannelSamples = 256;
++  static constexpr uint32_t kFrameSamples = kGuestChannels * kChannelSamples;
++
++  // Mixer thread: adds this client's oldest queued frame (as stereo) to
++  // `mix` and releases its semaphore; false when nothing is queued.
++  bool MixFrame(float* mix, bool to_output);
++
++ private:
++  rex::thread::Semaphore* semaphore_;
++  std::mutex frames_mutex_;
++  std::deque<std::vector<float>> frames_queued_;
++  std::vector<std::vector<float>> frames_unused_;
++};
++
++}  // namespace rex::audio::web
 diff --git a/include/rex/chrono/chrono.h b/include/rex/chrono/chrono.h
 index d876846..cbe49e0 100644
 --- a/include/rex/chrono/chrono.h
@@ -832,7 +921,7 @@ index 0000000..4155460
 +
 +}  // namespace rex::ppc
 diff --git a/include/rex/rex_app.h b/include/rex/rex_app.h
-index 1f52480..a480b4e 100644
+index 1f52480..1910989 100644
 --- a/include/rex/rex_app.h
 +++ b/include/rex/rex_app.h
 @@ -257,6 +257,7 @@ class ReXApp : public ui::WindowedApp, public ui::WindowListener, public ui::Win
@@ -843,6 +932,19 @@ index 1f52480..a480b4e 100644
  
    /// Set a callback that provides guest frame stats to the debug overlay.
    void SetGuestFrameStats(ui::DebugOverlayDialog::FrameStatsProvider provider);
+@@ -268,6 +269,12 @@ class ReXApp : public ui::WindowedApp, public ui::WindowListener, public ui::Win
+   // independently of how the presenter/drawer were obtained. `presenter` may be
+   // null (detached mode).
+   void SetupOverlays(ui::Presenter* presenter, ui::ImmediateDrawer* drawer);
++#if REX_PLATFORM_EMSCRIPTEN
++  // Web: the renderer creates its presenter and an immediate drawer on the
++  // GPU worker after SetupPresentation; attaches the overlays to them.
++  static void OnWebPresenterReady(void* context, ui::Presenter* presenter,
++                                  std::unique_ptr<ui::ImmediateDrawer> drawer);
++#endif
+ 
+   // WindowedApp overrides
+   bool OnInitialize() override;
 diff --git a/include/rex/system/gpu_plugin.h b/include/rex/system/gpu_plugin.h
 index 453c210..b59ac7e 100644
 --- a/include/rex/system/gpu_plugin.h
@@ -1087,7 +1189,7 @@ index 294d706..77072bc 100644
  
  }  // namespace rex::ui
 diff --git a/include/rex/ui/presenter.h b/include/rex/ui/presenter.h
-index afb4a30..750e087 100644
+index afb4a30..484f961 100644
 --- a/include/rex/ui/presenter.h
 +++ b/include/rex/ui/presenter.h
 @@ -375,6 +375,15 @@ class Presenter {
@@ -1106,6 +1208,28 @@ index afb4a30..750e087 100644
    enum class PaintResult {
      kPresented,
      kPresentedSuboptimal,
+@@ -386,6 +395,21 @@ class Presenter {
+     kGpuLostResponsible,
+   };
+ 
++#if REX_PLATFORM_EMSCRIPTEN
++  // Web: paints with the UI drawers on the GPU worker, standing in for the
++  // UI thread's paint (the canvas belongs to the worker). The caller holds
++  // rex::ui::web::UIMutex(), which the UI thread holds while it changes the
++  // drawers or their state.
++  PaintResult PaintAndPresentWithUIWeb() {
++    is_in_ui_thread_paint_ = true;
++    PaintResult result = PaintAndPresentImpl(!ui_drawers_.empty());
++    is_in_ui_thread_paint_ = false;
++    // Paint requests have no meaning here: the worker paints every swap.
++    request_ui_paint_after_current_ui_thread_paint_ = false;
++    return result;
++  }
++#endif
++
+   enum class SurfacePaintConnectResult {
+     // Redrawing not necessary, nothing changed. Must not be returned for a new
+     // connection (when was previously disconnected from the surface).
 diff --git a/include/rex/ui/renderdoc_api.h b/include/rex/ui/renderdoc_api.h
 index 536f710..665b647 100644
 --- a/include/rex/ui/renderdoc_api.h
@@ -1148,12 +1272,113 @@ index 4edde2b..022c961 100644
      bool ext_KHR_portability_enumeration = false;              // #395
    };
  
+diff --git a/include/rex/ui/web.h b/include/rex/ui/web.h
+new file mode 100644
+index 0000000..e5478b1
+--- /dev/null
++++ b/include/rex/ui/web.h
+@@ -0,0 +1,95 @@
++/**
++ * @file        ui/web.h
++ * @brief       Page input, canvas size and UI-thread lock of the web (Emscripten) build
++ *
++ * The page (the app's input module) owns keyboard, pointer and canvas-size
++ * state; the WebWindow drains it on the UI thread and dispatches the usual
++ * window events (keys, text, mouse, focus, size) to its listeners: ImGui,
++ * keybinds and the keyboard input driver. The renderer's GPU worker reads the
++ * canvas size to resize the canvas it owns, and runs the UI drawers (ImGui)
++ * while holding UIMutex(), which the UI thread holds while it runs its work
++ * (docs/web-port/README.md 7.9.5-7.9.7 in Trials HD Recompiled).
++ */
++
++#pragma once
++
++#include <rex/platform.h>
++
++#if !REX_PLATFORM_EMSCRIPTEN
++#error "rex/ui/web.h is for the web (Emscripten) build only"
++#endif
++
++#include <cstddef>
++#include <cstdint>
++#include <memory>
++#include <mutex>
++
++namespace rex::ui {
++class ImmediateDrawer;
++class Presenter;
++}  // namespace rex::ui
++
++namespace rex::ui::web {
++
++// One page input event. Types and codes as written by the page:
++//   kKeyDown/kKeyUp: code = SDL scancode.
++//   kText:           code = Unicode code point (one per character).
++//   kPointerMove:    code = buttons held (bit 0 left, 1 right, 2 middle), x/y.
++//   kPointerDown/Up: code = SDL button (1 left, 2 middle, 3 right, 4 X1, 5 X2), x/y.
++//   kWheel:          x/y = DOM deltaX/deltaY in pixels (positive y = down).
++//   kFocus/kBlur:    no payload.
++// Positions are in canvas pixels (CSS pixels times devicePixelRatio, the same
++// space as CanvasState::width/height).
++enum EventType : uint32_t {
++  kKeyDown = 1,
++  kKeyUp = 2,
++  kPointerMove = 3,
++  kPointerDown = 4,
++  kPointerUp = 5,
++  kWheel = 6,
++  kText = 7,
++  kFocus = 8,
++  kBlur = 9,
++};
++struct InputEvent {
++  uint32_t type;
++  uint32_t code;
++  int32_t x;
++  int32_t y;
++};
++
++struct CanvasState {
++  // The canvas's displayed size in device pixels (0 when unknown).
++  uint32_t width = 0;
++  uint32_t height = 0;
++  float device_pixel_ratio = 1.0f;
++  bool visible = true;
++};
++
++struct InputSource {
++  // UI thread only: moves up to `max` queued events into `out` (oldest first)
++  // and returns how many.
++  size_t (*drain_events)(InputEvent* out, size_t max) = nullptr;
++  // Any thread: the current canvas state; false when not known yet.
++  bool (*get_canvas_state)(CanvasState& out) = nullptr;
++};
++
++// Set once by the app before the window opens (e.g. in OnPreSetup).
++void SetInputSource(const InputSource& source);
++const InputSource& GetInputSource();
++bool GetCanvasState(CanvasState& out);
++
++// Held by the UI thread while it runs its pending functions and dispatches
++// page events, and by the GPU worker while it runs the UI drawers. Lock order:
++// UIMutex() before any renderer lock.
++std::recursive_mutex& UIMutex();
++
++// The renderer calls this on the GPU worker once its presenter exists, with an
++// immediate drawer created there; the app (ReXApp) attaches its ImGui drawer
++// to them on the UI thread.
++using PresenterReadyHandler = void (*)(void* context, Presenter* presenter,
++                                       std::unique_ptr<ImmediateDrawer> drawer);
++void SetPresenterReadyHandler(PresenterReadyHandler handler, void* context);
++void NotifyPresenterReady(Presenter* presenter, std::unique_ptr<ImmediateDrawer> drawer);
++
++}  // namespace rex::ui::web
 diff --git a/include/rex/ui/window_web.h b/include/rex/ui/window_web.h
 new file mode 100644
-index 0000000..0d62ef4
+index 0000000..223ac9f
 --- /dev/null
 +++ b/include/rex/ui/window_web.h
-@@ -0,0 +1,36 @@
+@@ -0,0 +1,57 @@
 +/**
 + * @file        ui/window_web.h
 + * @brief       Window of the web (Emscripten) build
@@ -1172,6 +1397,9 @@ index 0000000..0d62ef4
 +#error "rex/ui/window_web.h is for the web (Emscripten) build only"
 +#endif
 +
++#include <array>
++#include <atomic>
++
 +#include <rex/ui/window.h>
 +
 +namespace rex::ui {
@@ -1182,11 +1410,29 @@ index 0000000..0d62ef4
 +            uint32_t desired_logical_width, uint32_t desired_logical_height);
 +  ~WebWindow() override;
 +
++  // UI thread: dispatches the page's queued input events and canvas size
++  // changes (rex/ui/web.h) to every open web window's listeners.
++  static void PumpPageEvents();
++
 + protected:
 +  bool OpenImpl() override;
 +  void RequestCloseImpl() override;
 +  std::unique_ptr<Surface> CreateSurfaceImpl(Surface::TypeFlags allowed_types) override;
 +  void RequestPaintImpl() override;
++  // The page's devicePixelRatio as DPI (96 per 1.0), so overlays keep their
++  // size on HiDPI screens and with browser zoom. Read by the GPU worker too.
++  uint32_t GetLatestDpiImpl() const override { return dpi_.load(std::memory_order_relaxed); }
++
++ private:
++  void PumpPageEventsImpl();
++  void DispatchPageKey(uint32_t scancode, bool down, WindowDestructionReceiver& receiver);
++  void ReleaseHeldKeys(WindowDestructionReceiver& receiver);
++
++  // SDL scancodes held down (for repeats, modifiers and releasing on blur).
++  std::array<bool, 512> keys_down_{};
++  int32_t mouse_x_ = 0;
++  int32_t mouse_y_ = 0;
++  std::atomic<uint32_t> dpi_{96};
 +};
 +
 +}  // namespace rex::ui
@@ -1344,6 +1590,243 @@ index 68274d2..9890fc7 100644
 +    }                                                                                    \
 +  } while (0)
 +#endif  // __EMSCRIPTEN__
+diff --git a/src/audio/web/web_audio_driver.cpp b/src/audio/web/web_audio_driver.cpp
+new file mode 100644
+index 0000000..216f775
+--- /dev/null
++++ b/src/audio/web/web_audio_driver.cpp
+@@ -0,0 +1,231 @@
++/**
++ * @file        audio/web/web_audio_driver.cpp
++ * @brief       Audio output of the web (Emscripten) build
++ */
++
++#include <rex/audio/web/web_audio_driver.h>
++
++#include <algorithm>
++#include <chrono>
++#include <condition_variable>
++#include <cstring>
++#include <thread>
++
++#include <emscripten/emscripten.h>
++
++#include <rex/audio/conversion.h>
++#include <rex/audio/downmix.h>
++#include <rex/audio/flags.h>
++#include <rex/cvar.h>
++#include <rex/logging.h>
++
++// Natively defined by the SDL driver, which the web build does not have.
++REXCVAR_DEFINE_BOOL(audio_mute, false, "Audio", "Mute audio output");
++
++namespace rex::audio::web {
++
++namespace {
++
++alignas(64) WebAudioRing web_audio_ring{};
++
++// Ring fill kept ahead of the worklet: about 43 ms at 48 kHz. With the game's
++// own queue (audio_maxqframes, 8 frames per client) that is about the native
++// SDL latency plus the browser's render quantum.
++constexpr uint32_t kTargetFillFrames = 2048;
++// The worklet counts as stopped when its heartbeat has not moved for this long.
++constexpr auto kConsumerTimeout = std::chrono::milliseconds(150);
++
++constexpr uint32_t kChannelSamples = WebAudioDriver::kChannelSamples;
++static_assert(WebAudioRing::kCapacityFrames % kChannelSamples == 0);
++
++// Mixes the clients into the ring on one thread, which runs while any
++// client exists.
++class Mixer {
++ public:
++  static Mixer& Get() {
++    static Mixer mixer;
++    return mixer;
++  }
++
++  void Add(WebAudioDriver* driver) {
++    std::lock_guard lock(mutex_);
++    drivers_.push_back(driver);
++    if (!thread_.joinable()) {
++      running_ = true;
++      thread_ = std::thread([this] { Run(); });
++    }
++  }
++
++  void Remove(WebAudioDriver* driver) {
++    std::thread thread;
++    {
++      std::lock_guard lock(mutex_);
++      drivers_.erase(std::remove(drivers_.begin(), drivers_.end(), driver), drivers_.end());
++      if (!drivers_.empty()) {
++        return;
++      }
++      running_ = false;
++      thread = std::move(thread_);
++    }
++    wake_.notify_all();
++    if (thread.joinable()) {
++      thread.join();
++    }
++  }
++
++ private:
++  // Mixes one frame of every client that has one queued; writes it to the
++  // ring (silence if no client had one) or drops it.
++  void MixFrame(bool to_ring) {
++    float mix[kChannelSamples * WebAudioRing::kChannels] = {};
++    {
++      std::lock_guard lock(mutex_);
++      for (WebAudioDriver* driver : drivers_) {
++        driver->MixFrame(mix, to_ring);
++      }
++    }
++    if (!to_ring) {
++      return;
++    }
++    WebAudioRing& ring = web_audio_ring;
++    const uint32_t write = ring.write_frame.load(std::memory_order_relaxed);
++    // The capacity is a multiple of the frame size, so a frame never wraps.
++    float* out = &ring.samples[(write % WebAudioRing::kCapacityFrames) * WebAudioRing::kChannels];
++    for (size_t i = 0; i < std::size(mix); ++i) {
++      out[i] = std::clamp(mix[i], -1.0f, 1.0f);
++    }
++    ring.write_frame.store(write + kChannelSamples, std::memory_order_release);
++  }
++
++  void Run() {
++    using clock = std::chrono::steady_clock;
++    constexpr auto kFramePeriod = std::chrono::microseconds(
++        kChannelSamples * 1'000'000 / WebAudioDriver::kFrameRate);
++
++    WebAudioRing& ring = web_audio_ring;
++    uint32_t last_heartbeat = ring.heartbeat.load(std::memory_order_relaxed);
++    clock::time_point last_heartbeat_change = clock::now() - kConsumerTimeout;
++    clock::time_point next_drop = clock::now();
++    bool playing = false;
++
++    for (;;) {
++      {
++        std::lock_guard lock(mutex_);
++        if (!running_) {
++          return;
++        }
++      }
++      const clock::time_point now = clock::now();
++      const uint32_t heartbeat = ring.heartbeat.load(std::memory_order_relaxed);
++      if (heartbeat != last_heartbeat) {
++        last_heartbeat = heartbeat;
++        last_heartbeat_change = now;
++      }
++      const bool consumer = now - last_heartbeat_change < kConsumerTimeout;
++      if (consumer != playing) {
++        playing = consumer;
++        if (playing) {
++          // Start from an empty ring: what was left is stale.
++          ring.write_frame.store(ring.read_frame.load(std::memory_order_acquire),
++                                 std::memory_order_release);
++        }
++        next_drop = now;
++        REXAPU_INFO("web audio: {}", playing ? "playing through the page's AudioWorklet"
++                                             : "not playing (no running AudioContext); "
++                                               "dropping frames at the playback rate");
++      }
++
++      if (playing) {
++        const uint32_t fill = ring.write_frame.load(std::memory_order_relaxed) -
++                              ring.read_frame.load(std::memory_order_acquire);
++        if (fill + kChannelSamples <= kTargetFillFrames) {
++          MixFrame(true);
++          continue;
++        }
++        // The worklet reads 128 frames (2.7 ms) per quantum.
++        std::unique_lock lock(mutex_);
++        wake_.wait_for(lock, std::chrono::milliseconds(1), [this] { return !running_; });
++        continue;
++      }
++      if (now >= next_drop) {
++        MixFrame(false);
++        next_drop = (now - next_drop > kFramePeriod * 4) ? now + kFramePeriod
++                                                         : next_drop + kFramePeriod;
++        continue;
++      }
++      std::unique_lock lock(mutex_);
++      wake_.wait_until(lock, next_drop, [this] { return !running_; });
++    }
++  }
++
++  std::mutex mutex_;
++  std::condition_variable wake_;
++  std::vector<WebAudioDriver*> drivers_;
++  bool running_ = false;
++  std::thread thread_;
++};
++
++}  // namespace
++
++WebAudioRing& GetWebAudioRing() {
++  return web_audio_ring;
++}
++
++// For the page (web/audio.js): where the ring is in the wasm memory.
++extern "C" EMSCRIPTEN_KEEPALIVE uintptr_t rex_web_audio_ring() {
++  WebAudioRing& ring = GetWebAudioRing();
++  ring.capacity_frames = WebAudioRing::kCapacityFrames;
++  ring.sample_rate = WebAudioDriver::kFrameRate;
++  ring.channels = WebAudioRing::kChannels;
++  return reinterpret_cast<uintptr_t>(&ring);
++}
++
++WebAudioDriver::WebAudioDriver(memory::Memory* memory, rex::thread::Semaphore* semaphore)
++    : AudioDriver(memory), semaphore_(semaphore) {
++  rex_web_audio_ring();
++  Mixer::Get().Add(this);
++}
++
++WebAudioDriver::~WebAudioDriver() {
++  Mixer::Get().Remove(this);
++}
++
++void WebAudioDriver::SubmitFrame(uint32_t frame_ptr) {
++  const float* input = memory_->TranslateVirtual<float*>(frame_ptr);
++  std::lock_guard lock(frames_mutex_);
++  std::vector<float> frame;
++  if (!frames_unused_.empty()) {
++    frame = std::move(frames_unused_.back());
++    frames_unused_.pop_back();
++  }
++  frame.assign(input, input + kFrameSamples);
++  frames_queued_.push_back(std::move(frame));
++}
++
++bool WebAudioDriver::MixFrame(float* mix, bool to_output) {
++  std::vector<float> frame;
++  {
++    std::lock_guard lock(frames_mutex_);
++    if (frames_queued_.empty()) {
++      return false;
++    }
++    frame = std::move(frames_queued_.front());
++    frames_queued_.pop_front();
++  }
++  if (to_output && !REXCVAR_GET(audio_mute)) {
++    float stereo[kChannelSamples * WebAudioRing::kChannels];
++    conversion::sequential_6_BE_to_interleaved_2_LE(stereo, frame.data(), kChannelSamples,
++                                                    GetStereoFold(), GetOutputGain());
++    for (size_t i = 0; i < std::size(stereo); ++i) {
++      mix[i] += stereo[i];
++    }
++  }
++  {
++    std::lock_guard lock(frames_mutex_);
++    frames_unused_.push_back(std::move(frame));
++  }
++  semaphore_->Release(1, nullptr);
++  return true;
++}
++
++}  // namespace rex::audio::web
 diff --git a/src/codegen/builders/floating_point.cpp b/src/codegen/builders/floating_point.cpp
 index 1702241..b1921b8 100644
 --- a/src/codegen/builders/floating_point.cpp
@@ -16341,7 +16824,7 @@ index e1a5287..356ace6 100644
    std::unique_ptr<RenderDocAPI> renderdoc_api(new RenderDocAPI());
  
 diff --git a/src/ui/rex_app.cpp b/src/ui/rex_app.cpp
-index b94fe9e..b29dcd8 100644
+index b94fe9e..fd751c4 100644
 --- a/src/ui/rex_app.cpp
 +++ b/src/ui/rex_app.cpp
 @@ -26,6 +26,9 @@
@@ -16354,7 +16837,17 @@ index b94fe9e..b29dcd8 100644
  #include <rex/audio/sdl/sdl_audio_system.h>
  #include <rex/input/input_system.h>
  #include <rex/kernel/init.h>
-@@ -49,7 +52,7 @@
+@@ -37,6 +40,9 @@
+ #include <rex/system/xthread.h>
+ #include <rex/ui/graphics_provider.h>
+ #include <rex/ui/keybinds.h>
++#if REX_PLATFORM_EMSCRIPTEN
++#include <rex/ui/web.h>
++#endif
+ #include <rex/version.h>
+ 
+ #include <fmt/format.h>
+@@ -49,7 +55,7 @@
  REXCVAR_DEFINE_STRING(gpu_plugin, "", "GPU",
                        "GPU emulation plugin to load at startup (e.g. 'xenos'); empty disables "
                        "GPU emulation")
@@ -16363,7 +16856,7 @@ index b94fe9e..b29dcd8 100644
  
  namespace rex {
  
-@@ -111,13 +114,13 @@ bool ReXApp::SetupEnvironment() {
+@@ -111,13 +117,13 @@ bool ReXApp::SetupEnvironment() {
      game_dir = game_data_cvar;
    }
  
@@ -16379,7 +16872,7 @@ index b94fe9e..b29dcd8 100644
    }
  
    // Update data: cvar override, or empty (opt-in)
-@@ -307,7 +310,12 @@ bool ReXApp::ConstructRuntime(const PathConfig& paths) {
+@@ -307,7 +313,12 @@ bool ReXApp::ConstructRuntime(const PathConfig& paths) {
  
  bool ReXApp::SetupPresentation() {
    config_.gpu_plugin = REXCVAR_GET(gpu_plugin);
@@ -16392,7 +16885,48 @@ index b94fe9e..b29dcd8 100644
    config_.input_factory = REX_INPUT_BACKEND(rex::input::CreateDefaultInputSystem);
    config_.kernel_init = rex::kernel::InitializeKernel;
  
-@@ -421,6 +429,10 @@ void ReXApp::SetupOverlays(rex::ui::Presenter* presenter, rex::ui::ImmediateDraw
+@@ -370,6 +381,15 @@ bool ReXApp::SetupPresentation() {
+       }
+     }
+     window_->SetPresenter(presenter);
++#if REX_PLATFORM_EMSCRIPTEN
++  } else if (graphics_system) {
++    // Web: the presenter and its device belong to the GPU worker, which
++    // creates them when the command processor starts and then runs the UI
++    // drawers itself (docs/web-port/README.md 7.9.7 in Trials HD Recompiled).
++    // The overlays exist now so binds and dialogs work; they attach then.
++    SetupOverlays(/*presenter=*/nullptr, /*drawer=*/nullptr);
++    rex::ui::web::SetPresenterReadyHandler(&ReXApp::OnWebPresenterReady, this);
++#endif
+   } else if (!graphics_system) {
+     // Detached mode: the app brings its own renderer and drives its own paint
+     // loop. ReXApp owns the returned drawer via immediate_drawer_.
+@@ -384,6 +404,24 @@ bool ReXApp::SetupPresentation() {
+   return true;
+ }
+ 
++#if REX_PLATFORM_EMSCRIPTEN
++void ReXApp::OnWebPresenterReady(void* context, ui::Presenter* presenter,
++                                 std::unique_ptr<ui::ImmediateDrawer> drawer) {
++  auto* app = static_cast<ReXApp*>(context);
++  auto drawer_holder = std::make_shared<std::unique_ptr<ui::ImmediateDrawer>>(std::move(drawer));
++  app->app_context().CallInUIThread([app, presenter, drawer_holder] {
++    if (!app->imgui_drawer_ || app->immediate_drawer_) {
++      return;
++    }
++    app->immediate_drawer_ = std::move(*drawer_holder);
++    // The drawer first: with no presenter yet, the font atlas is uploaded by
++    // the first Draw, on the GPU worker, not here.
++    app->imgui_drawer_->SetImmediateDrawer(app->immediate_drawer_.get());
++    app->imgui_drawer_->SetPresenter(presenter);
++  });
++}
++#endif
++
+ void ReXApp::SetupOverlays(rex::ui::Presenter* presenter, rex::ui::ImmediateDrawer* drawer) {
+   imgui_drawer_ = std::make_unique<rex::ui::ImGuiDrawer>(
+       window_.get(), 64, [this](ImFontAtlas* atlas) { OnConfigureFonts(atlas); },
+@@ -421,6 +459,10 @@ void ReXApp::SetupOverlays(rex::ui::Presenter* presenter, rex::ui::ImmediateDraw
        achievements_overlay_.reset();
      } else {
        achievements_overlay_ = CreateAchievementsOverlay();
@@ -16403,6 +16937,16 @@ index b94fe9e..b29dcd8 100644
      }
    });
  
+@@ -575,6 +617,9 @@ void ReXApp::OnDestroy() {
+   settings_overlay_.reset();
+   console_overlay_.reset();
+   debug_overlay_.reset();
++#if REX_PLATFORM_EMSCRIPTEN
++  rex::ui::web::SetPresenterReadyHandler(nullptr, nullptr);
++#endif
+   if (imgui_drawer_) {
+     imgui_drawer_->SetPresenterAndImmediateDrawer(nullptr, nullptr);
+     imgui_drawer_.reset();
 diff --git a/src/ui/vulkan/vulkan_instance.cpp b/src/ui/vulkan/vulkan_instance.cpp
 index 914b311..69e65ba 100644
 --- a/src/ui/vulkan/vulkan_instance.cpp
@@ -16459,12 +17003,93 @@ index 23645ef..c8c2328 100644
      switch (surface_type) {
  #if REX_PLATFORM_ANDROID
        case Surface::kTypeIndex_AndroidNativeWindow: {
+diff --git a/src/ui/web/web_ui.cpp b/src/ui/web/web_ui.cpp
+new file mode 100644
+index 0000000..ea51e07
+--- /dev/null
++++ b/src/ui/web/web_ui.cpp
+@@ -0,0 +1,75 @@
++/**
++ * @file        ui/web/web_ui.cpp
++ * @brief       Page input source, canvas state and UI-thread lock of the web build
++ */
++
++#include <rex/ui/web.h>
++
++#include <rex/ui/immediate_drawer.h>
++
++namespace rex::ui::web {
++
++namespace {
++
++InputSource input_source;
++
++std::mutex presenter_ready_mutex;
++PresenterReadyHandler presenter_ready_handler = nullptr;
++void* presenter_ready_context = nullptr;
++// A presenter that became ready before the app registered its handler.
++Presenter* pending_presenter = nullptr;
++std::unique_ptr<ImmediateDrawer> pending_drawer;
++
++}  // namespace
++
++void SetInputSource(const InputSource& source) {
++  input_source = source;
++}
++
++const InputSource& GetInputSource() {
++  return input_source;
++}
++
++bool GetCanvasState(CanvasState& out) {
++  return input_source.get_canvas_state && input_source.get_canvas_state(out);
++}
++
++std::recursive_mutex& UIMutex() {
++  static std::recursive_mutex mutex;
++  return mutex;
++}
++
++void SetPresenterReadyHandler(PresenterReadyHandler handler, void* context) {
++  Presenter* presenter;
++  std::unique_ptr<ImmediateDrawer> drawer;
++  {
++    std::lock_guard lock(presenter_ready_mutex);
++    presenter_ready_handler = handler;
++    presenter_ready_context = context;
++    if (!handler || !pending_presenter) {
++      return;
++    }
++    presenter = pending_presenter;
++    drawer = std::move(pending_drawer);
++    pending_presenter = nullptr;
++  }
++  handler(context, presenter, std::move(drawer));
++}
++
++void NotifyPresenterReady(Presenter* presenter, std::unique_ptr<ImmediateDrawer> drawer) {
++  PresenterReadyHandler handler;
++  void* context;
++  {
++    std::lock_guard lock(presenter_ready_mutex);
++    handler = presenter_ready_handler;
++    context = presenter_ready_context;
++    if (!handler) {
++      pending_presenter = presenter;
++      pending_drawer = std::move(drawer);
++      return;
++    }
++  }
++  handler(context, presenter, std::move(drawer));
++}
++
++}  // namespace rex::ui::web
 diff --git a/src/ui/web/window_web.cpp b/src/ui/web/window_web.cpp
 new file mode 100644
-index 0000000..8cbabd4
+index 0000000..b7a5fd4
 --- /dev/null
 +++ b/src/ui/web/window_web.cpp
-@@ -0,0 +1,55 @@
+@@ -0,0 +1,250 @@
 +/**
 + * @file        ui/web/window_web.cpp
 + * @brief       Window of the web (Emscripten) build
@@ -16472,9 +17097,48 @@ index 0000000..8cbabd4
 +
 +#include <rex/ui/window_web.h>
 +
++#include <algorithm>
++#include <cmath>
++#include <vector>
++
++#include <SDL3/SDL_scancode.h>
++
++#include <rex/ui/sdl_virtual_key.h>
 +#include <rex/ui/surface.h>
++#include <rex/ui/web.h>
 +
 +namespace rex::ui {
++
++namespace {
++
++// Open web windows (UI thread only).
++std::vector<WebWindow*> web_windows;
++
++uint32_t DpiFromPixelRatio(float device_pixel_ratio) {
++  if (!(device_pixel_ratio > 0.0f)) {
++    return 96;
++  }
++  return uint32_t(std::clamp(std::lround(96.0f * device_pixel_ratio), 48l, 768l));
++}
++
++MouseEvent::Button TranslatePageMouseButton(uint32_t button) {
++  switch (button) {
++    case 1:
++      return MouseEvent::Button::kLeft;
++    case 2:
++      return MouseEvent::Button::kMiddle;
++    case 3:
++      return MouseEvent::Button::kRight;
++    case 4:
++      return MouseEvent::Button::kX1;
++    case 5:
++      return MouseEvent::Button::kX2;
++    default:
++      return MouseEvent::Button::kNone;
++  }
++}
++
++}  // namespace
 +
 +std::unique_ptr<Window> Window::Create(WindowedAppContext& app_context,
 +                                       const std::string_view title, uint32_t desired_logical_width,
@@ -16485,17 +17149,173 @@ index 0000000..8cbabd4
 +
 +WebWindow::WebWindow(WindowedAppContext& app_context, const std::string_view title,
 +                     uint32_t desired_logical_width, uint32_t desired_logical_height)
-+    : Window(app_context, title, desired_logical_width, desired_logical_height) {}
++    : Window(app_context, title, desired_logical_width, desired_logical_height) {
++  web_windows.push_back(this);
++}
 +
 +WebWindow::~WebWindow() {
++  web_windows.erase(std::remove(web_windows.begin(), web_windows.end(), this), web_windows.end());
 +  EnterDestructor();
 +}
 +
++void WebWindow::PumpPageEvents() {
++  // A listener may close a window; iterate over a copy.
++  std::vector<WebWindow*> windows = web_windows;
++  for (WebWindow* window : windows) {
++    if (std::find(web_windows.begin(), web_windows.end(), window) != web_windows.end()) {
++      window->PumpPageEventsImpl();
++    }
++  }
++}
++
++void WebWindow::PumpPageEventsImpl() {
++  if (phase() != Phase::kOpen) {
++    return;
++  }
++  WindowDestructionReceiver receiver(this);
++
++  web::CanvasState canvas;
++  if (web::GetCanvasState(canvas) && canvas.width && canvas.height) {
++    uint32_t dpi = DpiFromPixelRatio(canvas.device_pixel_ratio);
++    if (dpi != dpi_.load(std::memory_order_relaxed)) {
++      dpi_.store(dpi, std::memory_order_relaxed);
++      UISetupEvent e(this);
++      OnDpiChanged(e, receiver);
++      if (receiver.IsWindowDestroyed()) {
++        return;
++      }
++    }
++    if (canvas.width != GetActualPhysicalWidth() || canvas.height != GetActualPhysicalHeight()) {
++      OnActualSizeUpdate(canvas.width, canvas.height, receiver);
++      if (receiver.IsWindowDestroyed()) {
++        return;
++      }
++    }
++  }
++
++  const web::InputSource& source = web::GetInputSource();
++  if (!source.drain_events) {
++    return;
++  }
++  web::InputEvent events[64];
++  for (;;) {
++    size_t count = source.drain_events(events, std::size(events));
++    for (size_t i = 0; i < count; ++i) {
++      const web::InputEvent& event = events[i];
++      switch (event.type) {
++        case web::kKeyDown:
++        case web::kKeyUp:
++          DispatchPageKey(event.code, event.type == web::kKeyDown, receiver);
++          break;
++        case web::kText: {
++          KeyEvent e(this, VirtualKey(event.code), 1, false, false, false, false, false);
++          OnKeyChar(e, receiver);
++          break;
++        }
++        case web::kPointerMove: {
++          MouseEvent e(this, MouseEvent::Button::kNone, event.x, event.y, 0, 0,
++                       float(event.x - mouse_x_), float(event.y - mouse_y_));
++          mouse_x_ = event.x;
++          mouse_y_ = event.y;
++          OnMouseMove(e, receiver);
++          break;
++        }
++        case web::kPointerDown:
++        case web::kPointerUp: {
++          mouse_x_ = event.x;
++          mouse_y_ = event.y;
++          MouseEvent e(this, TranslatePageMouseButton(event.code), event.x, event.y);
++          if (event.type == web::kPointerDown) {
++            OnMouseDown(e, receiver);
++          } else {
++            OnMouseUp(e, receiver);
++          }
++          break;
++        }
++        case web::kWheel: {
++          // DOM deltas are pixels, about 100 per notch, positive y downwards;
++          // listeners expect 120 per detent, positive y upwards (as SDL).
++          MouseEvent e(this, MouseEvent::Button::kNone, mouse_x_, mouse_y_,
++                       int32_t(event.x * int32_t(MouseEvent::kScrollPerDetent) / 100),
++                       int32_t(-event.y * int32_t(MouseEvent::kScrollPerDetent) / 100));
++          OnMouseWheel(e, receiver);
++          break;
++        }
++        case web::kFocus:
++          OnFocusUpdate(true, receiver);
++          break;
++        case web::kBlur:
++          // Keys released while the page had no focus never arrive.
++          ReleaseHeldKeys(receiver);
++          if (!receiver.IsWindowDestroyed()) {
++            OnFocusUpdate(false, receiver);
++          }
++          break;
++        default:
++          break;
++      }
++      if (receiver.IsWindowDestroyed()) {
++        return;
++      }
++    }
++    if (count < std::size(events)) {
++      return;
++    }
++  }
++}
++
++void WebWindow::DispatchPageKey(uint32_t scancode, bool down,
++                                WindowDestructionReceiver& receiver) {
++  if (scancode == 0 || scancode >= keys_down_.size()) {
++    return;
++  }
++  bool was_down = keys_down_[scancode];
++  keys_down_[scancode] = down;
++  if (!down && !was_down) {
++    return;
++  }
++  VirtualKey virtual_key = TranslateSDLScancode(SDL_Scancode(scancode));
++  if (virtual_key == VirtualKey::kNone) {
++    return;
++  }
++  auto held = [this](SDL_Scancode left, SDL_Scancode right) {
++    return keys_down_[left] || keys_down_[right];
++  };
++  KeyEvent e(this, virtual_key, /*repeat_count=*/1, /*prev_state=*/was_down,
++             held(SDL_SCANCODE_LSHIFT, SDL_SCANCODE_RSHIFT),
++             held(SDL_SCANCODE_LCTRL, SDL_SCANCODE_RCTRL),
++             held(SDL_SCANCODE_LALT, SDL_SCANCODE_RALT),
++             held(SDL_SCANCODE_LGUI, SDL_SCANCODE_RGUI));
++  if (down) {
++    OnKeyDown(e, receiver);
++  } else {
++    OnKeyUp(e, receiver);
++  }
++}
++
++void WebWindow::ReleaseHeldKeys(WindowDestructionReceiver& receiver) {
++  for (uint32_t scancode = 0; scancode < keys_down_.size(); ++scancode) {
++    if (keys_down_[scancode]) {
++      DispatchPageKey(scancode, false, receiver);
++      if (receiver.IsWindowDestroyed()) {
++        return;
++      }
++    }
++  }
++}
++
 +bool WebWindow::OpenImpl() {
-+  // Until the page reports the canvas (W-L08), assume the desired size.
++  // The page's canvas size when known (it arrives later otherwise, through
++  // PumpPageEvents), else the desired size.
 +  WindowDestructionReceiver destruction_receiver(this);
-+  OnActualSizeUpdate(SizeToPhysical(GetDesiredLogicalWidth()),
-+                     SizeToPhysical(GetDesiredLogicalHeight()), destruction_receiver);
++  web::CanvasState canvas;
++  if (web::GetCanvasState(canvas) && canvas.width && canvas.height) {
++    dpi_.store(DpiFromPixelRatio(canvas.device_pixel_ratio), std::memory_order_relaxed);
++    OnActualSizeUpdate(canvas.width, canvas.height, destruction_receiver);
++  } else {
++    OnActualSizeUpdate(SizeToPhysical(GetDesiredLogicalWidth()),
++                       SizeToPhysical(GetDesiredLogicalHeight()), destruction_receiver);
++  }
 +  if (destruction_receiver.IsWindowDestroyed()) {
 +    return true;
 +  }
@@ -16522,10 +17342,10 @@ index 0000000..8cbabd4
 +}  // namespace rex::ui
 diff --git a/src/ui/web/windowed_app_context_web.cpp b/src/ui/web/windowed_app_context_web.cpp
 new file mode 100644
-index 0000000..184c11b
+index 0000000..e825980
 --- /dev/null
 +++ b/src/ui/web/windowed_app_context_web.cpp
-@@ -0,0 +1,41 @@
+@@ -0,0 +1,53 @@
 +/**
 + * @file        ui/web/windowed_app_context_web.cpp
 + * @brief       UI loop of the web (Emscripten) build
@@ -16533,7 +17353,11 @@ index 0000000..184c11b
 +
 +#include <rex/ui/windowed_app_context_web.h>
 +
++#include <chrono>
 +#include <cstdlib>
++
++#include <rex/ui/web.h>
++#include <rex/ui/window_web.h>
 +
 +namespace rex::ui {
 +
@@ -16555,13 +17379,21 @@ index 0000000..184c11b
 +}
 +
 +int WebWindowedAppContext::RunMainMessageLoop() {
++  // The page's input arrives in shared memory without a wake-up, so poll it
++  // every few milliseconds (rex/ui/web.h); queued functions wake at once.
++  constexpr auto kPagePollInterval = std::chrono::milliseconds(4);
 +  while (!HasQuitFromUIThread()) {
 +    {
 +      std::unique_lock<std::mutex> lock(wake_mutex_);
-+      wake_.wait(lock, [this] { return wake_pending_; });
++      wake_.wait_for(lock, kPagePollInterval, [this] { return wake_pending_; });
 +      wake_pending_ = false;
 +    }
++    // The GPU worker runs the UI drawers (ImGui) under the same lock.
++    std::lock_guard ui_lock(web::UIMutex());
 +    ExecutePendingFunctionsFromUIThread();
++    if (!HasQuitFromUIThread()) {
++      WebWindow::PumpPageEvents();
++    }
 +  }
 +  return EXIT_SUCCESS;
 +}

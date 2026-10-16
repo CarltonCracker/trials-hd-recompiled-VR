@@ -20,7 +20,7 @@
 namespace trials_hd {
 
 #if defined(__EMSCRIPTEN__)
-// Web: no SDL audio. Silent output until the AudioWorklet driver (W-L12).
+// Web: no SDL audio; the driver writes to the page's AudioWorklet (W-L12).
 class FallbackAudioSystem : public rex::audio::AudioSystem {
  public:
   explicit FallbackAudioSystem(rex::runtime::FunctionDispatcher* function_dispatcher)

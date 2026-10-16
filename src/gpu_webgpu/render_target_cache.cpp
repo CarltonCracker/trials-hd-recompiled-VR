@@ -12,6 +12,7 @@
 #include "format_tables.h"
 #include "frame_recorder.h"
 #include "gpu_profiler.h"
+#include "web_phase.h"
 #include "webgpu_provider.h"
 #include "wgsl/transfer.wgsl.h"
 #include "wgsl/wgsl_prelude.wgsl.h"
@@ -125,6 +126,7 @@ RenderTarget* RenderTargetCache::GetOrCreate(RenderTargetKey key) {
   if (target->sample_count == 1) {
     desc.usage |= wgpu::TextureUsage::CopySrc | wgpu::TextureUsage::CopyDst;
   }
+  SetWebPhase("draw: render targets: create texture");
   target->texture = provider_.device().CreateTexture(&desc);
   target->view = target->texture.CreateView();
   if (key.is_depth) {
@@ -136,6 +138,7 @@ RenderTarget* RenderTargetCache::GetOrCreate(RenderTargetKey key) {
       target->stencil_only_view = target->texture.CreateView(&depth_view);
     }
   }
+  SetWebPhase("draw: render targets");
   REXGPU_DEBUG("WebGPU: created {} ({}x{})", label, target->width, target->height);
   RenderTarget* result = target.get();
   targets_.emplace(key.value, std::move(target));
@@ -349,6 +352,7 @@ void RenderTargetCache::Transfer(RenderTarget* source, RenderTarget* dest, uint3
            xenos::IsColorRenderTargetFormat64bpp(xenos::ColorRenderTargetFormat(target->key.format));
   };
   // shortcut: 64bpp targets (unused by Trials) are not transferred.
+  SetWebPhase("draw: render targets: transfer setup");
   if (is_64bpp(source) || is_64bpp(dest) || !InitializeTransfer()) {
     return;
   }
@@ -385,6 +389,7 @@ void RenderTargetCache::Transfer(RenderTarget* source, RenderTarget* dest, uint3
   if (constants.dest.row_first >= constants.dest.row_end) {
     return;
   }
+  SetWebPhase("draw: render targets: transfer");
   frame_recorder_.EndRenderPass();
 
   uint32_t source_type = (source->key.is_depth ? kDepth : kColor) + (source->sample_count > 1);
@@ -453,6 +458,7 @@ void RenderTargetCache::Transfer(RenderTarget* source, RenderTarget* dest, uint3
     return transfer_pipelines_.emplace(key, device.CreateRenderPipeline(&desc)).first->second;
   };
 
+  SetWebPhase("draw: render targets: transfer bind group");
   if (!source->transfer_source_group) {
     std::array<wgpu::BindGroupEntry, 3> entries;
     entries[0].binding = 0;
@@ -470,7 +476,9 @@ void RenderTargetCache::Transfer(RenderTarget* source, RenderTarget* dest, uint3
     group_desc.entries = entries.data();
     source->transfer_source_group = device.CreateBindGroup(&group_desc);
   }
+  SetWebPhase("draw: render targets: transfer uniforms");
   uint32_t constants_offset = frame_recorder_.UploadUniforms(&constants, sizeof(constants));
+  SetWebPhase("draw: render targets: transfer pass");
 
   wgpu::RenderPassColorAttachment color_attachment;
   wgpu::RenderPassDepthStencilAttachment depth_attachment;
@@ -501,12 +509,15 @@ void RenderTargetCache::Transfer(RenderTarget* source, RenderTarget* dest, uint3
     pass_desc.timestampWrites = &timestamp_writes;
   }
   wgpu::RenderPassEncoder pass = frame_recorder_.encoder().BeginRenderPass(&pass_desc);
+  SetWebPhase("draw: render targets: transfer pipeline");
   pass.SetPipeline(get_pipeline(8));
+  SetWebPhase("draw: render targets: transfer draw");
   pass.SetBindGroup(0, source->transfer_source_group, 1, &constants_offset);
   pass.SetScissorRect(0, constants.dest.row_first, constants.dest.width,
                       constants.dest.row_end - constants.dest.row_first);
   pass.Draw(3);
   // Remember the copy (dropping origins made stale by later writes to dest).
+  SetWebPhase("draw: render targets: transfer bookkeeping");
   std::erase_if(dest->copied_from, [&](const RenderTarget::CopyOrigin& origin) {
     return origin.version != dest->version || origin.source == source;
   });
@@ -520,6 +531,7 @@ void RenderTargetCache::Transfer(RenderTarget* source, RenderTarget* dest, uint3
     }
   }
   pass.End();
+  SetWebPhase("draw: render targets");
 }
 
 }  // namespace rex::graphics::webgpu

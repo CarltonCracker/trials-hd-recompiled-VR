@@ -13,6 +13,11 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
+
+#if defined(__EMSCRIPTEN__)
+#include <pthread.h>
+#endif
 
 #include <webgpu/webgpu_cpp.h>
 
@@ -53,7 +58,35 @@ class WebGpuProvider final : public GraphicsProvider {
 
   static std::string ToString(wgpu::StringView view);
 
+#if defined(__EMSCRIPTEN__)
+  // Web: WebGPU objects belong to the GPU worker that created them (7.9.5 of
+  // docs/web-port). Objects dropped on another thread (UI textures freed by
+  // the UI thread) are handed over and released by the worker.
+  bool IsOnGpuWorker() const { return pthread_equal(pthread_self(), gpu_worker_) != 0; }
+  template <typename T>
+  void ReleaseOnGpuWorker(T&& object) {
+    std::lock_guard lock(deferred_release_mutex_);
+    deferred_releases_.push_back(std::make_unique<DeferredRelease<T>>(std::move(object)));
+  }
+  // On the GPU worker.
+  void RunDeferredReleases();
+#endif
+
  private:
+#if defined(__EMSCRIPTEN__)
+  struct DeferredReleaseBase {
+    virtual ~DeferredReleaseBase() = default;
+  };
+  template <typename T>
+  struct DeferredRelease final : DeferredReleaseBase {
+    explicit DeferredRelease(T&& object) : object(std::move(object)) {}
+    T object;
+  };
+  pthread_t gpu_worker_ = pthread_self();
+  std::mutex deferred_release_mutex_;
+  std::vector<std::unique_ptr<DeferredReleaseBase>> deferred_releases_;
+#endif
+
   explicit WebGpuProvider(bool with_presentation) : with_presentation_(with_presentation) {}
   bool Initialize();
   bool SelectAdapter();

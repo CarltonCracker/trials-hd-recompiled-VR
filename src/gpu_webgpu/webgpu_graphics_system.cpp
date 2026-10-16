@@ -8,6 +8,8 @@
 #if defined(__EMSCRIPTEN__)
 #include <rex/logging.h>
 #include <rex/thread/web.h>
+#include <rex/ui/immediate_drawer.h>
+#include <rex/ui/web.h>
 
 #include "webgpu_presenter.h"
 #endif
@@ -58,6 +60,10 @@ bool WebGpuGraphicsSystem::InitializeOnGpuWorker() {
     return false;
   }
   provider_ = std::move(provider);
+  // The app's overlays (ImGui) draw through an immediate drawer created here,
+  // like every WebGPU object; this worker runs them in PaintToCanvas.
+  ::rex::ui::web::NotifyPresenterReady(web_presenter_.get(),
+                                       provider_->CreateImmediateDrawer());
   return true;
 }
 

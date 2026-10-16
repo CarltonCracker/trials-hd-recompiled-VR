@@ -12,6 +12,7 @@
 #include <rex/ui/surface_mac.h>
 #elif defined(__EMSCRIPTEN__)
 #include <emscripten/html5.h>
+#include <rex/ui/web.h>
 #else
 #include <rex/ui/surface_gnulinux.h>
 #endif
@@ -274,6 +275,20 @@ WebGpuPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(
 
 #if defined(__EMSCRIPTEN__)
 bool WebGpuPresenter::PaintToCanvas() {
+  // The UI drawers (ImGui) run below, as the UI thread's paint would; the UI
+  // thread holds this lock while it touches them. Taken before any renderer
+  // lock.
+  std::lock_guard ui_lock(::rex::ui::web::UIMutex());
+  provider_.RunDeferredReleases();
+  // The canvas belongs to this worker, so only this worker can resize it:
+  // follow the page's displayed size in device pixels.
+  ::rex::ui::web::CanvasState canvas;
+  if (::rex::ui::web::GetCanvasState(canvas) && canvas.width && canvas.height &&
+      (canvas.width != surface_config_.width || canvas.height != surface_config_.height)) {
+    uint32_t max_size = provider_.limits().maxTextureDimension2D;
+    emscripten_set_canvas_element_size(kCanvasSelector, int(std::min(canvas.width, max_size)),
+                                       int(std::min(canvas.height, max_size)));
+  }
   int width = 0;
   int height = 0;
   if (emscripten_get_canvas_element_size(kCanvasSelector, &width, &height) != EMSCRIPTEN_RESULT_SUCCESS ||
@@ -323,7 +338,7 @@ bool WebGpuPresenter::PaintToCanvas() {
       REXLOG_INFO("WebGpuPresenter: canvas {}x{}, format {}", width, height, uint32_t(format));
     }
   }
-  PaintResult result = PaintAndPresentImpl(false);
+  PaintResult result = PaintAndPresentWithUIWeb();
   return result == PaintResult::kPresented || result == PaintResult::kPresentedSuboptimal;
 }
 #endif

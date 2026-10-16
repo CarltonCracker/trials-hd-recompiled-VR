@@ -7,6 +7,9 @@
 #include <thread>
 
 #include <rex/audio/audio_driver.h>
+#if defined(__EMSCRIPTEN__)
+#include <rex/audio/web/web_audio_driver.h>
+#endif
 #include <rex/logging.h>
 #include <rex/thread.h>
 
@@ -65,7 +68,11 @@ std::unique_ptr<rex::audio::AudioSystem> FallbackAudioSystem::Create(
 X_STATUS FallbackAudioSystem::CreateDriver(size_t index, rex::thread::Semaphore* semaphore,
                                            rex::audio::AudioDriver** out_driver) {
 #if defined(__EMSCRIPTEN__)
+  // The page's AudioWorklet plays it (W-L12); silent but paced until the
+  // first user gesture starts the AudioContext.
   (void)index;
+  *out_driver = new rex::audio::web::WebAudioDriver(memory_, semaphore);
+  return X_STATUS_SUCCESS;
 #else
   if (SDLAudioSystem::CreateDriver(index, semaphore, out_driver) == X_STATUS_SUCCESS) {
     return X_STATUS_SUCCESS;
@@ -81,7 +88,9 @@ void FallbackAudioSystem::DestroyDriver(rex::audio::AudioDriver* driver) {
     delete null_driver;
     return;
   }
-#if !defined(__EMSCRIPTEN__)
+#if defined(__EMSCRIPTEN__)
+  delete driver;
+#else
   SDLAudioSystem::DestroyDriver(driver);
 #endif
 }

@@ -32,6 +32,8 @@ CHROMIUM_FLAGS = [
     "--ignore-gpu-blocklist", "--use-gl=angle", "--use-angle=vulkan",
     "--enable-features=Vulkan", "--use-vulkan=native", "--no-first-run",
     "--no-default-browser-check", "--window-size=1280,720",
+    # Audio (W-L12) starts without a user gesture in tests.
+    "--autoplay-policy=no-user-gesture-required",
 ]
 RADV_ICD = "/usr/share/vulkan/icd.d/radeon_icd.json"
 
@@ -113,6 +115,11 @@ class Session:
             await self.call("Target.setAutoAttach", {
                 "autoAttach": True, "waitForDebuggerOnStart": True, "flatten": True},
                 session=session)
+        except RuntimeError as error:
+            # Some targets (the AudioWorklet) do not take every command; they
+            # must still be released below, or they stay paused forever.
+            self.write("cdp", f"attach {kind}: {error}")
+        try:
             await self.call("Runtime.runIfWaitingForDebugger", session=session)
         except RuntimeError:
             pass

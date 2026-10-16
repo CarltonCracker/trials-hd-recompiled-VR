@@ -25,6 +25,14 @@ class WebGpuImmediateTexture final : public ImmediateTexture {
         texture_(std::move(texture)),
         bind_group_(std::move(bind_group)) {}
   ~WebGpuImmediateTexture() override {
+#if defined(__EMSCRIPTEN__)
+    // UI textures can be freed by the UI thread (closing a dialog).
+    if (!provider_.IsOnGpuWorker()) {
+      provider_.ReleaseOnGpuWorker(std::move(bind_group_));
+      provider_.ReleaseOnGpuWorker(std::move(texture_));
+      return;
+    }
+#endif
     // Releasing the last reference destroys the objects: a WebGPU call.
     std::lock_guard lock(provider_.device_mutex());
     bind_group_ = nullptr;
@@ -51,6 +59,20 @@ std::unique_ptr<WebGpuImmediateDrawer> WebGpuImmediateDrawer::Create(WebGpuProvi
 }
 
 WebGpuImmediateDrawer::~WebGpuImmediateDrawer() {
+#if defined(__EMSCRIPTEN__)
+  // The app (UI thread) owns this drawer on the web.
+  if (!provider_.IsOnGpuWorker()) {
+    provider_.ReleaseOnGpuWorker(std::move(white_bind_group_));
+    provider_.ReleaseOnGpuWorker(std::move(pipeline_triangles_));
+    provider_.ReleaseOnGpuWorker(std::move(pipeline_lines_));
+    provider_.ReleaseOnGpuWorker(std::move(buffer_));
+    provider_.ReleaseOnGpuWorker(std::move(samplers_));
+    provider_.ReleaseOnGpuWorker(std::move(pipeline_layout_));
+    provider_.ReleaseOnGpuWorker(std::move(bind_group_layout_));
+    provider_.ReleaseOnGpuWorker(std::move(shader_));
+    return;
+  }
+#endif
   std::lock_guard lock(provider_.device_mutex());
   white_bind_group_ = nullptr;
   pipeline_triangles_ = nullptr;

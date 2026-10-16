@@ -26,6 +26,7 @@
 #include "pipeline_state.h"
 #include "primitive_converter.h"
 #include "render_target_cache.h"
+#include "web_phase.h"
 #include "resolve_engine.h"
 #include "texture_cache.h"
 #include "webgpu_presenter.h"
@@ -680,6 +681,7 @@ bool WebGpuBackend::Draw(const DrawSnapshot& draw) {
         regs.values[XE_GPU_REG_RB_COLOR_INFO], regs.values[XE_GPU_REG_RB_DEPTH_INFO]);
   }
   DumpDraw(draw);
+  SetWebPhase("draw: device lock");
   std::lock_guard lock(provider_.device_mutex());
   if (!shared_memory_) {
     return false;
@@ -693,6 +695,7 @@ bool WebGpuBackend::Draw(const DrawSnapshot& draw) {
     return false;
   }
   if (vertex_shader->memexport_eM_written()) {
+    SetWebPhase("draw: memexport");
     MemExport(draw);
   }
   bool primitive_polygonal = draw_util::IsPrimitivePolygonal(regs);
@@ -709,6 +712,7 @@ bool WebGpuBackend::Draw(const DrawSnapshot& draw) {
   // Guest memory read by the vertex shader. Anything that may submit (and
   // so flush staged uniforms and indices) happens before this draw stages
   // its own data.
+  SetWebPhase("draw: vertex ranges");
   for (const Shader::VertexBinding& binding : vertex_shader->vertex_bindings()) {
     xenos::xe_gpu_vertex_fetch_t fetch = regs.GetVertexFetch(binding.fetch_constant);
     if (fetch.type != xenos::FetchConstantType::kVertex || !fetch.size) {
@@ -720,11 +724,13 @@ bool WebGpuBackend::Draw(const DrawSnapshot& draw) {
   TextureLayoutSignature texture_signature =
       TextureLayoutSignature::Get(*vertex_shader, pixel_shader);
   uint32_t textures_resolution_scaled;
+  SetWebPhase("draw: textures");
   wgpu::BindGroup texture_bind_group = GetTextureBindGroup(
       regs, *vertex_shader, pixel_shader, texture_signature, textures_resolution_scaled);
   frame_recorder_->ReserveUniforms(4 * 4096);
 
   PrimitiveProcessor::ProcessingResult primitive;
+  SetWebPhase("draw: primitive processor");
   if (!primitive_processor_->Process(primitive)) {
     return false;
   }
@@ -761,6 +767,7 @@ bool WebGpuBackend::Draw(const DrawSnapshot& draw) {
   uint32_t draw_rows = draw_extent_estimator_->EstimateMaxY(true, *vertex_shader);
   RenderTargetCache::Overwrite overwrite =
       GetOverwrite(regs, *vertex_shader, pixel_shader, depth_control, color_mask);
+  SetWebPhase("draw: render targets");
   if (!render_target_cache_->Update(regs, color_targets_used, depth_used, draw_rows, overwrite,
                                     targets)) {
     return true;
@@ -858,7 +865,9 @@ bool WebGpuBackend::Draw(const DrawSnapshot& draw) {
     key.depth_bias = bias.depth_bias;
     key.depth_bias_slope_scale = bias.depth_bias_slope_scale;
   }
+  SetWebPhase("draw: pipeline");
   wgpu::RenderPipeline pipeline = pipeline_cache_->GetPipeline(key, *vertex_shader, pixel_shader);
+  SetWebPhase("draw: encode");
   if (!pipeline) {
     ++skipped_draws_;
     return false;
