@@ -129,7 +129,7 @@ bool ResolveEngine::Initialize() {
     desc.entryCount = entries.size();
     desc.entries = entries.data();
     layouts_[i] = device.CreateBindGroupLayout(&desc);
-    wgpu::PipelineLayoutDescriptor layout_desc;
+    wgpu::PipelineLayoutDescriptor layout_desc{};
     layout_desc.bindGroupLayoutCount = 1;
     layout_desc.bindGroupLayouts = &layouts_[i];
     pipeline_layouts_[i] = device.CreatePipelineLayout(&layout_desc);
@@ -148,7 +148,7 @@ wgpu::RenderPipeline ResolveEngine::GetPipeline(SourceType source_type,
                                                  "fs_depth_ms"};
   wgpu::ColorTargetState target;
   target.format = dest_format;
-  wgpu::FragmentState fragment;
+  wgpu::FragmentState fragment{};
   fragment.module = module_;
   fragment.entryPoint = kEntryPoints[uint32_t(source_type)];
   fragment.targetCount = 1;
@@ -270,7 +270,7 @@ bool ResolveEngine::Copy(const draw_util::ResolveInfo& info, RenderTarget& sourc
   attachment.view = alias.CreateView();
   attachment.loadOp = wgpu::LoadOp::Load;
   attachment.storeOp = wgpu::StoreOp::Store;
-  wgpu::RenderPassDescriptor pass_desc;
+  wgpu::RenderPassDescriptor pass_desc{};
   pass_desc.label = "resolve";
   pass_desc.colorAttachmentCount = 1;
   pass_desc.colorAttachments = &attachment;

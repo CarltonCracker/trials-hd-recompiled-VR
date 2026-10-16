@@ -109,7 +109,7 @@ bool WebGpuImmediateDrawer::Initialize() {
   bgl_desc.entries = entries.data();
   bind_group_layout_ = device.CreateBindGroupLayout(&bgl_desc);
 
-  wgpu::PipelineLayoutDescriptor layout_desc;
+  wgpu::PipelineLayoutDescriptor layout_desc{};
   layout_desc.label = "immediate";
   layout_desc.bindGroupLayoutCount = 1;
   layout_desc.bindGroupLayouts = &bind_group_layout_;
@@ -205,7 +205,7 @@ bool WebGpuImmediateDrawer::EnsurePipelines(wgpu::TextureFormat format) {
   attributes[2].format = wgpu::VertexFormat::Unorm8x4;
   attributes[2].offset = offsetof(Vertex, color);
   attributes[2].shaderLocation = 2;
-  wgpu::VertexBufferLayout vertex_layout;
+  wgpu::VertexBufferLayout vertex_layout{};
   vertex_layout.arrayStride = sizeof(Vertex);
   vertex_layout.attributeCount = attributes.size();
   vertex_layout.attributes = attributes.data();
@@ -219,7 +219,7 @@ bool WebGpuImmediateDrawer::EnsurePipelines(wgpu::TextureFormat format) {
   wgpu::ColorTargetState target;
   target.format = format;
   target.blend = &blend;
-  wgpu::FragmentState fragment;
+  wgpu::FragmentState fragment{};
   fragment.module = shader_;
   fragment.entryPoint = "fs_main";
   fragment.targetCount = 1;

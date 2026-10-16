@@ -307,13 +307,13 @@ bool WebGpuBackend::Initialize(memory::Memory& memory, const RegisterFile& regis
   blit_layout_desc.entryCount = all_blit_entries.size();
   blit_layout_desc.entries = all_blit_entries.data();
   blit.layout = device.CreateBindGroupLayout(&blit_layout_desc);
-  wgpu::PipelineLayoutDescriptor blit_pipeline_layout_desc;
+  wgpu::PipelineLayoutDescriptor blit_pipeline_layout_desc{};
   blit_pipeline_layout_desc.bindGroupLayoutCount = 1;
   blit_pipeline_layout_desc.bindGroupLayouts = &blit.layout;
   blit.pipeline_layout = device.CreatePipelineLayout(&blit_pipeline_layout_desc);
   wgpu::ColorTargetState blit_target;
   blit_target.format = ui::webgpu::WebGpuPresenter::kGuestOutputFormat;
-  wgpu::FragmentState blit_fragment;
+  wgpu::FragmentState blit_fragment{};
   blit_fragment.module = blit.module;
   blit_fragment.entryPoint = "fs_main";
   blit_fragment.targetCount = 1;
@@ -1366,7 +1366,7 @@ bool WebGpuBackend::Resolve(const ResolveSnapshot& resolve) {
       attachment.loadOp = wgpu::LoadOp::Clear;
       attachment.storeOp = wgpu::StoreOp::Store;
       attachment.clearValue = {color_value[0], color_value[1], color_value[2], color_value[3]};
-      wgpu::RenderPassDescriptor desc;
+      wgpu::RenderPassDescriptor desc{};
       desc.label = "guest color clear";
       desc.colorAttachmentCount = 1;
       desc.colorAttachments = &attachment;
@@ -1395,7 +1395,7 @@ bool WebGpuBackend::Resolve(const ResolveSnapshot& resolve) {
         attachment.stencilStoreOp = wgpu::StoreOp::Store;
         attachment.stencilClearValue = info.rb_depth_clear & 0xFF;
       }
-      wgpu::RenderPassDescriptor desc;
+      wgpu::RenderPassDescriptor desc{};
       desc.label = "guest depth clear";
       desc.depthStencilAttachment = &attachment;
       wgpu::PassTimestampWrites timestamp_writes;
@@ -1472,7 +1472,7 @@ void WebGpuBackend::Swap(const SwapSnapshot& swap) {
           color.loadOp = wgpu::LoadOp::Clear;
           color.storeOp = wgpu::StoreOp::Store;
           color.clearValue = {0.10, 0.12, 0.18, 1.0};
-          wgpu::RenderPassDescriptor pass_desc;
+          wgpu::RenderPassDescriptor pass_desc{};
           pass_desc.label = label;
           pass_desc.colorAttachmentCount = 1;
           pass_desc.colorAttachments = &color;

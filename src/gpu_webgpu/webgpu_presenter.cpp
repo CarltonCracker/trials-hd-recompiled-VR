@@ -86,7 +86,7 @@ bool WebGpuPresenter::InitializeSurfaceIndependent() {
     bgl_desc.entries = entries.data();
     guest_output_bind_group_layout_ = device.CreateBindGroupLayout(&bgl_desc);
 
-    wgpu::PipelineLayoutDescriptor layout_desc;
+    wgpu::PipelineLayoutDescriptor layout_desc{};
     layout_desc.label = "guest output";
     layout_desc.bindGroupLayoutCount = 1;
     layout_desc.bindGroupLayouts = &guest_output_bind_group_layout_;
@@ -108,7 +108,7 @@ wgpu::RenderPipeline WebGpuPresenter::GetGuestOutputPipeline(wgpu::TextureFormat
   }
   wgpu::ColorTargetState target;
   target.format = format;
-  wgpu::FragmentState fragment;
+  wgpu::FragmentState fragment{};
   fragment.module = guest_output_shader_;
   fragment.entryPoint = "fs_main";
   fragment.targetCount = 1;
@@ -425,7 +425,7 @@ Presenter::PaintResult WebGpuPresenter::PaintAndPresentImpl(bool execute_ui_draw
   color.loadOp = wgpu::LoadOp::Clear;
   color.storeOp = wgpu::StoreOp::Store;
   color.clearValue = {0.0, 0.0, 0.0, 1.0};
-  wgpu::RenderPassDescriptor pass_desc;
+  wgpu::RenderPassDescriptor pass_desc{};
   pass_desc.label = "paint";
   pass_desc.colorAttachmentCount = 1;
   pass_desc.colorAttachments = &color;

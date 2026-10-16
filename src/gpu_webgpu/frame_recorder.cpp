@@ -110,7 +110,7 @@ const wgpu::RenderPassEncoder& FrameRecorder::BeginRenderPass(
     color.clearValue = {0.0, 0.0, 0.0, 0.0};
   }
   wgpu::RenderPassDepthStencilAttachment depth;
-  wgpu::RenderPassDescriptor desc;
+  wgpu::RenderPassDescriptor desc{};
   // Labels only when the caller made one (webgpu_debug_labels).
   std::string pass_label(label);
   if (!label.empty()) {

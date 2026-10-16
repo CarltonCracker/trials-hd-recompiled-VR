@@ -89,7 +89,7 @@ const PipelineCache::TextureLayouts& PipelineCache::GetTextureLayouts(
   layouts.bind_group_layout = provider_.device().CreateBindGroupLayout(&desc);
   std::array<wgpu::BindGroupLayout, 3> groups = {draw_layout_, shared_memory_layout_,
                                                   layouts.bind_group_layout};
-  wgpu::PipelineLayoutDescriptor layout_desc;
+  wgpu::PipelineLayoutDescriptor layout_desc{};
   layout_desc.label = "guest draw";
   layout_desc.bindGroupLayoutCount = groups.size();
   layout_desc.bindGroupLayouts = groups.data();
@@ -182,7 +182,7 @@ bool PipelineCache::Initialize() {
   texture_layouts_[0] = {texture_layout_, nullptr};
   std::array<wgpu::BindGroupLayout, 3> layouts = {draw_layout_, shared_memory_layout_,
                                                    texture_layout_};
-  wgpu::PipelineLayoutDescriptor layout_desc;
+  wgpu::PipelineLayoutDescriptor layout_desc{};
   layout_desc.label = "guest draw";
   layout_desc.bindGroupLayoutCount = layouts.size();
   layout_desc.bindGroupLayouts = layouts.data();
@@ -303,7 +303,7 @@ wgpu::RenderPipeline PipelineCache::GetPipeline(const PipelineKey& key, Shader& 
         }
       }
     }
-    wgpu::FragmentState fragment;
+    wgpu::FragmentState fragment{};
     fragment.module = pixel_module;
     fragment.entryPoint = "main";
     fragment.targetCount = target_count;
