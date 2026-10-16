@@ -2123,6 +2123,66 @@ index ef5bdf4..76b2608 100644
  }
  
  FILE* OpenFile(const std::filesystem::path& path, const std::string_view mode) {
+diff --git a/src/core/fma_emscripten.cpp b/src/core/fma_emscripten.cpp
+new file mode 100644
+index 0000000..9af197b
+--- /dev/null
++++ b/src/core/fma_emscripten.cpp
+@@ -0,0 +1,54 @@
++/**
++ * @file        core/fma_emscripten.cpp
++ * @brief       Fast exact fma() for the web (Emscripten) build
++ *
++ * WebAssembly has no fused multiply-add instruction, so fma() is musl's
++ * software routine, which costs more than everything else in the game's job
++ * threads while it loads (double-precision fmadd chains in its math code).
++ * The relaxed-SIMD f64x2.relaxed_madd may be fused or not, depending on the
++ * engine and CPU; Chromium uses the CPU's FMA instruction when it has one. At
++ * startup a case whose fused and unfused results differ decides: if the
++ * hardware result is fused it is exact, and every fma() call uses it;
++ * otherwise musl's exact routine stays.
++ *
++ * The link wraps the symbol (-Wl,--wrap=fma): calls to fma() reach
++ * __wrap_fma, and __real_fma is musl's.
++ */
++
++#include <rex/platform.h>
++
++#if REX_PLATFORM_EMSCRIPTEN
++
++#include <wasm_simd128.h>
++
++extern "C" double __real_fma(double a, double b, double c);
++
++namespace {
++
++inline double RelaxedMadd(double a, double b, double c) {
++  return wasm_f64x2_extract_lane(
++      wasm_f64x2_relaxed_madd(wasm_f64x2_splat(a), wasm_f64x2_splat(b), wasm_f64x2_splat(c)),
++      0);
++}
++
++bool RelaxedMaddIsFused() {
++  // (1 + 2^-30)(1 - 2^-30) - 1 is exactly -2^-60 when fused; rounding the
++  // product first gives 1 - 1 = 0. Volatile: computed at run time.
++  volatile double a = 1.0 + 0x1p-30;
++  volatile double b = 1.0 - 0x1p-30;
++  volatile double c = -1.0;
++  return RelaxedMadd(a, b, c) == -0x1p-60;
++}
++
++const bool kFusedMadd = RelaxedMaddIsFused();
++
++}  // namespace
++
++extern "C" double __wrap_fma(double a, double b, double c) {
++  if (kFusedMadd) {
++    return RelaxedMadd(a, b, c);
++  }
++  return __real_fma(a, b, c);
++}
++
++#endif  // REX_PLATFORM_EMSCRIPTEN
 diff --git a/src/core/logging.cpp b/src/core/logging.cpp
 index 1645848..1ba3187 100644
 --- a/src/core/logging.cpp

@@ -166,6 +166,7 @@ set(TRIALSHD_WEB_SDK_CORE
     core/dynlib_posix.cpp
     core/exception_handler_emscripten.cpp
     core/fiber_emscripten.cpp
+    core/fma_emscripten.cpp
     core/filesystem_posix.cpp
     core/mapped_memory_posix.cpp
     core/math_gcc.cpp
@@ -376,6 +377,10 @@ list(TRANSFORM _sdk_sources PREPEND "${_sdk}/src/")
 # OBJECT, not STATIC: natively rexruntime is a shared library, so every object
 # is linked, including ones that only self-register (cvars, kernel exports).
 add_library(trials_hd_web_sdk OBJECT ${_sdk_sources})
+# fma() through the CPU's FMA instruction when the engine fuses relaxed_madd
+# (the file checks at startup); the link wraps fma (-Wl,--wrap=fma below).
+set_source_files_properties(${_sdk}/src/core/fma_emscripten.cpp PROPERTIES
+    COMPILE_OPTIONS -mrelaxed-simd)
 target_include_directories(trials_hd_web_sdk PRIVATE ${_sdk} ${_sdk}/src)
 
 #=============================================================================
@@ -383,6 +388,9 @@ target_include_directories(trials_hd_web_sdk PRIVATE ${_sdk} ${_sdk}/src)
 #=============================================================================
 include(${_gen}/sources.cmake)
 add_library(trials_hd_web_recomp OBJECT ${GENERATED_SOURCES})
+# Optimization level of the recompiled game code (experiments: -O3).
+set(TRIALSHD_WEB_RECOMP_OPT "-O2" CACHE STRING "Optimization flag for the generated game code")
+target_compile_options(trials_hd_web_recomp PRIVATE ${TRIALSHD_WEB_RECOMP_OPT})
 target_include_directories(trials_hd_web_recomp PRIVATE ${_root} ${_root}/src ${_gen})
 target_precompile_headers(trials_hd_web_recomp PRIVATE ${_gen}/trials_hd_pch.h)
 
@@ -469,6 +477,7 @@ set(_web_link_flags
     -sSTACK_SIZE=8mb
     -sDEFAULT_PTHREAD_STACK_SIZE=4mb
     -sEXIT_RUNTIME=1
+    -Wl,--wrap=fma
     -sEXPORTED_RUNTIME_METHODS=callMain,wasmMemory
     -Wno-pthreads-mem-growth
     # Function names in the module (profiles and stack traces); no code cost.

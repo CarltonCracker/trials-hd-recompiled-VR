@@ -336,7 +336,8 @@ async def run(args):
     if Path(RADV_ICD).exists():
         env["VK_ICD_FILENAMES"] = RADV_ICD
     browser = subprocess.Popen(
-        [chromium, *CHROMIUM_FLAGS, f"--remote-debugging-port={port}",
+        [chromium, *CHROMIUM_FLAGS, *(getattr(args, "chromium_flag", None) or []),
+         f"--remote-debugging-port={port}",
          f"--user-data-dir={profile}", "about:blank"],
         env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
     try:
@@ -377,6 +378,8 @@ def main():
     parser.add_argument("--out-dir", type=Path, default=Path("out/run"), help="output directory for captures")
     parser.add_argument("--viewport", help="exact page size in CSS pixels, e.g. 1280x720, optionally @DPR (1280x720@2)")
     parser.add_argument("--chromium", default="chromium")
+    parser.add_argument("--chromium-flag", action="append", default=[],
+                        help="extra Chromium command-line flag (repeatable; experiments)")
     parser.add_argument("--profile", type=Path,
                         help="browser profile directory to use and keep (default: a fresh one)")
     args = parser.parse_args()
