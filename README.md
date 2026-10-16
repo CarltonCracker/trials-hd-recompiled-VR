@@ -92,7 +92,13 @@ Install DLC track packs (*Big Pack* and *Big Thrills*) into `assets/`:
 
 ## Running
 
-Run the game directly from the build tree:
+Launch the game with the runner script:
+
+```sh
+./run.sh
+```
+
+Or run the binary directly from the build tree:
 
 ```sh
 ./out/build/linux-amd64-relwithdebinfo/trials_hd
