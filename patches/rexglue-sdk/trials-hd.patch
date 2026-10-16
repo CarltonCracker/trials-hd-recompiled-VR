@@ -22,7 +22,8 @@ commit by CMake at configure time; regenerate with tools/export_sdk_patch.sh).
   guest threads - heap corruption)
 - graphics: lock the command processor's CallInThread queue (pushed from
   other threads); logging: reserve the category registry (read lock-free)
-- macOS: user data under Application Support and Apple Silicon presentation defaults
+- storage & paths: default user data directory next to executable (self-contained); config_path() getter
+- macOS: Apple Silicon presentation defaults
 - ui/overlay: achievements close callback and input gating
 - command processor CPU: sequential register writes (type-0 packets) go
   through the range path, context registers (0x2000-0x3FFF) are bulk-copied,
@@ -40,9 +41,17 @@ commit by CMake at configure time; regenerate with tools/export_sdk_patch.sh).
 - ui: dialogs say whether they need continuous repaint; the always-present
   achievement toast only does while showing one (the window was repainted
   ~1400 times per second with VSync off)
-- xam: ContentManager discovers DLC packages and headers from game_data_root / "content"
-  and game_data_root in addition to user_data_root
-- storage & paths: default user data directory next to executable (self-contained); config_path() getter
+- web (Emscripten) memory model (docs/web-port/README.md 7.9.2-7.9.3, W-L04):
+  one guest window with the aliases folded per heap, page protection as
+  bookkeeping, dirty-bitmap write tracking delivered to the invalidation
+  callbacks (memory_emscripten.cpp, exception_handler_emscripten.cpp and
+  REX_PLATFORM_EMSCRIPTEN / REX_ARCH_WASM branches; native code unchanged)
+- web (Emscripten) platform layer (W-L15): POSIX files accept the web, with
+  branches for the clock (CLOCK_MONOTONIC), thread ids/names/affinity and APC
+  wakeups; fiber_emscripten.cpp; web UI loop, window and main(); linked-in GPU
+  plugins (RegisterStaticGpuPlugin); weak kernel stubs so a game's exports
+  override them in a static link; console logging; xxHash/RenderDoc/
+  disruptorplus portability (all guarded; native code unchanged)
 
 diff --git a/include/rex/graphics/command_processor.h b/include/rex/graphics/command_processor.h
 index da8e432..74b87ff 100644
@@ -308,6 +317,18 @@ index 1f52480..a480b4e 100644
  
    /// Set a callback that provides guest frame stats to the debug overlay.
    void SetGuestFrameStats(ui::DebugOverlayDialog::FrameStatsProvider provider);
+diff --git a/include/rex/system/xam/content_manager.h b/include/rex/system/xam/content_manager.h
+index 949d185..fd86cab 100644
+--- a/include/rex/system/xam/content_manager.h
++++ b/include/rex/system/xam/content_manager.h
+@@ -183,6 +183,7 @@ class ContentManager {
+   X_RESULT InstallContent(const std::filesystem::path& package_path);
+ 
+  private:
++  std::vector<std::filesystem::path> GetContentRoots() const;
+   std::filesystem::path ResolvePackageRoot(uint64_t xuid, XContentType content_type,
+                                            uint32_t title_id = -1);
+   std::filesystem::path ResolvePackagePath(uint64_t xuid, const XCONTENT_AGGREGATE_DATA& data);
 diff --git a/include/rex/ui/imgui_dialog.h b/include/rex/ui/imgui_dialog.h
 index a7ab6b3..5db4278 100644
 --- a/include/rex/ui/imgui_dialog.h
@@ -13590,197 +13611,6 @@ index 3f9422d..02bcc4b 100644
    if (keystroke_queue_.empty()) {
      return X_ERROR_EMPTY;
    }
-diff --git a/src/ui/imgui_drawer.cpp b/src/ui/imgui_drawer.cpp
-index f270f3c..d568c12 100644
---- a/src/ui/imgui_drawer.cpp
-+++ b/src/ui/imgui_drawer.cpp
-@@ -9,6 +9,7 @@
-  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
-  */
- 
-+#include <algorithm>
- #include <cfloat>
- #include <cstring>
- #include <filesystem>
-@@ -436,12 +437,16 @@ void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
-   // it now if needed.
-   DetachIfLastDialogRemoved();
- 
--  if (!dialogs_.empty()) {
--    // Repaint (and handle input) continuously if still active. In detached mode
--    // there is no presenter; the app drives repaint via its own present loop.
--    if (presenter_) {
--      presenter_->RequestUIPaintFromUIThread();
--    }
-+  // Repaint (and handle input) continuously while a dialog is active. Idle
-+  // dialogs (a notification with nothing to show) don't count: they would
-+  // otherwise repaint the window as fast as the host presents - over a
-+  // thousand times per second with VSync off - for no visible change. New
-+  // guest frames request their own paints. In detached mode there is no
-+  // presenter; the app drives repaint via its own present loop.
-+  if (presenter_ && std::any_of(dialogs_.begin(), dialogs_.end(), [](const ImGuiDialog* dialog) {
-+        return dialog->WantsContinuousPaint();
-+      })) {
-+    presenter_->RequestUIPaintFromUIThread();
-   }
- }
- 
-diff --git a/src/ui/overlay/achievement_toast.cpp b/src/ui/overlay/achievement_toast.cpp
-index 53b8c0b..a21e89d 100644
---- a/src/ui/overlay/achievement_toast.cpp
-+++ b/src/ui/overlay/achievement_toast.cpp
-@@ -29,6 +29,11 @@ void AchievementToastDialog::Push(const rex::system::AchievementEvent& event) {
-   queue_.push_back({event, std::chrono::steady_clock::now()});
- }
- 
-+bool AchievementToastDialog::WantsContinuousPaint() const {
-+  std::lock_guard<std::mutex> lock(mutex_);
-+  return !queue_.empty();
-+}
-+
- void AchievementToastDialog::OnDraw(ImGuiIO& io) {
-   auto now = std::chrono::steady_clock::now();
- 
-diff --git a/src/ui/overlay/achievements_overlay.cpp b/src/ui/overlay/achievements_overlay.cpp
-index e886a88..fd74aaf 100644
---- a/src/ui/overlay/achievements_overlay.cpp
-+++ b/src/ui/overlay/achievements_overlay.cpp
-@@ -43,7 +43,8 @@ void AchievementsOverlayDialog::OnDraw(ImGuiIO& io) {
-   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, style.window_padding);
-   ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, style.item_spacing);
- 
--  if (ImGui::Begin("Achievements##overlay", nullptr, ImGuiWindowFlags_NoCollapse)) {
-+  bool open = true;
-+  if (ImGui::Begin("Achievements##overlay", &open, ImGuiWindowFlags_NoCollapse)) {
-     const auto achievements = achievements_->ListAchievements();
- 
-     int unlocked_count = 0;
-@@ -71,6 +72,10 @@ void AchievementsOverlayDialog::OnDraw(ImGuiIO& io) {
-     ImGui::PopStyleColor();
- 
-     ImGui::TextDisabled("Unlock progress is saved automatically");
-+    ImGui::SameLine(ImGui::GetWindowWidth() - 100.0f);
-+    if (ImGui::SmallButton("Close (Esc)")) {
-+      open = false;
-+    }
-     ImGui::Separator();
-     ImGui::Spacing();
- 
-@@ -139,8 +144,11 @@ void AchievementsOverlayDialog::OnDraw(ImGuiIO& io) {
-     ImGui::EndChild();
-   }
-   ImGui::End();
--
-   ImGui::PopStyleVar(2);
-+
-+  if (!open && on_close_) {
-+    on_close_();
-+  }
- }
- 
- }  // namespace rex::ui
-diff --git a/src/ui/rex_app.cpp b/src/ui/rex_app.cpp
-index b94fe9e..4d906b3 100644
---- a/src/ui/rex_app.cpp
-+++ b/src/ui/rex_app.cpp
-@@ -49,7 +49,7 @@
- REXCVAR_DEFINE_STRING(gpu_plugin, "", "GPU",
-                       "GPU emulation plugin to load at startup (e.g. 'xenos'); empty disables "
-                       "GPU emulation")
--    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
- 
- namespace rex {
- 
-@@ -118,7 +118,7 @@ bool ReXApp::SetupEnvironment() {
-   std::string user_data_cvar = REXCVAR_GET(user_data_root);
-   if (!user_data_cvar.empty()) {
-     user_dir = user_data_cvar;
-   } else {
--    user_dir = rex::filesystem::GetUserFolder() / GetName();
-+    user_dir = exe_dir;
-   }
- 
-   // Update data: cvar override, or empty (opt-in)
-@@ -421,6 +421,10 @@ void ReXApp::SetupOverlays(rex::ui::Presenter* presenter, rex::ui::ImmediateDraw
-       achievements_overlay_.reset();
-     } else {
-       achievements_overlay_ = CreateAchievementsOverlay();
-+      if (auto* overlay =
-+              dynamic_cast<ui::AchievementsOverlayDialog*>(achievements_overlay_.get())) {
-+        overlay->SetOnClose([this] { achievements_overlay_.reset(); });
-+      }
-     }
-   });
- 
-diff --git a/src/ui/vulkan/vulkan_instance.cpp b/src/ui/vulkan/vulkan_instance.cpp
-index 914b311..69e65ba 100644
---- a/src/ui/vulkan/vulkan_instance.cpp
-+++ b/src/ui/vulkan/vulkan_instance.cpp
-@@ -140,6 +140,9 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
-   if (with_surface) {
-     // #1.
-     requested_extensions.emplace("VK_KHR_surface", &vulkan_instance->extensions_.ext_KHR_surface);
-+    // #257. Optional: presenting without a display (vulkan_headless_surface).
-+    requested_extensions.emplace("VK_EXT_headless_surface",
-+                                 &vulkan_instance->extensions_.ext_EXT_headless_surface);
- #ifdef VK_USE_PLATFORM_XCB_KHR
-     // #6.
-     requested_extensions.emplace("VK_KHR_xcb_surface",
-@@ -418,6 +421,9 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
- #include <rex/ui/vulkan/functions/instance_khr_xcb_surface.inc>
-   }
- #endif
-+  if (vulkan_instance->extensions_.ext_EXT_headless_surface) {
-+#include <rex/ui/vulkan/functions/instance_ext_headless_surface.inc>
-+  }
- #ifdef VK_USE_PLATFORM_WAYLAND_KHR
-   if (vulkan_instance->extensions_.ext_KHR_wayland_surface) {
- #include <rex/ui/vulkan/functions/instance_khr_wayland_surface.inc>
-diff --git a/src/ui/vulkan/vulkan_presenter.cpp b/src/ui/vulkan/vulkan_presenter.cpp
-index 23645ef..c8c2328 100644
---- a/src/ui/vulkan/vulkan_presenter.cpp
-+++ b/src/ui/vulkan/vulkan_presenter.cpp
-@@ -49,6 +49,10 @@
- REXCVAR_DEFINE_BOOL(present_render_pass_clear, true, "UI/Presenter",
-                     "Clear render pass during presentation");
- 
-+REXCVAR_DEFINE_BOOL(vulkan_headless_surface, false, "UI/Vulkan",
-+                    "Present to a VK_EXT_headless_surface instead of the window (benchmarking "
-+                    "and testing without a display)")
-+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
- REXCVAR_DEFINE_BOOL(vulkan_allow_present_mode_immediate, true, "UI/Vulkan",
-                     "Allow immediate present mode (no vsync)");
- 
-@@ -795,6 +799,16 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
-       return SurfacePaintConnectResult::kFailureSurfaceUnusable;
-     }
-     VkResult vulkan_surface_create_result = VK_ERROR_UNKNOWN;
-+    const bool headless = REXCVAR_GET(vulkan_headless_surface) &&
-+                          vulkan_instance->extensions().ext_EXT_headless_surface;
-+    if (headless) {
-+      // Render and "present" without a display: frames are produced at full
-+      // speed and can still be read back through CaptureGuestOutput.
-+      VkHeadlessSurfaceCreateInfoEXT surface_create_info = {};
-+      surface_create_info.sType = VK_STRUCTURE_TYPE_HEADLESS_SURFACE_CREATE_INFO_EXT;
-+      vulkan_surface_create_result = ifn.vkCreateHeadlessSurfaceEXT(
-+          instance, &surface_create_info, nullptr, &paint_context_.vulkan_surface);
-+    } else
-     switch (surface_type) {
- #if REX_PLATFORM_ANDROID
-       case Surface::kTypeIndex_AndroidNativeWindow: {
-diff --git a/include/rex/system/xam/content_manager.h b/include/rex/system/xam/content_manager.h
-index 949d185..fd86cab 100644
---- a/include/rex/system/xam/content_manager.h
-+++ b/include/rex/system/xam/content_manager.h
-@@ -183,6 +183,7 @@ class ContentManager {
-   X_RESULT InstallContent(const std::filesystem::path& package_path);
- 
-  private:
-+  std::vector<std::filesystem::path> GetContentRoots() const;
-   std::filesystem::path ResolvePackageRoot(uint64_t xuid, XContentType content_type,
-                                            uint32_t title_id = -1);
-   std::filesystem::path ResolvePackagePath(uint64_t xuid, const XCONTENT_AGGREGATE_DATA& data);
 diff --git a/src/system/xam/content_manager.cpp b/src/system/xam/content_manager.cpp
 index bd6c797..d44104d 100644
 --- a/src/system/xam/content_manager.cpp
@@ -14004,3 +13834,181 @@ index bd6c797..d44104d 100644
      }
    }
  
+diff --git a/src/ui/imgui_drawer.cpp b/src/ui/imgui_drawer.cpp
+index f270f3c..d568c12 100644
+--- a/src/ui/imgui_drawer.cpp
++++ b/src/ui/imgui_drawer.cpp
+@@ -9,6 +9,7 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <algorithm>
+ #include <cfloat>
+ #include <cstring>
+ #include <filesystem>
+@@ -436,12 +437,16 @@ void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
+   // it now if needed.
+   DetachIfLastDialogRemoved();
+ 
+-  if (!dialogs_.empty()) {
+-    // Repaint (and handle input) continuously if still active. In detached mode
+-    // there is no presenter; the app drives repaint via its own present loop.
+-    if (presenter_) {
+-      presenter_->RequestUIPaintFromUIThread();
+-    }
++  // Repaint (and handle input) continuously while a dialog is active. Idle
++  // dialogs (a notification with nothing to show) don't count: they would
++  // otherwise repaint the window as fast as the host presents - over a
++  // thousand times per second with VSync off - for no visible change. New
++  // guest frames request their own paints. In detached mode there is no
++  // presenter; the app drives repaint via its own present loop.
++  if (presenter_ && std::any_of(dialogs_.begin(), dialogs_.end(), [](const ImGuiDialog* dialog) {
++        return dialog->WantsContinuousPaint();
++      })) {
++    presenter_->RequestUIPaintFromUIThread();
+   }
+ }
+ 
+diff --git a/src/ui/overlay/achievement_toast.cpp b/src/ui/overlay/achievement_toast.cpp
+index 53b8c0b..a21e89d 100644
+--- a/src/ui/overlay/achievement_toast.cpp
++++ b/src/ui/overlay/achievement_toast.cpp
+@@ -29,6 +29,11 @@ void AchievementToastDialog::Push(const rex::system::AchievementEvent& event) {
+   queue_.push_back({event, std::chrono::steady_clock::now()});
+ }
+ 
++bool AchievementToastDialog::WantsContinuousPaint() const {
++  std::lock_guard<std::mutex> lock(mutex_);
++  return !queue_.empty();
++}
++
+ void AchievementToastDialog::OnDraw(ImGuiIO& io) {
+   auto now = std::chrono::steady_clock::now();
+ 
+diff --git a/src/ui/overlay/achievements_overlay.cpp b/src/ui/overlay/achievements_overlay.cpp
+index e886a88..fd74aaf 100644
+--- a/src/ui/overlay/achievements_overlay.cpp
++++ b/src/ui/overlay/achievements_overlay.cpp
+@@ -43,7 +43,8 @@ void AchievementsOverlayDialog::OnDraw(ImGuiIO& io) {
+   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, style.window_padding);
+   ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, style.item_spacing);
+ 
+-  if (ImGui::Begin("Achievements##overlay", nullptr, ImGuiWindowFlags_NoCollapse)) {
++  bool open = true;
++  if (ImGui::Begin("Achievements##overlay", &open, ImGuiWindowFlags_NoCollapse)) {
+     const auto achievements = achievements_->ListAchievements();
+ 
+     int unlocked_count = 0;
+@@ -71,6 +72,10 @@ void AchievementsOverlayDialog::OnDraw(ImGuiIO& io) {
+     ImGui::PopStyleColor();
+ 
+     ImGui::TextDisabled("Unlock progress is saved automatically");
++    ImGui::SameLine(ImGui::GetWindowWidth() - 100.0f);
++    if (ImGui::SmallButton("Close (Esc)")) {
++      open = false;
++    }
+     ImGui::Separator();
+     ImGui::Spacing();
+ 
+@@ -139,8 +144,11 @@ void AchievementsOverlayDialog::OnDraw(ImGuiIO& io) {
+     ImGui::EndChild();
+   }
+   ImGui::End();
+-
+   ImGui::PopStyleVar(2);
++
++  if (!open && on_close_) {
++    on_close_();
++  }
+ }
+ 
+ }  // namespace rex::ui
+diff --git a/src/ui/rex_app.cpp b/src/ui/rex_app.cpp
+index b94fe9e..f9156dc 100644
+--- a/src/ui/rex_app.cpp
++++ b/src/ui/rex_app.cpp
+@@ -49,7 +49,7 @@
+ REXCVAR_DEFINE_STRING(gpu_plugin, "", "GPU",
+                       "GPU emulation plugin to load at startup (e.g. 'xenos'); empty disables "
+                       "GPU emulation")
+-    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ 
+ namespace rex {
+ 
+@@ -117,7 +117,7 @@ bool ReXApp::SetupEnvironment() {
+   if (!user_data_cvar.empty()) {
+     user_dir = user_data_cvar;
+   } else {
+-    user_dir = rex::filesystem::GetUserFolder() / GetName();
++    user_dir = exe_dir;
+   }
+ 
+   // Update data: cvar override, or empty (opt-in)
+@@ -421,6 +421,10 @@ void ReXApp::SetupOverlays(rex::ui::Presenter* presenter, rex::ui::ImmediateDraw
+       achievements_overlay_.reset();
+     } else {
+       achievements_overlay_ = CreateAchievementsOverlay();
++      if (auto* overlay =
++              dynamic_cast<ui::AchievementsOverlayDialog*>(achievements_overlay_.get())) {
++        overlay->SetOnClose([this] { achievements_overlay_.reset(); });
++      }
+     }
+   });
+ 
+diff --git a/src/ui/vulkan/vulkan_instance.cpp b/src/ui/vulkan/vulkan_instance.cpp
+index 914b311..69e65ba 100644
+--- a/src/ui/vulkan/vulkan_instance.cpp
++++ b/src/ui/vulkan/vulkan_instance.cpp
+@@ -140,6 +140,9 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
+   if (with_surface) {
+     // #1.
+     requested_extensions.emplace("VK_KHR_surface", &vulkan_instance->extensions_.ext_KHR_surface);
++    // #257. Optional: presenting without a display (vulkan_headless_surface).
++    requested_extensions.emplace("VK_EXT_headless_surface",
++                                 &vulkan_instance->extensions_.ext_EXT_headless_surface);
+ #ifdef VK_USE_PLATFORM_XCB_KHR
+     // #6.
+     requested_extensions.emplace("VK_KHR_xcb_surface",
+@@ -418,6 +421,9 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
+ #include <rex/ui/vulkan/functions/instance_khr_xcb_surface.inc>
+   }
+ #endif
++  if (vulkan_instance->extensions_.ext_EXT_headless_surface) {
++#include <rex/ui/vulkan/functions/instance_ext_headless_surface.inc>
++  }
+ #ifdef VK_USE_PLATFORM_WAYLAND_KHR
+   if (vulkan_instance->extensions_.ext_KHR_wayland_surface) {
+ #include <rex/ui/vulkan/functions/instance_khr_wayland_surface.inc>
+diff --git a/src/ui/vulkan/vulkan_presenter.cpp b/src/ui/vulkan/vulkan_presenter.cpp
+index 23645ef..c8c2328 100644
+--- a/src/ui/vulkan/vulkan_presenter.cpp
++++ b/src/ui/vulkan/vulkan_presenter.cpp
+@@ -49,6 +49,10 @@
+ REXCVAR_DEFINE_BOOL(present_render_pass_clear, true, "UI/Presenter",
+                     "Clear render pass during presentation");
+ 
++REXCVAR_DEFINE_BOOL(vulkan_headless_surface, false, "UI/Vulkan",
++                    "Present to a VK_EXT_headless_surface instead of the window (benchmarking "
++                    "and testing without a display)")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ REXCVAR_DEFINE_BOOL(vulkan_allow_present_mode_immediate, true, "UI/Vulkan",
+                     "Allow immediate present mode (no vsync)");
+ 
+@@ -795,6 +799,16 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
+       return SurfacePaintConnectResult::kFailureSurfaceUnusable;
+     }
+     VkResult vulkan_surface_create_result = VK_ERROR_UNKNOWN;
++    const bool headless = REXCVAR_GET(vulkan_headless_surface) &&
++                          vulkan_instance->extensions().ext_EXT_headless_surface;
++    if (headless) {
++      // Render and "present" without a display: frames are produced at full
++      // speed and can still be read back through CaptureGuestOutput.
++      VkHeadlessSurfaceCreateInfoEXT surface_create_info = {};
++      surface_create_info.sType = VK_STRUCTURE_TYPE_HEADLESS_SURFACE_CREATE_INFO_EXT;
++      vulkan_surface_create_result = ifn.vkCreateHeadlessSurfaceEXT(
++          instance, &surface_create_info, nullptr, &paint_context_.vulkan_surface);
++    } else
+     switch (surface_type) {
+ #if REX_PLATFORM_ANDROID
+       case Surface::kTypeIndex_AndroidNativeWindow: {
