@@ -54,6 +54,12 @@ std::atomic<uint32_t> g_copies_since_report{0};
 #if defined(__EMSCRIPTEN__)
 std::atomic<uint64_t> g_web_swaps{0};
 std::atomic<uint64_t> g_web_draws{0};
+// GPU worker time, for the frame-rate log: idle (ring empty) and returning
+// to the browser's event loop after each swap.
+using WebClock = std::chrono::steady_clock;
+WebClock::duration g_web_idle_time{};
+WebClock::duration g_web_yield_time{};
+WebClock::time_point g_web_idle_start{};
 #endif
 
 }  // namespace
@@ -92,11 +98,13 @@ void WebGpuCommandProcessor::PrepareForWait() {
   SetWebPhase(read_ptr_index_ == write_ptr_index_.load(std::memory_order_relaxed)
                   ? "idle (ring empty)"
                   : "WAIT_REG_MEM");
+  g_web_idle_start = WebClock::now();
   CommandProcessor::PrepareForWait();
 }
 
 void WebGpuCommandProcessor::ReturnFromWait() {
   CommandProcessor::ReturnFromWait();
+  g_web_idle_time += WebClock::now() - g_web_idle_start;
   SetWebPhase("command processor");
 }
 
@@ -236,6 +244,25 @@ void WebGpuCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
           double(copies) / swaps, double(backend_->TakeSkippedDrawCount()) / swaps,
           double(submissions - last_submissions) / swaps);
       last_submissions = submissions;
+#if defined(__EMSCRIPTEN__)
+      // Web: first-use shader/pipeline creation is the usual cause of slow
+      // seconds (no persistent pipeline cache yet, W-S16).
+      if (auto stats = backend_->pipeline_cache().TakeCreationStats();
+          stats.modules || stats.pipelines) {
+        REXGPU_INFO("new shader modules: {} pipelines: {} ({:.1f} ms)", stats.modules,
+                    stats.pipelines, stats.milliseconds);
+      }
+      const double window_ms = std::chrono::duration<double, std::milli>(elapsed).count();
+      REXGPU_INFO("GPU worker: busy {:.0f}%, idle {:.0f}%, yielding {:.0f}%",
+                  100.0 * (1.0 - std::chrono::duration<double, std::milli>(
+                                     g_web_idle_time + g_web_yield_time).count() / window_ms),
+                  100.0 * std::chrono::duration<double, std::milli>(g_web_idle_time).count() /
+                      window_ms,
+                  100.0 * std::chrono::duration<double, std::milli>(g_web_yield_time).count() /
+                      window_ms);
+      g_web_idle_time = {};
+      g_web_yield_time = {};
+#endif
       swaps = 0;
       window_start = clock::now();
     }
@@ -282,7 +309,9 @@ void WebGpuCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
     presenter->PaintToCanvas();
   }
   SetWebPhase("yield to the event loop");
+  const WebClock::time_point yield_start = WebClock::now();
   ::rex::thread::web::YieldToEventLoop();
+  g_web_yield_time += WebClock::now() - yield_start;
   SetWebPhase("command processor");
   g_web_swaps.fetch_add(1, std::memory_order_relaxed);
 #endif

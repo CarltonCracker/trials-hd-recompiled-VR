@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <utility>
 #include <unordered_map>
 
 #include <webgpu/webgpu_cpp.h>
@@ -96,7 +97,17 @@ class PipelineCache {
 
   size_t pipeline_count() const { return pipelines_.size(); }
 
+  // Shader modules and pipelines created since the last call, and the time
+  // spent creating them (translation included), for the frame-rate log.
+  struct CreationStats {
+    uint32_t modules = 0;
+    uint32_t pipelines = 0;
+    double milliseconds = 0.0;
+  };
+  CreationStats TakeCreationStats() { return std::exchange(creation_stats_, {}); }
+
  private:
+  CreationStats creation_stats_;
   ui::webgpu::WebGpuProvider& provider_;
   WgslShaderTranslator translator_;
   string::StringBuffer disassembly_buffer_;

@@ -3,6 +3,7 @@
 #include "pipeline_cache.h"
 
 #include <array>
+#include <chrono>
 #include <cstring>
 #include <mutex>
 
@@ -219,6 +220,7 @@ wgpu::ShaderModule PipelineCache::GetShaderModule(Shader& shader, uint64_t modif
   if (it != modules_.end()) {
     return it->second;
   }
+  const auto start = std::chrono::steady_clock::now();
   Shader::Translation* translation = shader.GetOrCreateTranslation(modification);
   if (!translation->is_translated()) {
     translator_.TranslateAnalyzedShader(*translation);
@@ -243,6 +245,9 @@ wgpu::ShaderModule PipelineCache::GetShaderModule(Shader& shader, uint64_t modif
     REXGPU_ERROR("WebGPU: failed to translate shader {:016X}", shader.ucode_data_hash());
   }
   modules_.emplace(key, module);
+  ++creation_stats_.modules;
+  creation_stats_.milliseconds +=
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
   return module;
 }
 
@@ -342,9 +347,14 @@ wgpu::RenderPipeline PipelineCache::GetPipeline(const PipelineKey& key, Shader& 
     }
     desc.multisample.count = key.sample_count;
     desc.fragment = &fragment;
+    const auto start = std::chrono::steady_clock::now();
     pipeline = provider_.device().CreateRenderPipeline(&desc);
+    creation_stats_.milliseconds +=
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
+            .count();
   }
   pipelines_.emplace(key, pipeline);
+  ++creation_stats_.pipelines;
   return pipeline;
 }
 

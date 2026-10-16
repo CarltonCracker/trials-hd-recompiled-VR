@@ -1656,9 +1656,9 @@ profile per thread with guest functions named `__imp__sub_<address>`.
 | --- | --- | --- | --- |
 | WM0 | todo | Spikes answered: limits, JSPI in pthreads, Memory64 cost, MMIO completeness, fibers | W-S01–W-S08 done, section 14 questions 1–5 answered |
 | WM1 | done 2026-10-15 (W-L15; null GPU, Chromium 154) | Runtime boots headless in the browser to the first guest frame (no graphics: GPU plugin stubbed) | Console shows the guest reaching the main menu's first swap |
-| WM2 | todo | Menus render through the browser's WebGPU | `main_menu_nav` golden captures within 40 dB of native |
+| WM2 | done 2026-10-16 (16.6: menu panel 40.6-51.6 dB, full frame 38.3-39.1 dB) | Menus render through the browser's WebGPU | `main_menu_nav` golden captures within 40 dB of native |
 | WM3 | done 2026-10-16 (W-L10) | Game data import and persistence | Fresh profile → pick package → plays; reload → no re-import |
-| WM4 | todo | Rides render; input from keyboard and gamepad | `ride_middle_name_danger` completes; `check_fps_log.py 60` passes in Chromium |
+| WM4 | gamepad part done 2026-10-16 (16.6); keyboard ride pending | Rides render; input from keyboard and gamepad | `ride_middle_name_danger` completes; `check_fps_log.py 60` passes in Chromium |
 | WM5 | todo | Audio | Music and effects audible; no underruns over a 2-minute ride |
 | WM6 | todo | 60 FPS at 720p in desktop Chrome (RX 6600) | 3 runs, min ≥ 55 FPS riding, logged in 4.3-style table |
 | WM7 | todo | Firefox desktop | WM2–WM5 checks pass in Firefox |
@@ -1914,6 +1914,20 @@ details of W-L04 to W-L09. The critical path is W-L01 → W-L02/W-L04 → W-L15 
 W-L06/W-L07 (graphics).
 
 ### 16.6 Notes log
+
+- 2026-10-16 (claude-opus-5.5): **WM2 done.** `main_menu_nav.txt` in Chromium (60 FPS default
+  cap) vs native `baseline_webgpu`: every capture selects the native row; the static menu panel
+  (x 130-620, y 140-600) is 40.6-51.6 dB, the full frame 38.3-39.1 dB (golden.toml's main-menu
+  gate is 35 dB). The full-frame gap is the animated background layer at a different phase;
+  two native runs differ in the same layer (42-56 dB). Settings overlay works (F1, Back+Start).
+  **WM6 status:** `ride_middle_name_danger` holds 60 FPS for most of the ride but 9 of ~104
+  riding seconds fall below 55 (lowest 28-44) in heavy explosion scenes (1,500-1,800
+  draws/frame). Not the browser shader cache (same with a kept profile, `cdp.py --profile`),
+  not first-use pipelines (new web log line: at most 36 ms of creation in a second), not the
+  GPU worker (new web log line: 37-74% idle in the slow seconds). CDP CPU profiles of all
+  threads over 20 s of riding: the game's main thread ~50% busy, flat (no hot function); the
+  GPU worker ~40%. The slow seconds are the guest's frame work (wasm, ~2x native) plus the
+  GPU worker's per-frame work in series. Next: W-L03/W-L11.
 
 - 2026-10-16 (claude-opus-5.5): **pi-gpt ran out of usage; Claude takes over W-L08** and
   committed pi-gpt's finished, uncommitted work as-is (W-L08 input/settings, W-L10 storage and

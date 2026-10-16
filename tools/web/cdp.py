@@ -292,7 +292,9 @@ async def drive(s, args):
 async def run(args):
     chromium = shutil.which(args.chromium) or args.chromium
     port = free_port()
-    profile = tempfile.mkdtemp(prefix="trials-hd-chromium-")
+    # A kept profile keeps the browser's caches (shaders, OPFS) between runs.
+    keep = getattr(args, "profile", None)
+    profile = str(keep) if keep else tempfile.mkdtemp(prefix="trials-hd-chromium-")
     env = dict(os.environ)
     if Path(RADV_ICD).exists():
         env["VK_ICD_FILENAMES"] = RADV_ICD
@@ -320,7 +322,8 @@ async def run(args):
             browser.wait(10)
         except subprocess.TimeoutExpired:
             browser.kill()
-        shutil.rmtree(profile, ignore_errors=True)
+        if not keep:
+            shutil.rmtree(profile, ignore_errors=True)
 
 
 def main():
@@ -337,6 +340,8 @@ def main():
     parser.add_argument("--out-dir", type=Path, default=Path("out/run"), help="output directory for captures")
     parser.add_argument("--viewport", help="exact page size in CSS pixels, e.g. 1280x720")
     parser.add_argument("--chromium", default="chromium")
+    parser.add_argument("--profile", type=Path,
+                        help="browser profile directory to use and keep (default: a fresh one)")
     args = parser.parse_args()
     sys.exit(asyncio.run(run(args)))
 
