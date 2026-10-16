@@ -15,12 +15,22 @@
 #include <rex/ppc/context.h>
 #include <rex/ppc/func.h>
 
+REX_EXTERN(__imp__sub_8261ECE0);
 REX_EXTERN(__imp__sub_8263B570);
 
 namespace {
-constexpr uint32_t kOfflineWarningPending = 0x82748498;
+// Global mask at 0x82768498 (-31592 from 0x82770000) of players pending the
+// PRETRACK_OFFLINE_WARNING popup.
+constexpr uint32_t kOfflineWarningPending = 0x82768498;
 }  // namespace
 
+// Sign-in status poll: clears the warning mask so offline warnings are never flagged.
+extern "C" REX_FUNC(sub_8261ECE0) {
+  __imp__sub_8261ECE0(ctx, base);
+  rex::memory::store_and_swap<uint32_t>(base + kOfflineWarningPending, 0);
+}
+
+// Pre-track entry: ensure mask is cleared so the popup is bypassed.
 extern "C" REX_FUNC(sub_8263B570) {
   rex::memory::store_and_swap<uint32_t>(base + kOfflineWarningPending, 0);
   __imp__sub_8263B570(ctx, base);
