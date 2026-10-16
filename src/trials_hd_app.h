@@ -219,6 +219,37 @@ class TrialsHdApp : public rex::ReXApp {
         }
       }
     }
+
+    // Keep all save data, player profiles, achievements, cache, and settings
+    // self-contained in the build directory right next to the settings config
+    // (trials_hd.toml), and never save anything to system/home directories.
+    auto base_dir = paths.config_path.parent_path();
+    if (base_dir.empty()) {
+      base_dir = rex::filesystem::GetExecutableFolder();
+    }
+
+    if (rex::cvar::GetFlagSource("user_data_root") == rex::cvar::Source::kDefault) {
+      paths.user_data_root = base_dir;
+    }
+    if (rex::cvar::GetFlagSource("cache_root") == rex::cvar::Source::kDefault) {
+      paths.cache_root = base_dir / "cache";
+    }
+
+    // If legacy save data exists in the user home directory (~/.local/share/trials_hd),
+    // copy it into the build directory so existing player progress is not lost.
+    auto legacy_dir = rex::filesystem::GetUserFolder() / "trials_hd";
+    if (std::filesystem::exists(legacy_dir) && legacy_dir != base_dir) {
+      std::error_code ec;
+      for (const auto& entry : std::filesystem::directory_iterator(legacy_dir, ec)) {
+        auto dest = base_dir / entry.path().filename();
+        if (!std::filesystem::exists(dest)) {
+          std::filesystem::copy(entry.path(), dest,
+                                std::filesystem::copy_options::recursive |
+                                std::filesystem::copy_options::skip_existing,
+                                ec);
+        }
+      }
+    }
   }
 
   // Report the license stored in the player's own package (full or trial).
@@ -339,7 +370,7 @@ class TrialsHdApp : public rex::ReXApp {
       return;
     }
     graphics_settings_ = new trials_hd::GraphicsSettingsDialog(
-        imgui_drawer(), rex::filesystem::GetExecutableFolder() / "trials_hd.toml",
+        imgui_drawer(), config_path(),
         [this] {
           graphics_settings_ = nullptr;
           // The button that closed the menu is still down; don't let the game

@@ -42,6 +42,7 @@ commit by CMake at configure time; regenerate with tools/export_sdk_patch.sh).
   ~1400 times per second with VSync off)
 - xam: ContentManager discovers DLC packages and headers from game_data_root / "content"
   and game_data_root in addition to user_data_root
+- storage & paths: default user data directory next to executable (self-contained); config_path() getter
 
 diff --git a/include/rex/graphics/command_processor.h b/include/rex/graphics/command_processor.h
 index da8e432..74b87ff 100644
@@ -295,6 +296,18 @@ index c8751b7..9271ff4 100644
  
    // Packet number incremented on state change
    uint32_t packet_number_ = 0;
+diff --git a/include/rex/rex_app.h b/include/rex/rex_app.h
+index 1f52480..a480b4e 100644
+--- a/include/rex/rex_app.h
++++ b/include/rex/rex_app.h
+@@ -257,6 +257,7 @@ class ReXApp : public ui::WindowedApp, public ui::WindowListener, public ui::Win
+   const std::filesystem::path& update_data_root() const { return update_data_root_; }
+   const std::filesystem::path& cache_root() const { return cache_root_; }
+   const std::filesystem::path& metadata_root() const { return metadata_root_; }
++  const std::filesystem::path& config_path() const { return config_path_; }
+ 
+   /// Set a callback that provides guest frame stats to the debug overlay.
+   void SetGuestFrameStats(ui::DebugOverlayDialog::FrameStatsProvider provider);
 diff --git a/include/rex/ui/imgui_dialog.h b/include/rex/ui/imgui_dialog.h
 index a7ab6b3..5db4278 100644
 --- a/include/rex/ui/imgui_dialog.h
@@ -13679,6 +13692,16 @@ index b94fe9e..4d906b3 100644
  
  namespace rex {
  
+@@ -118,7 +118,7 @@ bool ReXApp::SetupEnvironment() {
+   std::string user_data_cvar = REXCVAR_GET(user_data_root);
+   if (!user_data_cvar.empty()) {
+     user_dir = user_data_cvar;
+   } else {
+-    user_dir = rex::filesystem::GetUserFolder() / GetName();
++    user_dir = exe_dir;
+   }
+ 
+   // Update data: cvar override, or empty (opt-in)
 @@ -421,6 +421,10 @@ void ReXApp::SetupOverlays(rex::ui::Presenter* presenter, rex::ui::ImmediateDraw
        achievements_overlay_.reset();
      } else {
