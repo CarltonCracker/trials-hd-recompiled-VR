@@ -387,13 +387,6 @@ extern "C" REX_FUNC(sub_82664F98) {
     const double vsync_refresh = trials_hd::VsyncRefreshRate();
     if (vsync_refresh > 0 && (r == 0 || r > vsync_refresh)) {
       r = vsync_refresh;
-    } else if (r == 0) {
-      // Unlimited mode: pace to active display's refresh rate (e.g. 240 Hz) when a high-refresh
-      // display is available, delivering smooth 200+ FPS without flood-saturating the GPU queue.
-      const double display_refresh = trials_hd::DisplayRefreshRate();
-      if (display_refresh >= 120.0) {
-        r = display_refresh;
-      }
     }
     return r;
   };

@@ -3,7 +3,45 @@
 **Target Audience:** Advanced AI model / senior graphics engineer reviewing the Vulkan (`librexgpu-xenos`) performance bottleneck.  
 **Date:** October 16, 2026  
 **Repository:** `trials-hd-recompiled`  
-**Status:** Open Bug — Unlocked FPS regresses to 75–90 FPS @ 100% GPU usage on Vulkan, whereas WebGPU achieves 200+ FPS smoothly on the same hardware.
+**Status:** **Resolved (October 16, 2026)** — see "Resolution" below. The analysis in sections 3–6 was written before the cause was found; most of its hypotheses (queue submission count, SDL event hop, Wayland WSI, resolve passes) turned out not to be the cause.
+
+---
+
+## Resolution
+
+**Root cause:** an upstream ReXGlue SDK bug in `VulkanPresenter::PaintAndPresentImpl` (`thirdparty/rexglue-sdk/src/ui/vulkan/vulkan_presenter.cpp`). Before drawing the guest output to the swapchain, the presenter checks whether the final-effect pipeline was created for the current swapchain format:
+
+```cpp
+if (swapchain_effect_pipeline.swapchain_pipeline != VK_NULL_HANDLE &&
+    swapchain_effect_pipeline.swapchain_format != paint_context_.swapchain_render_pass_format) {
+  paint_context_.submission_tracker.AwaitSubmissionCompletion(
+      paint_context_.guest_output_image_paint_last_submission);
+  // destroy the pipeline, then recreate it below
+```
+
+`swapchain_format` was never assigned after creating the pipeline (Xenia's original code does), so it stayed `VK_FORMAT_UNDEFINED` and the check fired on **every paint**. Each paint therefore blocked the UI thread until the *previous paint* finished on the GPU, which sits behind every guest frame queued since. Then it recreated the pipeline.
+
+- With GPU headroom (120 FPS cap, ~70% busy), that wait is short, so nothing looks wrong.
+- When GPU-bound, the wait is about two guest frames (≈11.7 ms at 2560x1440 on the RX 7800 XT). The presenter's mailbox shows only the newest guest output, so **every other rendered frame was dropped**: the guest rendered ~169 FPS (GPU 100% busy), but only ~85 FPS were presented. That is the 70–90 FPS MangoHud showed.
+- WebGPU presents from its own backend and never ran this code.
+
+How it was found: a headless Wayland compositor (`weston --backend=headless --renderer=gl`, 2560x1440 @ 240 Hz, real GPU) plus the virtual pad riding *Middle Name: Danger*, with per-stage timing of `PaintAndPresentImpl` and `eu-stack` samples of the UI thread. The samples showed it blocked in `vkWaitForFences` under `AwaitSubmissionCompletion`, and in one sample inside `CreateGuestOutputPaintPipeline` during gameplay.
+
+**Fix** (in `patches/rexglue-sdk/trials-hd.patch`): record `swapchain_format` once the pipeline is created. Also:
+- The presenter counts presented frames (`Presenter::presented_frame_count()`), and the `log_guest_fps` line now ends with `presented fps: N`. `tests/check_fps_log.py` fails if presented FPS falls below 95% of guest FPS.
+- `present_fps_limit = 0` ("Unlimited" in the settings UI) is uncapped again (`src/fps_unlock.cpp`). An earlier attempt to fix this bug had silently capped it at the display refresh rate. VSync still caps at the refresh rate.
+
+**Results** (riding, 2560x1440 swapchain, RX 7800 XT, IMMEDIATE mode, guest / presented FPS):
+
+| Configuration | Before | After |
+|---|---|---|
+| Vulkan, 2x scale, unlimited | 169 / 85 | 168–170 / 168–170 |
+| Vulkan, 2x scale, 165 cap | collapsed | 165 / 165 |
+| Vulkan, 2x scale, 120 cap | 120 / 120 | 120 / 120 |
+| Vulkan, 1x scale, unlimited | capped at 240 | 250–264 / 250–264 |
+| WebGPU, 2x scale, unlimited | 216 | 214 |
+
+**Still open (separate from this bug):** at 2x scale, Vulkan costs ~5.9 ms of GPU time per frame versus ~4.6 ms for WebGPU (both GPU-bound at 98–100%). That is a renderer-efficiency gap, not a pacing or presentation problem.
 
 ---
 

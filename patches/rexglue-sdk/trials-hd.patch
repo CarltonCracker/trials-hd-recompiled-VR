@@ -38,6 +38,13 @@ commit by CMake at configure time; regenerate with tools/export_sdk_patch.sh).
   WAIT_REG_MEM naps after a short spin instead of yielding for the whole wait
 - threading: event-driven WaitMultiple (sleeps until a condition changes
   instead of polling every millisecond and spinning near each timeout)
+- vulkan presenter: remember the swapchain format of the final guest output
+  paint pipeline (the format check failed on every paint, so each paint
+  awaited the previous one on the GPU behind the queued guest frames and
+  recreated the pipeline - GPU-bound, only every other frame was presented:
+  2560x1440 on an RX 7800 XT, 169 FPS rendered but 85 presented -> 169);
+  presented frames are counted (Presenter::presented_frame_count) and shown
+  as "presented fps" on the log_guest_fps line
 - ui: dialogs say whether they need continuous repaint; the always-present
   achievement toast only does while showing one (the window was repainted
   ~1400 times per second with VSync off)
@@ -1189,10 +1196,22 @@ index 294d706..77072bc 100644
  
  }  // namespace rex::ui
 diff --git a/include/rex/ui/presenter.h b/include/rex/ui/presenter.h
-index afb4a30..484f961 100644
+index afb4a30..406702a 100644
 --- a/include/rex/ui/presenter.h
 +++ b/include/rex/ui/presenter.h
-@@ -375,6 +375,15 @@ class Presenter {
+@@ -358,6 +358,11 @@ class Presenter {
+   bool RefreshGuestOutput(uint32_t frontbuffer_width, uint32_t frontbuffer_height,
+                           uint32_t display_aspect_ratio_x, uint32_t display_aspect_ratio_y,
+                           std::function<bool(GuestOutputRefreshContext& context)> refresher);
++  // Frames successfully presented to the host surface so far (from any thread),
++  // for comparing with the number of guest frames in diagnostics.
++  uint64_t presented_frame_count() const {
++    return presented_frame_count_.load(std::memory_order_relaxed);
++  }
+   // The implementation must be callable from any thread, including from
+   // multiple at the same time, and it should acquire the latest guest output
+   // image via ConsumeGuestOutput.
+@@ -375,6 +380,15 @@ class Presenter {
    void RequestUIPaintFromUIThread();
  
   protected:
@@ -1208,7 +1227,7 @@ index afb4a30..484f961 100644
    enum class PaintResult {
      kPresented,
      kPresentedSuboptimal,
-@@ -386,6 +395,21 @@ class Presenter {
+@@ -386,6 +400,21 @@ class Presenter {
      kGpuLostResponsible,
    };
  
@@ -1230,6 +1249,15 @@ index afb4a30..484f961 100644
    enum class SurfacePaintConnectResult {
      // Redrawing not necessary, nothing changed. Must not be returned for a new
      // connection (when was previously disconnected from the surface).
+@@ -933,6 +962,8 @@ class Presenter {
+   // repaint request anyway.
+   std::atomic<bool> ui_thread_paint_requested_{false};
+ 
++  std::atomic<uint64_t> presented_frame_count_{0};
++
+   std::mutex guest_output_paint_config_mutex_;
+   // UI thread: writable, guest output thread: read-only.
+   GuestOutputPaintConfig guest_output_paint_config_;
 diff --git a/include/rex/ui/renderdoc_api.h b/include/rex/ui/renderdoc_api.h
 index 536f710..665b647 100644
 --- a/include/rex/ui/renderdoc_api.h
@@ -15033,7 +15061,7 @@ index 3027dc8..2619fc7 100644
    SCOPE_profile_cpu_f("gpu");
  
 diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
-index 001f36b..538363f 100644
+index 001f36b..bb7a773 100644
 --- a/src/graphics/vulkan/command_processor.cpp
 +++ b/src/graphics/vulkan/command_processor.cpp
 @@ -10,6 +10,8 @@
@@ -15070,7 +15098,7 @@ index 001f36b..538363f 100644
  REXCVAR_DEFINE_BOOL(vulkan_async_skip_incomplete_frames, true, "GPU/Vulkan",
                      "When async shader compilation is enabled, skip presenting frames that "
                      "used placeholder pipelines to avoid visible flashing")
-@@ -2275,6 +2295,26 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+@@ -2275,6 +2295,34 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
    vertex_buffers_in_sync_[0] = 0;
    vertex_buffers_in_sync_[1] = 0;
  
@@ -15079,16 +15107,24 @@ index 001f36b..538363f 100644
 +    using clock = std::chrono::steady_clock;
 +    static clock::time_point window_start = clock::now();
 +    static uint32_t swaps = 0;
++    // Frames that reached the host surface - fewer than the guest frames when
++    // the presenter drops some (it shows only the newest guest output).
++    static uint64_t presented_at_window_start = 0;
 +    ++swaps;
 +    const auto elapsed = clock::now() - window_start;
 +    if (elapsed >= std::chrono::seconds(1)) {
 +      const uint32_t draws = g_draws_since_report.exchange(0);
 +      const uint32_t copies = g_copies_since_report.exchange(0);
 +      const uint32_t skipped = g_skipped_draws_since_report.exchange(0);
++      const ui::Presenter* fps_presenter =
++          graphics_system_ ? graphics_system_->presenter() : nullptr;
++      const uint64_t presented = fps_presenter ? fps_presenter->presented_frame_count() : 0;
++      const double seconds = std::chrono::duration<double>(elapsed).count();
 +      REXGPU_INFO("guest fps: {:.1f} draws/frame: {:.1f} resolves/frame: {:.1f} "
-+                  "skipped draws/frame: {:.1f}",
-+                  swaps / std::chrono::duration<double>(elapsed).count(),
-+                  double(draws) / swaps, double(copies) / swaps, double(skipped) / swaps);
++                  "skipped draws/frame: {:.1f} presented fps: {:.1f}",
++                  swaps / seconds, double(draws) / swaps, double(copies) / swaps,
++                  double(skipped) / swaps, (presented - presented_at_window_start) / seconds);
++      presented_at_window_start = presented;
 +      swaps = 0;
 +      window_start = clock::now();
 +    }
@@ -15097,7 +15133,7 @@ index 001f36b..538363f 100644
    if (!graphics_system_)
      return;
    ui::Presenter* presenter = graphics_system_->presenter();
-@@ -2304,6 +2344,23 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+@@ -2304,6 +2352,23 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
      return;
    }
  
@@ -15121,7 +15157,7 @@ index 001f36b..538363f 100644
    SwapPostEffect swap_post_effect = GetActualSwapPostEffect();
  
    // Obtain the actual swap source texture size (resolution-scaled if it's a
-@@ -2395,7 +2452,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+@@ -2395,7 +2460,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
            frontbuffer_width_scaled, frontbuffer_height_scaled);
      }
    }
@@ -15130,7 +15166,7 @@ index 001f36b..538363f 100644
        "XELOG_GPU PRESENT: swap_texture_view={:p} packet_size={}x{} src_size={}x{} "
        "src_unscaled={}x{} guest_output_size={}x{} format={}",
        static_cast<void*>(swap_texture_view), frontbuffer_width, frontbuffer_height,
-@@ -2411,8 +2468,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+@@ -2411,8 +2476,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
    presenter->RefreshGuestOutput(
        guest_output_width, guest_output_height, display_width, display_height,
        [this, guest_output_width, guest_output_height, frontbuffer_format, swap_texture_view,
@@ -15140,7 +15176,7 @@ index 001f36b..538363f 100644
          // In case the swap command is the only one in the frame.
          if (!BeginSubmission(true)) {
            return false;
-@@ -2604,6 +2660,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+@@ -2604,6 +2668,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
  
          VkImageSubresourceRange guest_output_subresource_range =
              ui::vulkan::util::InitializeSubresourceRange();
@@ -15148,7 +15184,7 @@ index 001f36b..538363f 100644
          if (use_compute_gamma) {
            // Transition the destination image for compute writes. Contents are
            // fully overwritten, so old layout can always be UNDEFINED.
-@@ -2639,7 +2696,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+@@ -2639,7 +2704,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
            VkDescriptorImageInfo swap_descriptor_destination_storage_image_info;
            swap_descriptor_destination_storage_image_info.sampler = VK_NULL_HANDLE;
            swap_descriptor_destination_storage_image_info.imageView =
@@ -15157,7 +15193,7 @@ index 001f36b..538363f 100644
            swap_descriptor_destination_storage_image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
            VkWriteDescriptorSet swap_descriptor_destination_storage_write;
            swap_descriptor_destination_storage_write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-@@ -2719,8 +2776,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+@@ -2719,8 +2784,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
                  swap_descriptors_fxaa_destination_storage_[swap_frame_index];
              VkDescriptorImageInfo swap_descriptor_fxaa_destination_storage_image_info;
              swap_descriptor_fxaa_destination_storage_image_info.sampler = VK_NULL_HANDLE;
@@ -15167,7 +15203,7 @@ index 001f36b..538363f 100644
              swap_descriptor_fxaa_destination_storage_image_info.imageLayout =
                  VK_IMAGE_LAYOUT_GENERAL;
              VkWriteDescriptorSet swap_descriptor_fxaa_destination_storage_write =
-@@ -2926,7 +2982,9 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+@@ -2926,7 +2990,9 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
  
    // End the frame even if did not present for any reason (the image refresher
    // was not called), to prevent leaking per-frame resources.
@@ -15178,7 +15214,7 @@ index 001f36b..538363f 100644
  }
  
  bool VulkanCommandProcessor::PushBufferMemoryBarrier(
-@@ -3590,6 +3648,7 @@ Shader* VulkanCommandProcessor::LoadShader(xenos::ShaderType shader_type, uint32
+@@ -3590,6 +3656,7 @@ Shader* VulkanCommandProcessor::LoadShader(xenos::ShaderType shader_type, uint32
  bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t index_count,
                                         IndexBufferInfo* index_buffer_info,
                                         bool major_mode_explicit) {
@@ -15186,7 +15222,7 @@ index 001f36b..538363f 100644
  #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
    SCOPE_profile_cpu_f("gpu");
  #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
-@@ -3681,6 +3740,17 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3681,6 +3748,17 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    }
    reg::RB_DEPTHCONTROL normalized_depth_control = draw_util::GetNormalizedDepthControl(regs);
  
@@ -15204,7 +15240,7 @@ index 001f36b..538363f 100644
    uint32_t ps_param_gen_pos = UINT32_MAX;
    uint32_t interpolator_mask =
        pixel_shader ? (vertex_shader->writes_interpolators() &
-@@ -3839,6 +3909,14 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3839,6 +3917,14 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
  
    const VulkanPipelineCache::PipelineLayoutProvider* pipeline_layout_provider;
    // Set up the render targets - this may perform dispatches and draws.
@@ -15219,7 +15255,7 @@ index 001f36b..538363f 100644
    if (!render_target_cache_->Update(is_rasterization_done, normalized_depth_control,
                                      normalized_color_mask, *vertex_shader)) {
      return draw_fail("render_target_update");
-@@ -4166,8 +4244,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4166,8 +4252,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
      shared_memory_->RangeWrittenByGpu(0, SharedMemory::kBufferSize);
    }
  
@@ -15230,7 +15266,7 @@ index 001f36b..538363f 100644
      uint32_t memexport_total_size = 0;
      for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
        memexport_total_size += memexport_range.size_bytes;
-@@ -4382,6 +4460,7 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
+@@ -4382,6 +4468,7 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
  }
  
  bool VulkanCommandProcessor::IssueCopy() {
@@ -15238,7 +15274,7 @@ index 001f36b..538363f 100644
  #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
    SCOPE_profile_cpu_f("gpu");
  #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
-@@ -4423,6 +4502,10 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+@@ -4423,6 +4510,10 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
    if (readback_mode == ReadbackResolveMode::kDisabled) {
      return true;
    }
@@ -16880,6 +16916,22 @@ index e886a88..fd74aaf 100644
  }
  
  }  // namespace rex::ui
+diff --git a/src/ui/presenter.cpp b/src/ui/presenter.cpp
+index 7360ed9..34f7c39 100644
+--- a/src/ui/presenter.cpp
++++ b/src/ui/presenter.cpp
+@@ -1500,9 +1500,11 @@ Presenter::PaintResult Presenter::PaintAndPresent(bool execute_ui_drawers) {
+   PaintResult result = PaintAndPresentImpl(execute_ui_drawers);
+   switch (result) {
+     case PaintResult::kPresented:
++      presented_frame_count_.fetch_add(1, std::memory_order_relaxed);
+       surface_paint_connection_was_optimal_at_successful_paint_ = true;
+       break;
+     case PaintResult::kPresentedSuboptimal:
++      presented_frame_count_.fetch_add(1, std::memory_order_relaxed);
+       // Make outdated if previously optimal, now suboptimal, but don't cause
+       // the connection to become outdated if it has been suboptimal from the
+       // very beginning.
 diff --git a/src/ui/renderdoc_api.cpp b/src/ui/renderdoc_api.cpp
 index e1a5287..356ace6 100644
 --- a/src/ui/renderdoc_api.cpp
@@ -17043,7 +17095,7 @@ index 914b311..69e65ba 100644
    if (vulkan_instance->extensions_.ext_KHR_wayland_surface) {
  #include <rex/ui/vulkan/functions/instance_khr_wayland_surface.inc>
 diff --git a/src/ui/vulkan/vulkan_presenter.cpp b/src/ui/vulkan/vulkan_presenter.cpp
-index 23645ef..c8c2328 100644
+index 23645ef..9ce2604 100644
 --- a/src/ui/vulkan/vulkan_presenter.cpp
 +++ b/src/ui/vulkan/vulkan_presenter.cpp
 @@ -49,6 +49,10 @@
@@ -17074,6 +17126,20 @@ index 23645ef..c8c2328 100644
      switch (surface_type) {
  #if REX_PLATFORM_ANDROID
        case Surface::kTypeIndex_AndroidNativeWindow: {
+@@ -1840,6 +1854,13 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+                 swapchain_effect, paint_context_.swapchain_render_pass);
+             if (swapchain_effect_pipeline.swapchain_pipeline == VK_NULL_HANDLE) {
+               guest_output_flow.effect_count = 0;
++            } else {
++              // Without this, the format check above fails on every paint, and
++              // each paint awaits the previous one on the GPU (behind all the
++              // queued guest frames) and recreates the pipeline - when
++              // GPU-bound, only every other guest frame is presented.
++              swapchain_effect_pipeline.swapchain_format =
++                  paint_context_.swapchain_render_pass_format;
+             }
+           }
+         }
 diff --git a/src/ui/web/web_ui.cpp b/src/ui/web/web_ui.cpp
 new file mode 100644
 index 0000000..ea51e07

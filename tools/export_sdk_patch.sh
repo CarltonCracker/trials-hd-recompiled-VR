@@ -53,6 +53,13 @@ commit by CMake at configure time; regenerate with tools/export_sdk_patch.sh).
   WAIT_REG_MEM naps after a short spin instead of yielding for the whole wait
 - threading: event-driven WaitMultiple (sleeps until a condition changes
   instead of polling every millisecond and spinning near each timeout)
+- vulkan presenter: remember the swapchain format of the final guest output
+  paint pipeline (the format check failed on every paint, so each paint
+  awaited the previous one on the GPU behind the queued guest frames and
+  recreated the pipeline - GPU-bound, only every other frame was presented:
+  2560x1440 on an RX 7800 XT, 169 FPS rendered but 85 presented -> 169);
+  presented frames are counted (Presenter::presented_frame_count) and shown
+  as "presented fps" on the log_guest_fps line
 - ui: dialogs say whether they need continuous repaint; the always-present
   achievement toast only does while showing one (the window was repainted
   ~1400 times per second with VSync off)

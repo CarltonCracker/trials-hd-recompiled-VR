@@ -16,6 +16,8 @@ with tempfile.TemporaryDirectory() as directory:
         (sample.replace("draws/frame: 72.0", "draws/frame: 0.0") * 30, False),
         (sample.replace("guest fps: 120.0", "guest fps: 60.0") * 30, False),
         (sample * 30 + "Unhandled guest access violation", False),
+        (sample.replace("1.0\n", "1.0 presented fps: 120.0\n") * 30, True),
+        (sample.replace("1.0\n", "1.0 presented fps: 60.0\n") * 30, False),
     ]:
         log.write_text(text)
         result = subprocess.run([sys.executable, str(checker), str(log), "120"],

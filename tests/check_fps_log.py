@@ -21,6 +21,12 @@ assert 59 <= fixed <= 61, f"fixed updates ran at {fixed:.2f} Hz"
 assert abs(render - guest) <= max(3, guest * .05), "render dispatch did not produce real swaps"
 assert min(b for _, b, _ in frames) > 0, "frames have no game draws"
 assert min(c for _, _, c in frames) > 0, "frames have no game resolves"
+# Logs from builds that report presents: every rendered frame must reach the
+# surface (the Vulkan presenter once showed only every other one when GPU-bound).
+presented = [float(p) for p in re.findall(r"guest fps: [\d.]+ .*presented fps: ([\d.]+)", text)]
+if presented:
+    shown = statistics.median(presented[-15:])
+    assert shown >= guest * .95, f"presented {shown:.1f} of {guest:.1f} guest FPS"
 if len(sys.argv) > 2:
     limit = float(sys.argv[2])
     assert abs(render - limit) <= max(3, limit * .05), f"render cap: {render} != {limit}"
