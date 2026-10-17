@@ -362,6 +362,18 @@ class TrialsHdApp : public rex::ReXApp {
     }
     REXLOG_INFO("readback_memexport = {}", rex::cvar::GetFlagByName("readback_memexport"));
 
+    // The SDK default drops the valid state of every page the CPU uploaded at
+    // each frame end, so every vertex and index buffer a frame draws from is
+    // uploaded again the next frame (~600 pages, 2.4 MB per frame while
+    // riding). Trials' CPU writes are caught by the write watches, so pages
+    // only need uploading when the game rewrites them (~35 per frame). On an
+    // x4 PCIe link this was 2.4 of 6 ms of GPU time per frame at 720p.
+    if (rex::cvar::GetFlagSource("clear_memory_page_state") == rex::cvar::Source::kDefault) {
+      rex::cvar::SetFlagByName("clear_memory_page_state", "false");
+    }
+    REXLOG_INFO("clear_memory_page_state = {}",
+                rex::cvar::GetFlagByName("clear_memory_page_state"));
+
     // For Vulkan: avoid splitting each frame into multiple queue submissions.
     // Batching primary buffers into a single submission per frame (matching WebGPU)
     // eliminates vkQueueSubmit overhead, fence thrashing, and pipeline stalls.

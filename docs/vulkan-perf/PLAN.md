@@ -1,7 +1,13 @@
 # Vulkan renderer: Trials HD specialization and performance plan
 
-**Goal (user, 2026-10-16):** 500 FPS at 2560x1440 (2x resolution scale) and 1000 FPS at
-1280x720 (1x) on an RX 7800 XT (RADV, Mesa 26.2.2) with a Ryzen 7 5700X.
+**Goal (user, 2026-10-17 — the only goal now):** **500 FPS at 2560x1440 (2x resolution
+scale) on the RX 7800 XT** (RADV, Ryzen 7 5700X; the user's main PC, where the user runs
+the benchmarks). That is a **2.0 ms frame budget** for the GPU and for every CPU thread on
+the render path; 720p is no longer a target. Development measurements in this session
+come from an RTX 2070 Super (section 1.7, about 3x slower GPU at 1440p), used as a proxy
+for 1440p GPU time.
+
+*Earlier goal (2026-10-16, superseded):* additionally 1000 FPS at 720p.
 
 **Approach:** turn the Vulkan backend (`librexgpu-xenos`, the Xenia-derived code in
 `thirdparty/rexglue-sdk/src/graphics/vulkan/`) from an "every Xbox 360 game" emulator into a
@@ -103,6 +109,26 @@ waits for it in `WAIT_REG_MEM` ~20% of the time. More GPU or CP-thread work will
 up as FPS until the guest thread gets faster: C12, C7 (write-watch faults on the guest
 thread), `rex::perf` counters (see future leads) and `DrawInterpolated` in
 `src/fps_unlock.cpp`. (X1/X2 were dropped by the user: enhancements only, no rewrites.)
+
+### 1.7 Second test machine: RTX 2070 Super on PCIe x4, Ryzen 7 3700X (2026-10-17)
+
+A headless Debian container (no `perf`: use `PERF=threads` in `tools/bench_vulkan.sh`,
+which samples `/proc` thread times and `eu-stack`). The GPU sits in a chipset slot
+(PCIe gen 2 x4), so CPU→GPU uploads are ~20x slower than on the RX 7800 XT.
+
+| | Start of session | Now |
+| --- | ---: | ---: |
+| 720p (1x) | 154 FPS (GPU 6.0 ms, 2.4 ms of it uploads) | **~245 FPS** |
+| 1440p (2x) | 75 FPS (GPU-bound) | **~95 FPS** (GPU 10.0 ms) |
+
+1440p GPU breakdown now (ms/frame): scene passes 4.0, dispatches 2.5 (resolve dumps
+1.06, resolves into textures 0.97), **ownership transfers 1.67** (26 passes), small
+passes 1.25, copies 0.31, uploads 0.27, barriers 0.13. At 720p this machine is held back
+by NVIDIA's Wayland WSI: `vkQueuePresentKHR` waits for the frame on the CPU (no explicit
+sync under headless weston) while holding the graphics queue lock, so the GPU Submit
+thread, then the CP thread at the swap and finally the game's fence wait all stall
+behind it. That is specific to this NVIDIA/weston setup (RADV doesn't block there); a
+separate present queue was tried and didn't help (see notes).
 
 ---
 
@@ -258,7 +284,7 @@ notes log.
 | --- | --- | :-: | --- |
 | F0 | Permanent GPU profiler cvar | S | done; cvar vulkan_gpu_profile hot-reload, zero-cost off (720p 243.1, 1440p 167.6), image PSNR 55.20 dB / SSIM 0.9998, 6/6 ctests pass, pinned check pass (antigravity-2) |
 | F1 | Trials fast-path switch and fallback counters | S | done; switch/counters and game gates pass (pi dependency takeover) |
-| F2 | Re-verify the Trials workload contract on the Vulkan path | S | open |
+| F2 | Re-verify the Trials workload contract on the Vulkan path | S | partly: render pass re-opens and ownership transfers listed per frame (notes 2026-10-17); formats/resolves still to recheck |
 
 **F0 — Permanent GPU profiler cvar.** Port `tools/profile/vk_gpu_prof.patch` into the
 SDK as cvar `vulkan_gpu_profile` (hot-reload; off by default; zero cost when off: one
@@ -289,15 +315,15 @@ draws. Write differences into section 7. Pure research, no committed code.
 | ID | Task | Tier | Est. gain (1440p) | Depends | Status |
 | --- | --- | :-: | --- | --- | --- |
 | G1 | Upload shared memory outside render passes | L | **1.5–2.0 ms** | F0 helpful | **done** (1440p +43%) |
-| G2 | Remove no-op render pass re-opens | M | 0.1–0.3 ms | — | released (premise gone after G1; see notes) |
+| G2 | Remove no-op render pass re-opens | M | 0.1–0.3 ms | — | **done** (merged at replay, 31/frame; passes 70 → 39) |
 | G3 | Resolve straight into textures (resolve aliases) | L | **1.0–1.4 ms** | F1 | **done** (GPU −1.75 ms; now CPU-bound) |
-| G4 | Don't reload the same resolved texture twice per frame | M | 0.2–0.5 ms | — | open |
-| G5 | Barrier diet | M | 0.3–0.6 ms (after G1) | G1 | open |
+| G4 | Don't reload the same resolved texture twice per frame | M | 0.2–0.5 ms | — | premise mostly gone after G3: texture loads 0.09 ms / 4 per frame at 1440p |
+| G5 | Barrier diet | M | 0.3–0.6 ms (after G1) | G1 | low value now: barriers 0.13 ms / 91 per frame at 1440p (2070S) |
 | G6 | Shadow maps at 1x while the scene is scaled | L | 0.2–0.5 ms | G3 | open |
 | G7 | Render area and RT image sizes from Trials' real extents | M | 0–0.3 ms (measure) | F0 | open |
 | G8 | Keep DCC on color render targets | S | 0–0.3 ms (measure) | — | done; 1440p 165.1 -> 167.4 (+1.4%), 720p 208.6, nodcc baseline 146.3 (-12.6%), image 53.25 dB / .9990, 0 fallbacks (antigravity) |
 | G9 | One pass from frontbuffer to swapchain | M | 0.1–0.2 ms | G3 | open |
-| G10 | Trials-specific ownership-transfer rules | M | 0.1–0.3 ms | F0 | open |
+| G10 | Trials-specific ownership-transfer rules | M | 0.1–0.3 ms | F0 | measured: 1.67 ms / 26 passes at 1440p (2070S), ~38 transfers/frame, all needed (WebGPU doc 8.7); open: cheaper transfers, not fewer |
 
 **G1 — Upload shared memory outside render passes.** *Evidence:* 214 of ~275 passes per
 frame are split by uploads; 428 copies (3.2 MB) and ~430 of the 754 barriers per frame
@@ -427,12 +453,12 @@ replace them with clears behind F1. *Files:* `pipeline/render_target/cache.cpp`,
 | ID | Task | Tier | Est. gain (CP thread) | Depends | Status |
 | --- | --- | :-: | --- | --- | --- |
 | C1 | Replay and submit on a separate thread | L | **0.8–1.2 ms** | — | **done** (+3.8% at 720p; guest thread now limits) |
-| C2 | Descriptor model without per-draw allocate/update | L | 0.3–0.5 ms | F1 | open |
+| C2 | Descriptor model without per-draw allocate/update | L | 0.3–0.5 ms | F1 | **done** for constants (dynamic uniform buffers; 720p +2.2% on the 3700X); texture sets: reuse tried and reverted (notes) |
 | C3 | Skip texture/sampler binding work when fetch constants didn't change | M | 0.2–0.4 ms | — | open |
 | C4 | Trials-only system constant update | M | 0.1–0.3 ms | F1 | open |
 | C5 | MRU fast path for pipeline and shader-modification lookup | S | 0.1–0.2 ms | — | done; 720p 201.3 -> 237.1 FPS (+17.8%), 1440p 164.7 -> 166.6 (+1.2%), image PSNR 53.34 dB / .9989, 5/5 ctest pass (antigravity-2) |
 | C6 | Drop the dummy point draws before any backend work | S | 0.1–0.2 ms | — | done; 720p 201.3 -> 211.4 FPS (+5.0%), 1440p 165.1 FPS, image 51.71 dB / .9988, 169.0 skipped draws verified (antigravity) |
-| C7 | Stop write-watching Trials' per-frame dynamic buffers | L | 0.2–0.4 ms CP + guest faults | G1 | open |
+| C7 | Stop write-watching Trials' per-frame dynamic buffers | L | 0.2–0.4 ms CP + guest faults | G1 | open; faults are ~2.3% of the guest thread at 720p after G11 |
 | C8 | Build without Tracy in release | S | ~0.05 ms | — | done; 720p 236.3 -> 244.6 FPS (+3.5%), 1440p 166.4 (GPU-bound); ldd verified 0 Tracy links; ctest 5/5 (antigravity) |
 
 **C1 — Replay and submit on a separate thread.** `EndSubmission` replays the whole
@@ -581,6 +607,8 @@ whose draw *count* depends on the interpolated camera (culling). Research note f
 | C17 | 1 µs timer slack for the whole process (`prctl(PR_SET_TIMERSLACK)` in `src/gpu_wait.cpp`): the game and the CP thread hand off through short sleeps many times per frame, and the default 50 µs slack stretched each of them | S | 1440p stack samples (Claude Code) | **done** (1440p +3.7%) |
 | C18 | On-demand guest vblank (vsync off): Trials' command stream waits every frame (`WAIT_REG_MEM` on memory) for its vblank interrupt handler to release a semaphore, and the vblank timer ticks only every 1 ms | M | sync diagnostic (Claude Code) | **done** (1440p +16%, 720p +21%) |
 | C16 | Index textures by page for G3's `GetTexturesOverlapping` (a full texture-map scan per resolve, ~1.6% of the CP thread) | S | C1 profile (Claude Code) | **done** |
+| G12 | Resolve straight from the render target (skip the EDRAM dump) for G3's resolves whose source is owned by one render target with the resolve's own key | M | 1440p GPU profile (Claude Code) | **done** (dumps 19.5 → 8 per frame; 2070S 1440p GPU 10.0 → 9.55 ms, FPS 95 → 100 with G2) |
+| G11 | Don't re-upload every CPU-uploaded page each frame: `clear_memory_page_state` (SDK default true) dropped the valid state of all CPU-uploaded pages at every frame end, so every vertex/index buffer a frame used was uploaded again (~600 pages, 2.4 MB per frame); Trials defaults it to false | S | 2070S PCIe x4 profile (Claude Code) | **done** (720p 154 → 228, 1440p 75 → 95 on the 2070S) |
 
 ---
 
@@ -614,3 +642,12 @@ whose draw *count* depends on the interpolated camera (culling). Research note f
 - 2026-10-17 — **C17 accepted and integrated (Claude Code).** Stack samples at 1440p (`eu-stack`, 80 per thread) show the guest render thread in the Direct3D runtime's GPU-fence wait loop (`sub_82663B50` → … → `sub_821349A8` polling device+10896 through the hooked `sub_8212BC68` backoff) ~22% of the time and blocked ~9%, while the CP thread waits for the guest in `WAIT_REG_MEM` ~14% — a ping-pong of handoffs through short sleeps. `src/gpu_wait.cpp` now sets a 1 µs timer slack for the main thread at static-initialization time (all later threads inherit it) instead of the default 50 µs. Worktree 2 runs: 1440p 253.5 → **262.9 FPS** (+3.7%), 720p 269.2 (unchanged within noise); main smoke 1440p 264.7, 720p 262.9. Simulation stays at 60 Hz; `check_fps_log.py` / `check_render_pose_log.py` pass; ctest 6/6. The handoff ping-pong itself is a future lead (deeper buffering between the game and the CP thread).
 - 2026-10-17 — **C18 accepted and integrated (Claude Code).** A temporary diagnostic of the CP's sync packets (per-target `WAIT_REG_MEM` counts and wait time, memory-writing packets) showed one memory wait — `1FC9B004 == 0`, twice per frame, once satisfied immediately — costing the CP **~520 µs per frame**: the CP writes that word through scratch-register writeback, then waits for the game to clear it, which the game does from its **vblank interrupt handler**. With `vsync` off the vblank thread ticks only every 1 ms (and slept 1 ms between checks), so the CP waited half a period on average. An 8 kHz timer cut the wait to ~62 µs (1440p 262.9 → 315.5 in one run); the integrated version is on-demand: when a memory `WAIT_REG_MEM` isn't satisfied on its first check (Trials fast path, vsync off), the CP calls `GraphicsSystem::RequestVblank()`, and the vblank thread (now waiting on a condition variable with the 1 ms timeout instead of sleeping) delivers a vblank at once. Wait now **8.5 µs per frame**. Worktree 3 runs: **1440p 262.9 → 305.3 FPS (+16%), 720p ~269 → 326.0 (+21%)**; main 2 runs: 1440p 311.6, 720p 339.6. Simulation stays 60 Hz; `check_fps_log.py` / `check_render_pose_log.py` pass; captures within run-to-run PSNR; ctest 6/6. SDK patch 137 files, clean pinned apply.
 - 2026-10-17 — **C16 + part of C2 integrated (Claude Code).** C16: `TextureCache::textures_generation()` changes when a texture is created or destroyed, and G3's resolve-target lookup is cached per destination until it changes (`GetTexturesOverlapping` 160 → 11 CP-thread samples per 10 s). C2 (partial): float constants are copied into the uniform buffers in runs of consecutive used constants with one `memcpy` (the register file keeps them contiguous) instead of one vec4 per bit — `UpdateBindings`' own time 797 → 371 samples. Texture descriptor-set reuse was tried and reverted (net loss; details in future leads); dynamic-offset constant buffers remain open under C2. Worktree: 720p 326.0 → 329.9 FPS (3 runs), 1440p 305.3 → 313.1 (2 runs); main 327.7 / 316.8. Checks pass, captures within run-to-run PSNR, ctest 6/6.
+- 2026-10-17 — **Second test machine** (Claude Code): RTX 2070 Super (NVIDIA 615.78) in a PCIe gen 2 x4 slot, Ryzen 7 3700X, headless Debian container. Harness changes: the guest arena is backed by a `memfd` on Linux (Docker's 64 MB `/dev/shm` made it SIGBUS); `tools/bench_vulkan.sh` reads GPU busy from `nvidia-smi` when there's no amdgpu sysfs (meaningless in this container: 3–15% while GPU-bound), creates `XDG_RUNTIME_DIR` if missing, passes `--log_simulation_rate=true` (`check_fps_log.py` needs it), `CAPTURE=1` also saves `ride.ppm` 10 s into the ride, `PERF=threads` samples per-thread CPU and `eu-stack` stacks without `perf` (`tools/profile/thread_sample.sh`, `tools/profile/stack_top.py`), `WESTON_REFRESH_MHZ` sets the headless output rate (1000 Hz vs 240 Hz: no difference). `tools/export_sdk_patch.sh` keeps the description at the top of the patch instead of rewriting an old one. `vulkan_gpu_profile` has two new categories: `upload` (G1's hoisted uploads, which were counted as `other`) and `transfer` (ownership transfer passes).
+- 2026-10-17 — **G11 accepted (Claude Code).** On the x4 link the GPU profile showed 2.4 of 6.0 ms per frame at 720p in the hoisted shared-memory uploads: ~600 pages (2.4 MB) every frame. Cause: the SDK's `clear_memory_page_state` (default true; Xenia's default is false) runs `SetSystemPageBlocksValidWithGpuDataWritten()` at every frame end, which drops the valid state of every page the CPU uploaded, so each frame re-uploads every vertex/index buffer it draws from, changed or not. Trials' CPU writes are all caught by the write watches, so the game now defaults it to false (`src/trials_hd_app.h`, overridable): pages hoisted per frame ~600 → ~35, upload 2.4 → 0.21 ms. 720p **154 → 228 FPS** (2 runs: 227.3 / 229.3), 1440p **75.0 → 95.1 / 94.7**. All `check_fps_log.py` checks pass. Start-line capture old vs new default 39.6 / 46.7 dB (new vs new run-to-run: 39.7 dB); the mid-ride frame (explosion, particles, debris, shadows) checked by eye. On the RX 7800 XT the same uploads were ~0.1–0.2 ms of GPU plus ~2.9 MB/frame of CP-thread memcpy into write-combined memory; re-measure there.
+- 2026-10-17 — **G2 done (Claude Code), differently than planned.** The profile showed `split_same_rt=48, r0=30.9`: 31 passes per frame re-opened on the same attachments with no copy/barrier/dispatch in between, at both resolutions (the G2 investigation after G1 had found none, probably on a different path). A temporary diagnostic showed they are the same framebuffer re-opened after something ended the pass; most are an ownership transfer pass into the target being drawn whose source needs no barrier. `DeferredCommandBuffer::ExecuteStream` now drops an `EndRendering` + `BeginRendering` pair when only state commands (binds, push constants, dynamic state) lie between and the second begin has the same attachments, layouts, store ops and `LOAD` (Trials fast path; `render_passes_merged` stat ≈ 31/frame). Passes per frame 70 → 39. GPU time on the 2070S: 10.12 → ~10.0 ms at 1440p (≈1%; NVIDIA doesn't pay much per pass), mainly fewer driver calls on the submit thread. Start-line capture 40.2 dB vs before, mid-ride frame checked by eye. With `vulkan_gpu_profile` on, transfers merged into a draw pass count as that pass.
+- 2026-10-17 — Tried and reverted (Claude Code): presenting through a second queue of the graphics family so the presenter's blocking `vkQueuePresentKHR` (NVIDIA Wayland WSI) doesn't hold the queue the GPU Submit thread needs. No FPS change (154 → 153 at 720p, then GPU-bound by uploads) and presented FPS fell to half the rendered FPS. Retry only on a setup where the present is the measured limit and with presented FPS checked.
+- 2026-10-17 — G10 measurements (Claude Code): ~38 ownership transfers per frame while riding (one frame logged every 300; source/dest keys in this session's notes): shadow `k_16_16` 4x ↔ `D24FS8` reuse, 1x ↔ 4x reinterpretations of the 1280x672 scene (8888 and D24FS8), and 14 strips of 48 tiles from the 4x `D24S8` into the 1x `k_2_10_10_10_FLOAT` target. With `transfer` tagging they cost **1.67 ms of 10.0 ms** at 1440p on the 2070S (skipping them all, image wrong: 10.0 → 7.7 ms, an upper bound since later passes change too). All are needed (WebGPU doc 8.7: without them the light buffer goes white). Both drivers have `VK_EXT_shader_stencil_export`, so there are no stencil-bit passes to save. What's left is cheaper transfers (per-sample shading of 4x destinations at 2x scale).
+- 2026-10-17 — Guest render thread at 720p on the 3700X (300 `eu-stack` samples): 30% in the Direct3D runtime's fence wait (`sub_821349A8`, yielding), 14% blocked; of the rest, the effect-constant code `sub_8234FFC8` 4.7%, `sub_823485F0` 4.0% (recursive parameter → constant-register writer, called via `sub_823488C0`, 7.3% inclusive), `DrawInterpolated` 3.7%, write-watch fault handling 2.3% (C7). Candidates for C12.
+- 2026-10-17 — **G12 accepted (Claude Code).** `vulkan_gpu_profile` now also lists pass time per render target configuration (render pass key and host extent). 1440p on the 2070S (10.0 ms): the full-res 1x `k_2_10_10_10_FLOAT` light buffer 2.2 ms, transfers ~2.3 ms in total, resolve dumps 1.06 + resolves into textures 0.97 ms, 4x `k_16_16` shadow maps 0.93 ms, the 1x G-buffer (8888 x2 + D24FS8) 0.79 ms. 13 of the ~15 G3 resolves per frame read a render target with exactly their own format, pitch and MSAA (shadow `k_16_16` 4x → signed `16_16`, 1x and 4x 8888, 1x 2_10_10_10); the two `k_2_10_10_10_FLOAT` ones reinterpret 1x ↔ 4x and keep the dump. New shader variants `resolve_full_32bpp_image_rt*` (16: 1x/4x, float/uint view, raw/full, scaled/unscaled) reroute the resolve's EDRAM loads to a function that inverts the dump's addressing and packs the render target's transfer view like the dump (with a two-row cache of the mapping per invocation); the rest of the resolve shader is unchanged. Hot-reload cvar `vulkan_resolve_from_render_target` (default on under the fast path), `resolves_from_rt` ≈ 11.5/frame. Dumps 19.5 → 8 per frame, dump time 1.06 → 0.33 ms, resolve time 0.97 → 1.22 ms (fetching multisampled texels costs more than reading the dump), net GPU 10.0 → 9.55 ms. 1440p **95 → 100 FPS** (100.3 / 99.9) with G2. Correctness: paused-ride captures in one run with the cvar toggled (`RIDE_SCRIPT` + the pad's `set` command): on vs off differs by at most 4 levels, spread thinly over the frame, as much as two captures with the same setting (auto exposure keeps moving while paused); 1490 draws and 11.5 fused resolves per frame while paused. ctest 6/6, SDK patch applies cleanly (169 files).
+- 2026-10-17 — **C2 (constants) accepted (Claude Code).** The guest draw constant buffers are `UNIFORM_BUFFER_DYNAMIC` with fixed ranges (float constants get room for all 256 vec4s, only the used ones are copied), so the constants descriptor set depends only on which uniform-pool pages hold the five buffers: one set per combination, cached until the pools are cleared (pages are only destroyed then), and each draw that changes constants just rebinds it with new dynamic offsets — no allocation and no `vkUpdateDescriptorSets` for constants. Init-only cvar `vulkan_dynamic_constant_buffers` (default on under the fast path). 720p A/B, 2 runs each: 234.6 → **239.7 FPS (+2.2%)** on the 3700X / 2070S (CP-side gain partly hidden by the presenter stall here; on RADV `vkUpdateDescriptorSets` was a visible share of the CP thread, re-measure on the 7800 XT). Validation layers (`--vulkan_validation_enabled=true`) over a full 1440p ride with merging, fused resolves and dynamic constants on report only the 9 message types that also appear with them off. Start-line capture 42.7 dB vs the previous build, mid-ride frame checked by eye. Also: `vulkan_merge_render_passes` (hot reload) switches G2 off for A/B and profiling.
+- 2026-10-17 — Session totals on the 2070S / 3700X (relwithdebinfo): 1440p **75 → 99–100 FPS**, 720p **154 → ~240 FPS**. On the 7800 XT the expected effect is smaller on the GPU side (x16 PCIe made G11's uploads cheap there) and depends on how much of its CPU limit is the CP thread: note that the guest thread's "running ~90%" there includes spinning in the Direct3D fence wait (`sub_821349A8` yields in a loop, which counts as running), i.e. waiting for the CP thread. Profile the guest thread's non-wait share and the CP thread on the 7800 XT before more guest-code work (C12).

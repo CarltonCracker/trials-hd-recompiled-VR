@@ -10,7 +10,11 @@
 #   EXE=path        binary (default out/build/linux-amd64-relwithdebinfo/trials_hd)
 #   PERF=1          perf record (call graphs) for 10 s of the ride -> <out_dir>/perf.data
 #   PERF=stat       perf stat page faults / context switches -> <out_dir>/perfstat.txt
+#   PERF=threads    no perf needed (containers): per-thread CPU % and eu-stack samples
+#                   -> <out_dir>/prof/{threads,stacks}.txt (tools/profile/stack_top.py)
 #   CAPTURE=1       save the start-line frame (before the throttle) to <out_dir>/start.ppm
+#                   and a frame 10 s into the ride to <out_dir>/ride.ppm
+#   RIDE_SCRIPT=f   virtual pad script instead of tests/headless/bench_fps.txt
 #   TRIALS_GPU_PROF=1  with tools/profile/vk_gpu_prof.patch applied: GPU_PROF lines in the log
 # Output: <out_dir>/trials_hd.log, fps.txt, gpu_busy.txt; prints the bench_summary line.
 # The game rewrites trials_hd.toml next to the binary; it is backed up and restored.
@@ -29,8 +33,12 @@ mkdir -p "$out"
 exe="${EXE:-$root/out/build/linux-amd64-relwithdebinfo/trials_hd}"
 cfg="$(dirname "$exe")/trials_hd.toml"
 [[ -f "$cfg" ]] && cp "$cfg" "$out/config_backup.toml"
+# Containers often have no session runtime dir; weston needs one.
+if [[ -z "${XDG_RUNTIME_DIR:-}" ]]; then
+  export XDG_RUNTIME_DIR="/tmp/xdg-$(id -u)"; mkdir -p "$XDG_RUNTIME_DIR"; chmod 700 "$XDG_RUNTIME_DIR"
+fi
 sock="bench-$$"
-weston --backend=headless --renderer=gl --width="$w" --height="$h" --refresh-rate=240000 \
+weston --backend=headless --renderer=gl --width="$w" --height="$h" --refresh-rate=${WESTON_REFRESH_MHZ:-240000} \
   --socket="$sock" --idle-time=0 >"$out/weston.log" 2>&1 &
 wpid=$!
 sleep 1.5
@@ -40,7 +48,7 @@ export TRIALS_HD_VIRTUAL_PAD="$fifo"
 WAYLAND_DISPLAY="$sock" SDL_VIDEO_DRIVER=wayland SDL_AUDIO_DRIVER=dummy \
   SDL_GAMECONTROLLER_IGNORE_DEVICES=0x054C/0x0CE6 SDL_JOYSTICK_HIDAPI=0 SDL_JOYSTICK_LINUX=0 \
   "$exe" --game_data_root="$root/assets" --log_level=info --log_file="$out/trials_hd.log" \
-  --gpu_plugin=xenos --log_guest_fps=true --host_vsync=false --vsync=false --present_fps_limit=0 \
+  --gpu_plugin=xenos --log_guest_fps=true --log_simulation_rate=true --host_vsync=false --vsync=false --present_fps_limit=0 \
   --display_width="$w" --display_height="$h" "$@" >"$out/stdout.log" 2>&1 &
 gpid=$!
 (
@@ -49,25 +57,39 @@ gpid=$!
     case "$cmd" in
       wait) sleep "$a" ;;
       pad) echo "btn $a $b" >&3 ;;
+      # Raw virtual pad command, @OUT@ = the output directory (set <cvar> <value>,
+      # capture <file>).
+      send) echo "$a ${b//@OUT@/$(realpath "$out")}" >&3 ;;
       axis)
         # CAPTURE=1: grab the stationary start-line frame just before the throttle.
         if [[ "${CAPTURE:-0}" == 1 && "$a" == rt && "$b" != 0 ]]; then
           echo "capture $(realpath "$out")/start.ppm" >&3
           sleep 1
         fi
-        echo "axis $a $b" >&3 ;;
+        echo "axis $a $b" >&3
+        # CAPTURE=1: also grab a frame 10 s into the ride (moving geometry, particles).
+        if [[ "${CAPTURE:-0}" == 1 && "$a" == rt && "$b" != 0 ]]; then
+          ( sleep 10; echo "capture $(realpath "$out")/ride.ppm" >&3 ) &
+        fi ;;
     esac
-  done < <(grep -vE '^\s*(#|$)' "$root/tests/headless/bench_fps.txt")
+  done < <(grep -vE '^\s*(#|$)' "${RIDE_SCRIPT:-$root/tests/headless/bench_fps.txt}")
 ) &
 ipid=$!
 # The ride starts around t=50 s.
 sleep 55
-busy=/sys/class/drm/card1/device/gpu_busy_percent
-for _ in $(seq 1 10); do cat "$busy" 2>/dev/null; sleep 1; done >"$out/gpu_busy.txt" &
+# GPU busy: amdgpu sysfs (any card), else nvidia-smi.
+busy="$(ls /sys/class/drm/card*/device/gpu_busy_percent 2>/dev/null | head -1)"
+for _ in $(seq 1 10); do
+  if [[ -n "$busy" ]]; then cat "$busy" 2>/dev/null
+  else nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | head -1
+  fi
+  sleep 1
+done >"$out/gpu_busy.txt" &
 case "${PERF:-0}" in
   1) perf record -F 999 -g --call-graph=fp -p "$gpid" -o "$out/perf.data" -- sleep 10 >/dev/null 2>&1 ;;
   stat) perf stat -e page-faults,context-switches,cpu-migrations -p "$gpid" \
           -o "$out/perfstat.txt" -- sleep 10 >/dev/null 2>&1 ;;
+  threads) "$root/tools/profile/thread_sample.sh" "$gpid" "$out/prof" 10 "${STACK_SAMPLES:-60}" ;;
   *) sleep 10 ;;
 esac
 sleep 8
