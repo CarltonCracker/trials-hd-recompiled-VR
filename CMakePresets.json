@@ -72,6 +72,8 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_INTERPROCEDURAL_OPTIMIZATION": "ON",
+        "REXGLUE_ENABLE_TRACY": "OFF",
+        "REXGLUE_ENABLE_PERF_COUNTERS": "OFF",
         "CMAKE_C_FLAGS": "-march=x86-64-v3 -flto=thin",
         "CMAKE_CXX_FLAGS": "-march=x86-64-v3 -flto=thin"
       }
@@ -83,6 +85,8 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "CMAKE_INTERPROCEDURAL_OPTIMIZATION": "ON",
+        "REXGLUE_ENABLE_TRACY": "OFF",
+        "REXGLUE_ENABLE_PERF_COUNTERS": "OFF",
         "CMAKE_C_FLAGS": "-march=x86-64-v3 -flto=thin",
         "CMAKE_CXX_FLAGS": "-march=x86-64-v3 -flto=thin"
       }
@@ -94,8 +98,12 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "CMAKE_INTERPROCEDURAL_OPTIMIZATION": "ON",
+        "REXGLUE_ENABLE_TRACY": "OFF",
+        "REXGLUE_ENABLE_PERF_COUNTERS": "OFF",
         "CMAKE_C_FLAGS": "-march=x86-64-v3 -flto=thin -resource-dir=/home/braden/.local/lib/clang_resource_20 -fprofile-generate=${sourceDir}/out/pgo_profiles",
-        "CMAKE_CXX_FLAGS": "-march=x86-64-v3 -flto=thin -resource-dir=/home/braden/.local/lib/clang_resource_20 -fprofile-generate=${sourceDir}/out/pgo_profiles"
+        "CMAKE_CXX_FLAGS": "-march=x86-64-v3 -flto=thin -resource-dir=/home/braden/.local/lib/clang_resource_20 -fprofile-generate=${sourceDir}/out/pgo_profiles",
+        "CMAKE_SHARED_LINKER_FLAGS": "-resource-dir=/home/braden/.local/lib/clang_resource_20 -fprofile-generate=${sourceDir}/out/pgo_profiles",
+        "CMAKE_EXE_LINKER_FLAGS": "-resource-dir=/home/braden/.local/lib/clang_resource_20 -fprofile-generate=${sourceDir}/out/pgo_profiles"
       }
     },
     {
@@ -105,8 +113,12 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "CMAKE_INTERPROCEDURAL_OPTIMIZATION": "ON",
+        "REXGLUE_ENABLE_TRACY": "OFF",
+        "REXGLUE_ENABLE_PERF_COUNTERS": "OFF",
         "CMAKE_C_FLAGS": "-march=x86-64-v3 -flto=thin -resource-dir=/home/braden/.local/lib/clang_resource_20 -fprofile-use=${sourceDir}/out/pgo_profiles/trials_hd.profdata -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date",
-        "CMAKE_CXX_FLAGS": "-march=x86-64-v3 -flto=thin -resource-dir=/home/braden/.local/lib/clang_resource_20 -fprofile-use=${sourceDir}/out/pgo_profiles/trials_hd.profdata -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date"
+        "CMAKE_CXX_FLAGS": "-march=x86-64-v3 -flto=thin -resource-dir=/home/braden/.local/lib/clang_resource_20 -fprofile-use=${sourceDir}/out/pgo_profiles/trials_hd.profdata -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date",
+        "CMAKE_SHARED_LINKER_FLAGS": "-resource-dir=/home/braden/.local/lib/clang_resource_20 -fprofile-use=${sourceDir}/out/pgo_profiles/trials_hd.profdata",
+        "CMAKE_EXE_LINKER_FLAGS": "-resource-dir=/home/braden/.local/lib/clang_resource_20 -fprofile-use=${sourceDir}/out/pgo_profiles/trials_hd.profdata"
       }
     },
     {
@@ -124,6 +136,8 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_INTERPROCEDURAL_OPTIMIZATION": "ON",
+        "REXGLUE_ENABLE_TRACY": "OFF",
+        "REXGLUE_ENABLE_PERF_COUNTERS": "OFF",
         "CMAKE_C_FLAGS": "-mcpu=apple-m3 -flto=thin",
         "CMAKE_CXX_FLAGS": "-mcpu=apple-m3 -flto=thin"
       }
@@ -135,6 +149,8 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "CMAKE_INTERPROCEDURAL_OPTIMIZATION": "ON",
+        "REXGLUE_ENABLE_TRACY": "OFF",
+        "REXGLUE_ENABLE_PERF_COUNTERS": "OFF",
         "CMAKE_C_FLAGS": "-mcpu=apple-m3 -flto=thin",
         "CMAKE_CXX_FLAGS": "-mcpu=apple-m3 -flto=thin"
       }
@@ -154,6 +170,8 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_INTERPROCEDURAL_OPTIMIZATION": "ON",
+        "REXGLUE_ENABLE_TRACY": "OFF",
+        "REXGLUE_ENABLE_PERF_COUNTERS": "OFF",
         "CMAKE_C_FLAGS": "-march=x86-64-v3 -flto=thin",
         "CMAKE_CXX_FLAGS": "-march=x86-64-v3 -flto=thin"
       }
@@ -165,6 +183,8 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "CMAKE_INTERPROCEDURAL_OPTIMIZATION": "ON",
+        "REXGLUE_ENABLE_TRACY": "OFF",
+        "REXGLUE_ENABLE_PERF_COUNTERS": "OFF",
         "CMAKE_C_FLAGS": "-march=x86-64-v3 -flto=thin",
         "CMAKE_CXX_FLAGS": "-march=x86-64-v3 -flto=thin"
       }

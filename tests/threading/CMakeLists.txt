@@ -22,3 +22,24 @@ target_link_libraries(alertable_wait_test PRIVATE ${_runtime} ${_spdlog} ${_fmt}
 enable_testing()
 add_test(NAME alertable_wait COMMAND alertable_wait_test)
 set_tests_properties(alertable_wait PROPERTIES TIMEOUT 20)
+
+add_executable(timer_queue_test timer_queue_test.cpp ${REXSDK_DIR}/src/core/timer_queue.cpp)
+target_include_directories(timer_queue_test PRIVATE
+    ${REXSDK_DIR}/include ${REXSDK_BUILD_DIR}/include
+    ${REXSDK_DIR}/thirdparty/disruptorplus/include
+    ${REXSDK_DIR}/thirdparty/fmt/include ${REXSDK_DIR}/thirdparty/simde)
+target_compile_options(timer_queue_test PRIVATE -UNDEBUG)
+target_link_libraries(timer_queue_test PRIVATE Threads::Threads)
+add_test(NAME timer_queue COMMAND timer_queue_test)
+set_tests_properties(timer_queue PROPERTIES TIMEOUT 20)
+
+add_executable(trials_fast_path_test trials_fast_path_test.cpp ${REXSDK_DIR}/src/graphics/flags.cpp)
+target_include_directories(trials_fast_path_test PRIVATE
+    ${REXSDK_DIR}/include ${REXSDK_BUILD_DIR}/include
+    ${REXSDK_DIR}/thirdparty/fmt/include ${REXSDK_DIR}/thirdparty/simde
+    ${REXSDK_DIR}/thirdparty/spdlog/include ${REXSDK_DIR}/thirdparty/renderdoc)
+target_compile_definitions(trials_fast_path_test PRIVATE SPDLOG_COMPILED_LIB SPDLOG_FMT_EXTERNAL)
+target_compile_options(trials_fast_path_test PRIVATE -UNDEBUG)
+target_link_libraries(trials_fast_path_test PRIVATE ${_runtime} ${_spdlog} ${_fmt} Threads::Threads)
+add_test(NAME trials_fast_path COMMAND trials_fast_path_test)
+set_tests_properties(trials_fast_path PROPERTIES TIMEOUT 20)

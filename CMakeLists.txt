@@ -56,6 +56,18 @@ if(TRIALSHD_WEB)
     return()
 endif()
 
+# Tracy profiler: avoid per-draw profiling checks in optimized builds.
+# -DREXGLUE_ENABLE_TRACY=ON opts back in; multi-config builds keep the SDK default.
+# The same for the SDK's perf counters (only its debug overlay reads them; the
+# shared atomic counters cost ~2% of the game's render thread):
+# -DREXGLUE_ENABLE_PERF_COUNTERS=ON opts back in.
+get_property(_trialshd_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+if(NOT _trialshd_multi_config AND CMAKE_BUILD_TYPE MATCHES "^(Release|RelWithDebInfo|MinSizeRel)$")
+    set(REXGLUE_ENABLE_TRACY OFF CACHE BOOL "Enable Tracy profiler integration")
+    set(REXGLUE_ENABLE_PERF_COUNTERS OFF CACHE BOOL
+        "Enable lightweight perf counter registry and overlay")
+endif()
+
 include(generated/rexglue.cmake)
 
 # The SDK sets REXGLUE_ROOT inside its own add_subdirectory scope but doesn't
@@ -177,12 +189,18 @@ if(TRIALSHD_BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests")
     add_executable(render_pose_test tests/render_pose_test.cpp)
     target_include_directories(render_pose_test PRIVATE src)
     add_test(NAME render_pose COMMAND render_pose_test)
+    # Bookkeeping of the vulkan_gpu_profile timestamp profiler (header only, no device).
+    add_executable(vk_gpu_profile_test tests/vk_gpu_profile_test.cpp)
+    target_link_libraries(vk_gpu_profile_test PRIVATE rex::runtime)
+    add_test(NAME vk_gpu_profile COMMAND vk_gpu_profile_test)
     find_package(Python3 QUIET COMPONENTS Interpreter)
     if(Python3_Interpreter_FOUND)
         add_test(NAME fps_log COMMAND ${Python3_EXECUTABLE}
                  ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_fps_log_test.py)
         add_test(NAME render_pose_log COMMAND ${Python3_EXECUTABLE}
                  ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_render_pose_log_test.py)
+        add_test(NAME tracy_default COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/tests/tracy_default_test.py ${CMAKE_COMMAND})
     endif()
 endif()
 

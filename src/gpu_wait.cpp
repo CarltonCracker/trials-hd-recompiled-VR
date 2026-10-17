@@ -27,7 +27,19 @@ REX_EXTERN(__imp__sub_8212BC68);
 #define REX_CPU_PAUSE() ((void)0)
 #endif
 
+#if defined(__linux__)
+#include <sys/prctl.h>
+#endif
+
 namespace {
+#if defined(__linux__)
+// The game and the command processor hand work back and forth many times per
+// frame through short sleeps (these waits, WAIT_REG_MEM naps, event waits).
+// Linux's default 50 us timer slack stretches every such sleep well past what
+// was asked; with 1 us they wake on time. Set on the main thread before any
+// other thread exists, so all threads inherit it.
+[[maybe_unused]] const int g_timer_slack = prctl(PR_SET_TIMERSLACK, 1000UL, 0, 0, 0);
+#endif
 // Progressive backoff: spin with CPU pause for short waits, yield to let the
 // command processor finish without kernel sleep latency, and only sleep if the GPU
 // is stalled for a prolonged duration.

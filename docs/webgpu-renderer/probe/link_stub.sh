@@ -30,8 +30,12 @@ shared="flags register_file registers pipeline/shader/shader format/ucode sample
 files=()
 for f in $shared; do files+=("$objs/$f.cpp.o"); done
 
+tracy=()
+if [[ "$compile" == *"-DTRACY_ENABLE"* ]]; then
+  tracy+=("$sdk_out/libTracyClientrd.so")
+fi
 clang++ -fPIC -pthread -shared -Wl,--no-undefined -o "$out/librexgpu-stubrd.so" \
   "$out/link_stub_plugin.o" "${files[@]}" \
   "$sdk_out/librexruntimerd.so" "$sdk_out/libxxhashrd.a" "$sdk_out/libspdlogrd.a" \
-  "$sdk_out/libfmtrd.a" "$sdk_out/libSDL3rd.a" -lm "$sdk_out/libTracyClientrd.so" -ldl
+  "$sdk_out/libfmtrd.a" "$sdk_out/libSDL3rd.a" -lm "${tracy[@]}" -ldl
 echo "linked with no undefined symbols: $out/librexgpu-stubrd.so"

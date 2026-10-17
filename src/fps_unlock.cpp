@@ -1,4 +1,6 @@
 // Trials HD v0.0.1.2: run the original updates independently of real rendering.
+#include <array>
+#include <cstring>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -97,6 +99,21 @@ void StoreMatrix(uint8_t* base, uint32_t address, const trials_hd::RenderMatrix&
 #endif
 }
 
+// The camera part of DrawInterpolated is the same for every node drawn with
+// one renderer and camera in a frame: computed once and reused while the
+// game's camera matrices (restored after each draw) and the tick / alpha stay
+// the same.
+struct CameraUploadCache {
+  bool valid = false;
+  uint32_t renderer = 0, camera_id = 0, pass = 0, tick = 0, alpha_bits = 0;
+  // renderer + 144: view, view x projection, projection, camera, +400, +464.
+  std::array<uint8_t, 384> raw{};
+  std::array<uint8_t, 384> uploaded{};
+  // camera + 48.
+  std::array<uint8_t, 12> camera_position{};
+};
+thread_local CameraUploadCache g_camera_upload;
+
 void DrawInterpolated(PPCContext& ctx, uint8_t* base, void (*draw)(PPCContext&, uint8_t*)) {
   const auto renderer = ctx.r3.u32, node = ctx.r4.u32;
   const float alpha = g_render_alpha.load();
@@ -118,27 +135,55 @@ void DrawInterpolated(PPCContext& ctx, uint8_t* base, void (*draw)(PPCContext&, 
     }
   }
   const auto tick = Word(base, kTickCount);
-  const auto projection = Matrix(base, renderer + 272);
   const auto camera_id = Word(base, renderer + 28);
   if (!camera_id) {
     draw(ctx, base);
     return;
   }
-  const auto raw_view = Matrix(base, renderer + 144);
-  const auto camera_key = trials_hd::CameraPoseKey(camera_id, Word(base, renderer + 624), raw_view, projection);
-  const auto camera = trials_hd::InverseView(raw_view);
-  // Orthographic passes (shadow maps) keep their tick camera: the game samples them through
-  // light matrices computed at tick time. Their models are still interpolated below.
-  const auto camera_pose = projection[11] != 0
-                               ? g_camera_poses[camera_key].Sample(tick, camera, alpha)
-                               : camera;
+  // The pose log (log_simulation_rate, a few frames per second) needs the full
+  // computation.
+  const bool logging = REXCVAR_GET(log_simulation_rate) && g_pose_log_frames <= 4;
+  uint32_t alpha_bits;
+  std::memcpy(&alpha_bits, &alpha, sizeof(alpha_bits));
+  CameraUploadCache& cache = g_camera_upload;
+  const uint32_t pass = Word(base, renderer + 624);
+  const bool cached = !logging && cache.valid && cache.renderer == renderer &&
+                      cache.camera_id == camera_id && cache.pass == pass && cache.tick == tick &&
+                      cache.alpha_bits == alpha_bits &&
+                      !std::memcmp(cache.raw.data(), base + renderer + 144, cache.raw.size());
+  trials_hd::RenderMatrix projection{}, camera{}, camera_pose{};
+  uint64_t camera_key = 0;
+  if (!cached) {
+    std::memcpy(cache.raw.data(), base + renderer + 144, cache.raw.size());
+    projection = Matrix(base, renderer + 272);
+    const auto raw_view = Matrix(base, renderer + 144);
+    camera_key = trials_hd::CameraPoseKey(camera_id, pass, raw_view, projection);
+    camera = trials_hd::InverseView(raw_view);
+    // Orthographic passes (shadow maps) keep their tick camera: the game samples them through
+    // light matrices computed at tick time. Their models are still interpolated below.
+    camera_pose = projection[11] != 0 ? g_camera_poses[camera_key].Sample(tick, camera, alpha)
+                                      : camera;
+  }
   trials_hd::ScopedRenderUpload upload(base, renderer, camera_id, ctx.r1.u32);
-  for (uint32_t i = 0; i < 3; ++i) StoreFloat(base, camera_id + 48 + i * 4, camera_pose[12 + i]);
-  const auto view = trials_hd::InverseView(camera_pose);
-  StoreMatrix(base, renderer + 144, view);
-  StoreMatrix(base, renderer + 208, trials_hd::Multiply(view, projection));
-  StoreMatrix(base, renderer + 336, camera_pose);
-  StoreMatrix(base, renderer + 400, trials_hd::Multiply(Matrix(base, renderer + 464), camera_pose));
+  if (cached) {
+    std::memcpy(base + renderer + 144, cache.uploaded.data(), cache.uploaded.size());
+    std::memcpy(base + camera_id + 48, cache.camera_position.data(), cache.camera_position.size());
+  } else {
+    for (uint32_t i = 0; i < 3; ++i) StoreFloat(base, camera_id + 48 + i * 4, camera_pose[12 + i]);
+    const auto view = trials_hd::InverseView(camera_pose);
+    StoreMatrix(base, renderer + 144, view);
+    StoreMatrix(base, renderer + 208, trials_hd::Multiply(view, projection));
+    StoreMatrix(base, renderer + 336, camera_pose);
+    StoreMatrix(base, renderer + 400, trials_hd::Multiply(Matrix(base, renderer + 464), camera_pose));
+    std::memcpy(cache.uploaded.data(), base + renderer + 144, cache.uploaded.size());
+    std::memcpy(cache.camera_position.data(), base + camera_id + 48, cache.camera_position.size());
+    cache.renderer = renderer;
+    cache.camera_id = camera_id;
+    cache.pass = pass;
+    cache.tick = tick;
+    cache.alpha_bits = alpha_bits;
+    cache.valid = true;
+  }
   for (uint32_t i = 0; i < count; ++i) {
     const auto current = Matrix(base, pointers[i]);
     const auto key = (uint64_t(node) << 32) | pointers[i];
@@ -147,7 +192,7 @@ void DrawInterpolated(PPCContext& ctx, uint8_t* base, void (*draw)(PPCContext&, 
     StoreMatrix(base, scratch, pose);
     rex::memory::store_and_swap<uint32_t>(base + renderer + 944 + i * 4, scratch);
     auto& logged = count > 1 ? g_logged_skin : g_logged_rigid;
-    if (REXCVAR_GET(log_simulation_rate) && g_pose_log_frames <= 4 && projection[11] != 0 && !logged && pose != current) {
+    if (logging && projection[11] != 0 && !logged && pose != current) {
       uint32_t component = 0;
       for (uint32_t j = 1; j < 16; ++j)
         if (std::abs(pose[j] - current[j]) > std::abs(pose[component] - current[component])) component = j;
@@ -284,6 +329,7 @@ extern "C" REX_FUNC(sub_825EBF48) {
   if (scene != g_pose_scene || g_render_alpha.load() >= 1) {
     g_model_poses.clear();
     g_camera_poses.clear();
+    g_camera_upload.valid = false;
     g_pose_scene = scene;
     g_pose_log_frames = 0;
   }

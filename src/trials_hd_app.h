@@ -5,6 +5,7 @@
 #pragma once
 
 #include <atomic>
+#include <csignal>
 #include <cstdio>
 #include <chrono>
 #include <filesystem>
@@ -96,7 +97,7 @@ class TrialsHdApp : public rex::ReXApp {
         runtime()->kernel_state()->TerminateTitle();
       }
       rex::FlushLogging();
-      std::_Exit(0);
+      std::exit(0);
     });
   }
 
@@ -203,6 +204,14 @@ class TrialsHdApp : public rex::ReXApp {
     setenv("MVK_CONFIG_LOG_LEVEL", "1", 0);
     setenv("MVK_CONFIG_FAST_MATH_ENABLED", "1", 0);
     setenv("MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS", "1", 0);
+#endif
+#if defined(__linux__)
+    struct sigaction sa{};
+    sa.sa_handler = [](int) {
+      std::exit(0);
+    };
+    sigaction(SIGTERM, &sa, nullptr);
+    sigaction(SIGINT, &sa, nullptr);
 #endif
     if (config.gpu_plugin.empty()) {
       config.gpu_plugin = "webgpu";

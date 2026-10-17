@@ -14,6 +14,9 @@
 # patch (tools/export_sdk_patch.sh), so this only needs to run after editing
 # the shader sources.
 set -euo pipefail
+# glslang / SPIRV-Tools still declare old minimum CMake versions that CMake 4
+# refuses without this.
+export CMAKE_POLICY_VERSION_MINIMUM="${CMAKE_POLICY_VERSION_MINIMUM:-3.5}"
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 sdk="$root/thirdparty/rexglue-sdk"

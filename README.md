@@ -61,6 +61,11 @@ brew install cmake ninja
 ./build.sh -j8                                # Limit parallel compile jobs (default: all CPU cores)
 ```
 
+Optimized native presets disable Tracy profiling. To enable it, configure with
+`cmake --preset linux-amd64-relwithdebinfo -DREXGLUE_ENABLE_TRACY=ON` before building
+(use the matching macOS preset there). A plain preset configure disables it again;
+retrain PGO profiles after changing this option.
+
 <details>
 <summary>Manual CMake Instructions</summary>
 

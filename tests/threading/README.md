@@ -20,3 +20,15 @@ zero and finite timeouts, idle thread CPU and short-deadline CPU spin.
 The test joins every created thread. Timing limits allow scheduler noise;
 printed CPU/latency values are measurements, not cross-machine guarantees.
 Game audio/file-IO behavior and process-wide CPU need separate live checks.
+
+The same build also provides `timer_queue_test`, which compiles the actual SDK
+queue without loading a second runtime queue. Run it with
+`ctest --test-dir out/alertable-wait-test -R '^timer_queue$' --output-on-failure`.
+It checks relative/absolute timed waits, earlier-deadline insertion, recurring
+self-cancellation, in-flight cancellation, concurrent producers, idle CPU and
+shutdown. Its CPU probe is not an FPS benchmark; live simulation cadence still
+needs a separate game check.
+
+`trials_fast_path_test` compiles the real SDK counter implementation and checks
+the switch, single-evaluation expectations, exact rare-fallback counts, report
+reset and concurrent increments. It runs without a GPU or game data.

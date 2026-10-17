@@ -66,6 +66,10 @@ void Apply(SDL_Joystick* joystick, const std::string& line,
     }
     return;
   }
+  if (line == "quit") {
+    REXLOG_INFO("Virtual pad: quit requested");
+    std::exit(0);
+  }
   if (!(in >> cmd >> name >> value)) {
     return;
   }
