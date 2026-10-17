@@ -46,13 +46,20 @@
   (resolve_full_32bpp_image_rt*: the dump's addressing and packing per EDRAM
   word) instead of dumping it to the EDRAM buffer first
   (vulkan_resolve_from_render_target, resolves_from_rt in the log_guest_fps
-  line); vulkan_gpu_profile lists pass time per render target configuration- vulkan command processor (Trials fast path, C2): the guest draw constant
+  line); vulkan_gpu_profile lists pass time per render target configuration
+- vulkan command processor (Trials fast path, C2): the guest draw constant
   buffers are dynamic uniform buffers with fixed ranges (float constants are
   given room for all 256), so their descriptor set only depends on which
   uniform pool pages hold them - cached per combination until the pools are
   cleared - and a draw only rebinds it with new offsets instead of allocating
   and writing a descriptor set (vulkan_dynamic_constant_buffers, init only)
-
+- vulkan swap (Trials fast path, vulkan_async_swap): the command processor no
+  longer waits at the swap for the submission thread to put the frame on the
+  queue; the presenter's refresh fence is signaled through that thread
+  (VulkanPresenter::AsyncQueueSubmitter) and the consumers of the guest output
+  image (painting, capture) wait for it instead; the swap waits only until the
+  presenter has taken the previous frame (Presenter::AwaitGuestOutputConsumed),
+  so every frame is still presented
 diff --git a/include/rex/audio/web/web_audio_driver.h b/include/rex/audio/web/web_audio_driver.h
 new file mode 100644
 index 0000000..ca49f59
@@ -532,7 +539,7 @@ index e5e4908..3a0b2ff 100644
     public:
      void Export(ucode::ExportRegister export_register, const float* value,
 diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
-index 696ff48..b329c8b 100644
+index 696ff48..06dcf53 100644
 --- a/include/rex/graphics/vulkan/command_processor.h
 +++ b/include/rex/graphics/vulkan/command_processor.h
 @@ -13,7 +13,11 @@
@@ -547,7 +554,17 @@ index 696ff48..b329c8b 100644
  #include <functional>
  #include <memory>
  #include <string>
-@@ -145,6 +149,10 @@ class VulkanCommandProcessor : public CommandProcessor {
+@@ -45,7 +49,8 @@
+ 
+ namespace rex::graphics::vulkan {
+ 
+-class VulkanCommandProcessor : public CommandProcessor {
++class VulkanCommandProcessor : public CommandProcessor,
++                               private ui::vulkan::VulkanPresenter::AsyncQueueSubmitter {
+  public:
+   // Single-descriptor layouts for use within a single frame.
+   enum class SingleTransientDescriptorLayout {
+@@ -145,6 +150,10 @@ class VulkanCommandProcessor : public CommandProcessor {
  
    // Returns the deferred drawing command list for the currently open
    // submission.
@@ -558,7 +575,7 @@ index 696ff48..b329c8b 100644
    DeferredCommandBuffer& deferred_command_buffer() {
      assert_true(submission_open_);
      return deferred_command_buffer_;
-@@ -237,7 +245,9 @@ class VulkanCommandProcessor : public CommandProcessor {
+@@ -237,7 +246,9 @@ class VulkanCommandProcessor : public CommandProcessor {
    void BindExternalGraphicsPipeline(VkPipeline pipeline, bool keep_dynamic_depth_bias = false,
                                      bool keep_dynamic_blend_constants = false,
                                      bool keep_dynamic_stencil_mask_ref = false);
@@ -569,7 +586,7 @@ index 696ff48..b329c8b 100644
    void SetViewport(const VkViewport& viewport);
    void SetScissor(const VkRect2D& scissor);
  
-@@ -553,6 +563,44 @@ class VulkanCommandProcessor : public CommandProcessor {
+@@ -553,6 +564,51 @@ class VulkanCommandProcessor : public CommandProcessor {
    std::deque<std::pair<uint64_t, CommandBuffer>> command_buffers_submitted_;
    DeferredCommandBuffer deferred_command_buffer_;
  
@@ -583,6 +600,7 @@ index 696ff48..b329c8b 100644
 +  struct AsyncSubmission {
 +    std::vector<uintmax_t> stream;
 +    std::vector<VulkanSharedMemory::HoistedCopy> hoisted_copies;
++    // VK_NULL_HANDLE - only signal the fence (the presenter's guest output refresh).
 +    VkCommandBuffer command_buffer = VK_NULL_HANDLE;
 +    VkFence fence = VK_NULL_HANDLE;
 +    std::vector<VkSemaphore> wait_semaphores;
@@ -593,6 +611,12 @@ index 696ff48..b329c8b 100644
 +  void AsyncSubmitThreadMain();
 +  // Blocks until every enqueued submission has been submitted to the queue.
 +  void AwaitAsyncSubmissions();
++  // VulkanPresenter::AsyncQueueSubmitter: with vulkan_async_swap, the swap
++  // doesn't wait for the worker - the presenter signals its refresh fence through
++  // the worker and its consumers wait for the swap to be on the queue instead.
++  uint64_t EnqueueFenceSignal(VkFence fence) override;
++  void AwaitQueueSubmitted(uint64_t ticket) override;
++  ui::vulkan::VulkanPresenter* async_queue_submitter_presenter_ = nullptr;
 +  bool HasPendingAsyncSubmissions();
 +  std::thread async_submit_thread_;
 +  std::mutex async_submit_mutex_;
@@ -614,7 +638,7 @@ index 696ff48..b329c8b 100644
    std::vector<VkSparseMemoryBind> sparse_memory_binds_;
    std::vector<SparseBufferBind> sparse_buffer_binds_;
    // SparseBufferBind converted to VkSparseBufferMemoryBindInfo to this buffer
-@@ -588,6 +636,7 @@ class VulkanCommandProcessor : public CommandProcessor {
+@@ -588,6 +644,7 @@ class VulkanCommandProcessor : public CommandProcessor {
    // Direct3D 12 PIX warnings.
    static constexpr uint32_t kLinkedTypeDescriptorPoolSetCount = 32768;
    static const VkDescriptorPoolSize kDescriptorPoolSizeUniformBuffer;
@@ -622,7 +646,7 @@ index 696ff48..b329c8b 100644
    static const VkDescriptorPoolSize kDescriptorPoolSizeStorageBuffer;
    static const VkDescriptorPoolSize kDescriptorPoolSizeTextures[2];
    ui::vulkan::LinkedTypeDescriptorSetAllocator transient_descriptor_allocator_uniform_buffer_;
-@@ -598,7 +647,30 @@ class VulkanCommandProcessor : public CommandProcessor {
+@@ -598,7 +655,30 @@ class VulkanCommandProcessor : public CommandProcessor {
    // <Usage frame, set>.
    std::deque<std::pair<uint64_t, VkDescriptorSet>> constants_transient_descriptors_used_;
    std::vector<VkDescriptorSet> constants_transient_descriptors_free_;
@@ -2344,13 +2368,26 @@ index 294d706..77072bc 100644
  
  }  // namespace rex::ui
 diff --git a/include/rex/ui/presenter.h b/include/rex/ui/presenter.h
-index afb4a30..406702a 100644
+index afb4a30..2282b0d 100644
 --- a/include/rex/ui/presenter.h
 +++ b/include/rex/ui/presenter.h
-@@ -358,6 +358,11 @@ class Presenter {
+@@ -13,6 +13,7 @@
+ #include <algorithm>
+ #include <array>
+ #include <atomic>
++#include <chrono>
+ #include <climits>
+ #include <cmath>
+ #include <condition_variable>
+@@ -358,6 +359,16 @@ class Presenter {
    bool RefreshGuestOutput(uint32_t frontbuffer_width, uint32_t frontbuffer_height,
                            uint32_t display_aspect_ratio_x, uint32_t display_aspect_ratio_y,
                            std::function<bool(GuestOutputRefreshContext& context)> refresher);
++  // When the UI thread paints on request, blocks the refreshing thread (for at
++  // most `timeout`) until the last refreshed guest output image has been taken
++  // for painting - so a refresher that runs ahead of presentation doesn't
++  // replace images that have never been presented.
++  void AwaitGuestOutputConsumed(std::chrono::milliseconds timeout);
 +  // Frames successfully presented to the host surface so far (from any thread),
 +  // for comparing with the number of guest frames in diagnostics.
 +  uint64_t presented_frame_count() const {
@@ -2359,7 +2396,7 @@ index afb4a30..406702a 100644
    // The implementation must be callable from any thread, including from
    // multiple at the same time, and it should acquire the latest guest output
    // image via ConsumeGuestOutput.
-@@ -375,6 +380,15 @@ class Presenter {
+@@ -375,6 +386,15 @@ class Presenter {
    void RequestUIPaintFromUIThread();
  
   protected:
@@ -2375,7 +2412,7 @@ index afb4a30..406702a 100644
    enum class PaintResult {
      kPresented,
      kPresentedSuboptimal,
-@@ -386,6 +400,21 @@ class Presenter {
+@@ -386,6 +406,21 @@ class Presenter {
      kGpuLostResponsible,
    };
  
@@ -2397,7 +2434,7 @@ index afb4a30..406702a 100644
    enum class SurfacePaintConnectResult {
      // Redrawing not necessary, nothing changed. Must not be returned for a new
      // connection (when was previously disconnected from the surface).
-@@ -933,6 +962,8 @@ class Presenter {
+@@ -933,6 +968,8 @@ class Presenter {
    // repaint request anyway.
    std::atomic<bool> ui_thread_paint_requested_{false};
  
@@ -2406,6 +2443,15 @@ index afb4a30..406702a 100644
    std::mutex guest_output_paint_config_mutex_;
    // UI thread: writable, guest output thread: read-only.
    GuestOutputPaintConfig guest_output_paint_config_;
+@@ -971,6 +1008,8 @@ class Presenter {
+   // with paint_mode_mutex_ held in this case, and guest output consumption
+   // happens as part of painting.
+   std::mutex guest_output_mailbox_consumer_mutex_;
++  // Notified (with guest_output_mailbox_consumer_mutex_) when an image is consumed.
++  std::condition_variable guest_output_consumed_cv_;
+ 
+   std::array<GuestOutputProperties, kGuestOutputMailboxSize> guest_output_properties_;
+   // Accessible only by refreshing, whether the last refresh contained an image
 diff --git a/include/rex/ui/renderdoc_api.h b/include/rex/ui/renderdoc_api.h
 index 536f710..665b647 100644
 --- a/include/rex/ui/renderdoc_api.h
@@ -2474,6 +2520,73 @@ index 4edde2b..022c961 100644
      bool ext_KHR_portability_enumeration = false;              // #395
    };
  
+diff --git a/include/rex/ui/vulkan/presenter.h b/include/rex/ui/vulkan/presenter.h
+index 56ee43b..e01b35e 100644
+--- a/include/rex/ui/vulkan/presenter.h
++++ b/include/rex/ui/vulkan/presenter.h
+@@ -15,6 +15,7 @@
+ #include <cstddef>
+ #include <cstdint>
+ #include <memory>
++#include <shared_mutex>
+ #include <utility>
+ #include <vector>
+ 
+@@ -82,6 +83,26 @@ class VulkanPresenter final : public Presenter {
+   static constexpr VkImageLayout kGuestOutputInternalLayout =
+       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+ 
++  // For a refresher that leaves its queue submissions to another thread (the
++  // command processor's asynchronous submission): the presenter's own work on the
++  // refreshed image then has to wait until they are actually on the queue, which
++  // is done by the consumers of the image instead of the refreshing thread.
++  class AsyncQueueSubmitter {
++   public:
++    virtual ~AsyncQueueSubmitter() = default;
++    // Enqueues an empty submission signaling `fence` after everything enqueued
++    // so far and returns a ticket for AwaitQueueSubmitted, or returns 0 when
++    // nothing is pending (the caller then signals the fence itself).
++    virtual uint64_t EnqueueFenceSignal(VkFence fence) = 0;
++    // Blocks until everything enqueued up to `ticket` is on the queue.
++    virtual void AwaitQueueSubmitted(uint64_t ticket) = 0;
++  };
++  // Set before refreshing, cleared (nullptr) before the submitter is destroyed.
++  void SetAsyncQueueSubmitter(AsyncQueueSubmitter* submitter) {
++    std::unique_lock<std::shared_mutex> lock(async_queue_submitter_mutex_);
++    async_queue_submitter_ = submitter;
++  }
++
+   // The callback must use the graphics and compute queue 0 of the device.
+   class VulkanGuestOutputRefreshContext final : public GuestOutputRefreshContext {
+    public:
+@@ -198,6 +219,8 @@ class VulkanPresenter final : public Presenter {
+     std::shared_ptr<GuestOutputImage> image;
+     uint64_t version = UINT64_MAX;
+     uint64_t last_refresher_submission = 0;
++    // AsyncQueueSubmitter ticket of the last refresh (0 - already on the queue).
++    uint64_t async_queue_ticket = 0;
+     // For choosing the barrier stage and access mask and layout depending on
+     // whether the image has previously been written. If an image is active
+     // after a refresh, it can be assumed that this is true.
+@@ -207,6 +230,7 @@ class VulkanPresenter final : public Presenter {
+       image = new_image;
+       version = new_version;
+       last_refresher_submission = 0;
++      async_queue_ticket = 0;
+       ever_successfully_refreshed = false;
+     }
+   };
+@@ -470,6 +494,10 @@ class VulkanPresenter final : public Presenter {
+   uint64_t guest_output_image_next_version_ = 0;
+   std::array<GuestOutputImageInstance, kGuestOutputMailboxSize> guest_output_images_;
+   VulkanSubmissionTracker guest_output_image_refresher_submission_tracker_;
++  std::shared_mutex async_queue_submitter_mutex_;
++  AsyncQueueSubmitter* async_queue_submitter_ = nullptr;
++  // Waits until the refresh of a consumed guest output image is on the queue.
++  void AwaitGuestOutputQueued(uint64_t async_queue_ticket);
+ 
+   // UI submission tracker with the submission index that can be given to UI
+   // drawers (accessible from the UI thread only, at any time).
 diff --git a/include/rex/ui/web.h b/include/rex/ui/web.h
 new file mode 100644
 index 0000000..e5478b1
@@ -80394,7 +80507,7 @@ index 3027dc8..2619fc7 100644
    SCOPE_profile_cpu_f("gpu");
  
 diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
-index 001f36b..caa5bbe 100644
+index 001f36b..9ab7075 100644
 --- a/src/graphics/vulkan/command_processor.cpp
 +++ b/src/graphics/vulkan/command_processor.cpp
 @@ -10,6 +10,9 @@
@@ -80446,7 +80559,7 @@ index 001f36b..caa5bbe 100644
  REXCVAR_DEFINE_BOOL(vulkan_async_skip_incomplete_frames, true, "GPU/Vulkan",
                      "When async shader compilation is enabled, skip presenting frames that "
                      "used placeholder pipelines to avoid visible flashing")
-@@ -69,6 +97,22 @@ REXCVAR_DEFINE_BOOL(vulkan_dynamic_rendering, true, "GPU/Vulkan",
+@@ -69,6 +97,27 @@ REXCVAR_DEFINE_BOOL(vulkan_dynamic_rendering, true, "GPU/Vulkan",
                      "device (falls back to render passes otherwise)")
      .lifecycle(rex::cvar::Lifecycle::kHotReload);
  
@@ -80459,6 +80572,11 @@ index 001f36b..caa5bbe 100644
 +                    "Trials fast path: replay recorded commands into Vulkan command buffers and "
 +                    "submit them on a separate thread while the next submission is recorded")
 +    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_BOOL(vulkan_async_swap, true, "GPU/Vulkan",
++                    "With vulkan_async_submit, don't wait for the submission thread at the "
++                    "swap: the presenter waits for the frame to be on the queue just before "
++                    "it uses it, so the command processor goes on to the next frame at once.")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 +REXCVAR_DEFINE_INT32(vulkan_async_submit_chunk_draws, 256, "GPU/Vulkan",
 +                     "With vulkan_async_submit, end the submission after this many draws so the "
 +                     "worker replays it while the rest of the frame is recorded (0 = only at "
@@ -80469,7 +80587,7 @@ index 001f36b..caa5bbe 100644
  namespace rex::graphics::vulkan {
  
  namespace {
-@@ -566,6 +610,9 @@ namespace shaders {
+@@ -566,6 +615,9 @@ namespace shaders {
  const VkDescriptorPoolSize VulkanCommandProcessor::kDescriptorPoolSizeUniformBuffer = {
      VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
      SpirvShaderTranslator::kConstantBufferCount* kLinkedTypeDescriptorPoolSetCount};
@@ -80479,7 +80597,7 @@ index 001f36b..caa5bbe 100644
  
  const VkDescriptorPoolSize VulkanCommandProcessor::kDescriptorPoolSizeStorageBuffer = {
      VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 * kLinkedTypeDescriptorPoolSetCount};
-@@ -588,6 +635,10 @@ VulkanCommandProcessor::VulkanCommandProcessor(VulkanGraphicsSystem* graphics_sy
+@@ -588,6 +640,10 @@ VulkanCommandProcessor::VulkanCommandProcessor(VulkanGraphicsSystem* graphics_sy
            static_cast<const ui::vulkan::VulkanProvider*>(graphics_system->provider())
                ->vulkan_device(),
            &kDescriptorPoolSizeStorageBuffer, 1, kLinkedTypeDescriptorPoolSetCount),
@@ -80490,7 +80608,7 @@ index 001f36b..caa5bbe 100644
        transient_descriptor_allocator_textures_(
            static_cast<const ui::vulkan::VulkanProvider*>(graphics_system->provider())
                ->vulkan_device(),
-@@ -823,12 +874,16 @@ bool VulkanCommandProcessor::SetupContext() {
+@@ -823,12 +879,16 @@ bool VulkanCommandProcessor::SetupContext() {
      return false;
    }
    // Guest draw constants.
@@ -80508,7 +80626,7 @@ index 001f36b..caa5bbe 100644
      constants_binding.descriptorCount = 1;
      constants_binding.pImmutableSamplers = nullptr;
    }
-@@ -1893,13 +1948,17 @@ bool VulkanCommandProcessor::SetupContext() {
+@@ -1893,13 +1953,17 @@ bool VulkanCommandProcessor::SetupContext() {
    // Just not to expose uninitialized memory.
    std::memset(&system_constants_, 0, sizeof(system_constants_));
  
@@ -80526,7 +80644,7 @@ index 001f36b..caa5bbe 100644
  
    const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
    const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
-@@ -2275,6 +2334,35 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+@@ -2275,6 +2339,35 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
    vertex_buffers_in_sync_[0] = 0;
    vertex_buffers_in_sync_[1] = 0;
  
@@ -80562,7 +80680,7 @@ index 001f36b..caa5bbe 100644
    if (!graphics_system_)
      return;
    ui::Presenter* presenter = graphics_system_->presenter();
-@@ -2304,6 +2392,23 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+@@ -2304,6 +2397,23 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
      return;
    }
  
@@ -80586,7 +80704,7 @@ index 001f36b..caa5bbe 100644
    SwapPostEffect swap_post_effect = GetActualSwapPostEffect();
  
    // Obtain the actual swap source texture size (resolution-scaled if it's a
-@@ -2395,7 +2500,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+@@ -2395,7 +2505,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
            frontbuffer_width_scaled, frontbuffer_height_scaled);
      }
    }
@@ -80595,7 +80713,16 @@ index 001f36b..caa5bbe 100644
        "XELOG_GPU PRESENT: swap_texture_view={:p} packet_size={}x{} src_size={}x{} "
        "src_unscaled={}x{} guest_output_size={}x{} format={}",
        static_cast<void*>(swap_texture_view), frontbuffer_width, frontbuffer_height,
-@@ -2411,8 +2516,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+@@ -2408,11 +2518,16 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+   uint32_t display_width = std::max(uint32_t(1), uint32_t(video_mode.display_width));
+   uint32_t display_height = std::max(uint32_t(1), uint32_t(video_mode.display_height));
+ 
++  // Without the wait for the submission thread at the swap (vulkan_async_swap),
++  // keep up to one frame ahead of the presenter instead, so every frame is
++  // still presented.
++  if (async_queue_submitter_presenter_ && REXCVAR_GET(vulkan_async_swap)) {
++    presenter->AwaitGuestOutputConsumed(std::chrono::milliseconds(100));
++  }
    presenter->RefreshGuestOutput(
        guest_output_width, guest_output_height, display_width, display_height,
        [this, guest_output_width, guest_output_height, frontbuffer_format, swap_texture_view,
@@ -80605,7 +80732,7 @@ index 001f36b..caa5bbe 100644
          // In case the swap command is the only one in the frame.
          if (!BeginSubmission(true)) {
            return false;
-@@ -2604,6 +2708,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+@@ -2604,6 +2719,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
  
          VkImageSubresourceRange guest_output_subresource_range =
              ui::vulkan::util::InitializeSubresourceRange();
@@ -80613,7 +80740,7 @@ index 001f36b..caa5bbe 100644
          if (use_compute_gamma) {
            // Transition the destination image for compute writes. Contents are
            // fully overwritten, so old layout can always be UNDEFINED.
-@@ -2639,7 +2744,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+@@ -2639,7 +2755,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
            VkDescriptorImageInfo swap_descriptor_destination_storage_image_info;
            swap_descriptor_destination_storage_image_info.sampler = VK_NULL_HANDLE;
            swap_descriptor_destination_storage_image_info.imageView =
@@ -80622,7 +80749,7 @@ index 001f36b..caa5bbe 100644
            swap_descriptor_destination_storage_image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
            VkWriteDescriptorSet swap_descriptor_destination_storage_write;
            swap_descriptor_destination_storage_write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-@@ -2675,7 +2780,8 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+@@ -2675,7 +2791,8 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
            deferred_command_buffer_.CmdVkPushConstants(
                swap_apply_gamma_compute_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0,
                sizeof(swap_apply_gamma_constants), &swap_apply_gamma_constants);
@@ -80632,7 +80759,7 @@ index 001f36b..caa5bbe 100644
            uint32_t group_count_x = (guest_output_width + 15) / 16;
            uint32_t group_count_y = (guest_output_height + 7) / 8;
            deferred_command_buffer_.CmdVkDispatch(group_count_x, group_count_y, 1);
-@@ -2719,8 +2825,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+@@ -2719,8 +2836,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
                  swap_descriptors_fxaa_destination_storage_[swap_frame_index];
              VkDescriptorImageInfo swap_descriptor_fxaa_destination_storage_image_info;
              swap_descriptor_fxaa_destination_storage_image_info.sampler = VK_NULL_HANDLE;
@@ -80642,7 +80769,7 @@ index 001f36b..caa5bbe 100644
              swap_descriptor_fxaa_destination_storage_image_info.imageLayout =
                  VK_IMAGE_LAYOUT_GENERAL;
              VkWriteDescriptorSet swap_descriptor_fxaa_destination_storage_write =
-@@ -2748,7 +2853,8 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+@@ -2748,7 +2864,8 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
                  sizeof(swap_fxaa_constants), &swap_fxaa_constants);
              BindExternalComputePipeline(swap_post_effect == SwapPostEffect::kFxaaExtreme
                                              ? swap_fxaa_extreme_pipeline_
@@ -80652,7 +80779,7 @@ index 001f36b..caa5bbe 100644
              deferred_command_buffer_.CmdVkDispatch(group_count_x, group_count_y, 1);
            }
  
-@@ -2926,7 +3032,9 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+@@ -2926,7 +3043,9 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
  
    // End the frame even if did not present for any reason (the image refresher
    // was not called), to prevent leaking per-frame resources.
@@ -80663,7 +80790,7 @@ index 001f36b..caa5bbe 100644
  }
  
  bool VulkanCommandProcessor::PushBufferMemoryBarrier(
-@@ -3141,7 +3249,10 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+@@ -3141,7 +3260,10 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
      rendering_info.pColorAttachments = color_attachment_count ? color_attachments : nullptr;
      rendering_info.pDepthAttachment = has_depth ? &depth_attachment : nullptr;
      rendering_info.pStencilAttachment = has_stencil ? &stencil_attachment : nullptr;
@@ -80675,7 +80802,7 @@ index 001f36b..caa5bbe 100644
    } else {
      VkRenderPassBeginInfo render_pass_begin_info;
      render_pass_begin_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-@@ -3235,7 +3346,10 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+@@ -3235,7 +3357,10 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
      rendering_info.pColorAttachments = transfer_dest_is_depth ? nullptr : &color_attachment;
      rendering_info.pDepthAttachment = transfer_dest_is_depth ? &depth_attachment : nullptr;
      rendering_info.pStencilAttachment = transfer_dest_is_depth ? &stencil_attachment : nullptr;
@@ -80687,7 +80814,7 @@ index 001f36b..caa5bbe 100644
    } else {
      VkRenderPassBeginInfo render_pass_begin_info;
      render_pass_begin_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-@@ -3537,11 +3651,12 @@ void VulkanCommandProcessor::BindExternalGraphicsPipeline(VkPipeline pipeline,
+@@ -3537,11 +3662,12 @@ void VulkanCommandProcessor::BindExternalGraphicsPipeline(VkPipeline pipeline,
    current_guest_graphics_pipeline_layout_ = VK_NULL_HANDLE;
  }
  
@@ -80702,7 +80829,7 @@ index 001f36b..caa5bbe 100644
    current_external_compute_pipeline_ = pipeline;
  }
  
-@@ -3590,6 +3705,7 @@ Shader* VulkanCommandProcessor::LoadShader(xenos::ShaderType shader_type, uint32
+@@ -3590,6 +3716,7 @@ Shader* VulkanCommandProcessor::LoadShader(xenos::ShaderType shader_type, uint32
  bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t index_count,
                                         IndexBufferInfo* index_buffer_info,
                                         bool major_mode_explicit) {
@@ -80710,7 +80837,7 @@ index 001f36b..caa5bbe 100644
  #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
    SCOPE_profile_cpu_f("gpu");
  #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
-@@ -3681,6 +3797,17 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3681,6 +3808,17 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    }
    reg::RB_DEPTHCONTROL normalized_depth_control = draw_util::GetNormalizedDepthControl(regs);
  
@@ -80728,7 +80855,7 @@ index 001f36b..caa5bbe 100644
    uint32_t ps_param_gen_pos = UINT32_MAX;
    uint32_t interpolator_mask =
        pixel_shader ? (vertex_shader->writes_interpolators() &
-@@ -3696,6 +3823,17 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3696,6 +3834,17 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    VulkanShader::VulkanTranslation* pixel_shader_translation;
    bool memexport_writes_possible = memexport_used_vertex || memexport_used_pixel;
  
@@ -80746,7 +80873,7 @@ index 001f36b..caa5bbe 100644
    // Two iterations because a submission (even the current one - in which case
    // it needs to be ended, and a new one must be started) may need to be awaited
    // in case of a sampler count overflow, and if that happens, all subsystem
-@@ -3839,6 +3977,14 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3839,6 +3988,14 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
  
    const VulkanPipelineCache::PipelineLayoutProvider* pipeline_layout_provider;
    // Set up the render targets - this may perform dispatches and draws.
@@ -80761,7 +80888,7 @@ index 001f36b..caa5bbe 100644
    if (!render_target_cache_->Update(is_rasterization_done, normalized_depth_control,
                                      normalized_color_mask, *vertex_shader)) {
      return draw_fail("render_target_update");
-@@ -4166,8 +4312,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4166,8 +4323,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
      shared_memory_->RangeWrittenByGpu(0, SharedMemory::kBufferSize);
    }
  
@@ -80772,7 +80899,7 @@ index 001f36b..caa5bbe 100644
      uint32_t memexport_total_size = 0;
      for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
        memexport_total_size += memexport_range.size_bytes;
-@@ -4382,6 +4528,7 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
+@@ -4382,6 +4539,7 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
  }
  
  bool VulkanCommandProcessor::IssueCopy() {
@@ -80780,7 +80907,7 @@ index 001f36b..caa5bbe 100644
  #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
    SCOPE_profile_cpu_f("gpu");
  #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
-@@ -4400,6 +4547,15 @@ bool VulkanCommandProcessor::IssueCopy() {
+@@ -4400,6 +4558,15 @@ bool VulkanCommandProcessor::IssueCopy() {
    return IssueCopy_ReadbackResolvePath();
  }
  
@@ -80796,7 +80923,7 @@ index 001f36b..caa5bbe 100644
  bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
    const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
    const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
-@@ -4423,6 +4579,10 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+@@ -4423,6 +4590,10 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
    if (readback_mode == ReadbackResolveMode::kDisabled) {
      return true;
    }
@@ -80807,7 +80934,7 @@ index 001f36b..caa5bbe 100644
  
    auto ensure_readback_slot = [&](ReadbackBuffer& readback, uint32_t index, uint32_t size) -> bool {
      if (readback.buffers[index] != VK_NULL_HANDLE && size <= readback.sizes[index] &&
-@@ -4594,7 +4754,8 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+@@ -4594,7 +4765,8 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
          VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 1, &pre_barrier, 0, nullptr);
  
@@ -80817,7 +80944,7 @@ index 001f36b..caa5bbe 100644
  
      ResolveDownscaleConstants constants;
      constants.scale_x = texture_cache_->draw_resolution_scale_x();
-@@ -4845,6 +5006,7 @@ bool VulkanCommandProcessor::BeginGuestOcclusionQuery(uint32_t sample_count_addr
+@@ -4845,6 +5017,7 @@ bool VulkanCommandProcessor::BeginGuestOcclusionQuery(uint32_t sample_count_addr
    if (!AcquireOcclusionQueryIndex(host_index)) {
      return false;
    }
@@ -80825,7 +80952,7 @@ index 001f36b..caa5bbe 100644
    if (!BeginSubmission(true)) {
      return false;
    }
-@@ -5131,6 +5293,7 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -5131,6 +5304,7 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
  
    if (!submission_open_) {
      submission_open_ = true;
@@ -80833,7 +80960,7 @@ index 001f36b..caa5bbe 100644
  
      // Start a new deferred command buffer - will submit it to the real one in
      // the end of the submission (when async pipeline object creation requests
-@@ -5350,6 +5513,8 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5350,6 +5524,8 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
        bind_sparse_info.signalSemaphoreCount = 1;
        bind_sparse_info.pSignalSemaphores = &bind_sparse_semaphore;
        VkResult bind_sparse_result;
@@ -80842,7 +80969,7 @@ index 001f36b..caa5bbe 100644
        {
          ui::vulkan::VulkanDevice::Queue::Acquisition queue_acquisition =
              vulkan_device->AcquireQueue(vulkan_device->queue_family_sparse_binding(), 0);
-@@ -5376,6 +5541,67 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5376,6 +5552,68 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
        REXGPU_ERROR("Failed to reset a Vulkan command pool");
        return false;
      }
@@ -80900,8 +81027,9 @@ index 001f36b..caa5bbe 100644
 +
 +      submission_open_ = false;
 +      // The presenter refreshes the guest output right after the swap
-+      // submission and relies on the queue order - submit everything first.
-+      if (is_swap) {
++      // submission and relies on the queue order - submit everything first,
++      // unless the presenter waits for it itself (EnqueueFenceSignal).
++      if (is_swap && !(async_queue_submitter_presenter_ && REXCVAR_GET(vulkan_async_swap))) {
 +        AwaitAsyncSubmissions();
 +      }
 +    } else {
@@ -80910,7 +81038,7 @@ index 001f36b..caa5bbe 100644
      VkCommandBufferBeginInfo command_buffer_begin_info;
      command_buffer_begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
      command_buffer_begin_info.pNext = nullptr;
-@@ -5385,7 +5611,21 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5385,7 +5623,21 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
        REXGPU_ERROR("Failed to begin a Vulkan command buffer");
        return false;
      }
@@ -80933,7 +81061,7 @@ index 001f36b..caa5bbe 100644
      if (dfn.vkEndCommandBuffer(command_buffer.buffer) != VK_SUCCESS) {
        REXGPU_ERROR("Failed to end a Vulkan command buffer");
        return false;
-@@ -5430,6 +5670,7 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5430,6 +5682,7 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
        return false;
      }
      uint64_t submission_current = GetCurrentSubmission();
@@ -80941,7 +81069,7 @@ index 001f36b..caa5bbe 100644
      current_submission_wait_stage_masks_.clear();
      for (VkSemaphore semaphore : current_submission_wait_semaphores_) {
        submissions_in_flight_semaphores_.emplace_back(submission_current, semaphore);
-@@ -5442,6 +5683,7 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5442,6 +5695,7 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
      fences_free_.pop_back();
  
      submission_open_ = false;
@@ -80949,7 +81077,7 @@ index 001f36b..caa5bbe 100644
    }
  
    if (is_closing_frame) {
-@@ -5488,6 +5730,114 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5488,6 +5742,161 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
    return true;
  }
  
@@ -80960,11 +81088,23 @@ index 001f36b..caa5bbe 100644
 +  async_submit_stop_ = false;
 +  async_submit_failed_.store(false, std::memory_order_relaxed);
 +  async_submit_thread_ = std::thread([this]() { AsyncSubmitThreadMain(); });
++  if (graphics_system_) {
++    async_queue_submitter_presenter_ =
++        static_cast<ui::vulkan::VulkanPresenter*>(graphics_system_->presenter());
++    if (async_queue_submitter_presenter_) {
++      async_queue_submitter_presenter_->SetAsyncQueueSubmitter(this);
++    }
++  }
 +}
 +
 +void VulkanCommandProcessor::StopAsyncSubmit() {
 +  if (!async_submit_thread_.joinable()) {
 +    return;
++  }
++  if (async_queue_submitter_presenter_) {
++    // Also waits for consumers currently in AwaitQueueSubmitted.
++    async_queue_submitter_presenter_->SetAsyncQueueSubmitter(nullptr);
++    async_queue_submitter_presenter_ = nullptr;
 +  }
 +  {
 +    std::lock_guard<std::mutex> lock(async_submit_mutex_);
@@ -80987,6 +81127,24 @@ index 001f36b..caa5bbe 100644
 +  async_submit_done_cv_.wait(lock, [this]() { return async_submit_done_ == async_submit_enqueued_; });
 +}
 +
++uint64_t VulkanCommandProcessor::EnqueueFenceSignal(VkFence fence) {
++  std::lock_guard<std::mutex> lock(async_submit_mutex_);
++  if (async_submit_done_ == async_submit_enqueued_) {
++    return 0;
++  }
++  AsyncSubmission submission;
++  submission.fence = fence;
++  async_submit_queue_.push_back(std::move(submission));
++  uint64_t ticket = ++async_submit_enqueued_;
++  async_submit_work_cv_.notify_one();
++  return ticket;
++}
++
++void VulkanCommandProcessor::AwaitQueueSubmitted(uint64_t ticket) {
++  std::unique_lock<std::mutex> lock(async_submit_mutex_);
++  async_submit_done_cv_.wait(lock, [this, ticket]() { return async_submit_done_ >= ticket; });
++}
++
 +void VulkanCommandProcessor::AsyncSubmitThreadMain() {
 +  rex::thread::set_current_thread_name("GPU Submit");
 +  const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
@@ -81006,6 +81164,23 @@ index 001f36b..caa5bbe 100644
 +      async_submit_queue_.pop_front();
 +    }
 +    bool succeeded = !async_submit_failed_.load(std::memory_order_acquire);
++    if (submission.command_buffer == VK_NULL_HANDLE) {
++      // Fence signal only (not a failure of this thread's own work if it fails).
++      if (succeeded) {
++        ui::vulkan::VulkanDevice::Queue::Acquisition queue_acquisition =
++            vulkan_device->AcquireQueue(vulkan_device->queue_family_graphics_compute(), 0);
++        if (dfn.vkQueueSubmit(queue_acquisition.queue(), 0, nullptr, submission.fence) !=
++            VK_SUCCESS) {
++          REXGPU_ERROR("Failed to signal a presenter fence (submission thread)");
++        }
++      }
++      {
++        std::lock_guard<std::mutex> lock(async_submit_mutex_);
++        ++async_submit_done_;
++      }
++      async_submit_done_cv_.notify_all();
++      continue;
++    }
 +    if (succeeded) {
 +      VkCommandBufferBeginInfo begin_info = {};
 +      begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -81064,7 +81239,7 @@ index 001f36b..caa5bbe 100644
  void VulkanCommandProcessor::ClearTransientDescriptorPools() {
    texture_transient_descriptor_sets_free_.clear();
    texture_transient_descriptor_sets_used_.clear();
-@@ -5495,6 +5845,10 @@ void VulkanCommandProcessor::ClearTransientDescriptorPools() {
+@@ -5495,6 +5904,10 @@ void VulkanCommandProcessor::ClearTransientDescriptorPools() {
  
    constants_transient_descriptors_free_.clear();
    constants_transient_descriptors_used_.clear();
@@ -81075,7 +81250,7 @@ index 001f36b..caa5bbe 100644
    for (std::vector<VkDescriptorSet>& transient_descriptors_free :
         single_transient_descriptors_free_) {
      transient_descriptors_free.clear();
-@@ -6449,8 +6803,10 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6449,8 +6862,10 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
        // for both the vertex shader and the pixel shader), so if the first draw
        // in the frame doesn't have float constants at all, still allocate a
        // dummy buffer.
@@ -81087,7 +81262,7 @@ index 001f36b..caa5bbe 100644
        uint8_t* mapping = uniform_buffer_pool_->Request(frame_current_, float_constants_size,
                                                         uniform_buffer_alignment, buffer_info.buffer,
                                                         buffer_info.offset);
-@@ -6460,14 +6816,16 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6460,14 +6875,16 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
        buffer_info.range = VkDeviceSize(float_constants_size);
        for (uint32_t i = 0; i < 4; ++i) {
          uint64_t float_constant_map_entry = current_float_constant_map_vertex_[i];
@@ -81112,7 +81287,7 @@ index 001f36b..caa5bbe 100644
          }
        }
        current_constant_buffers_up_to_date_ |= UINT32_C(1)
-@@ -6479,7 +6837,8 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6479,7 +6896,8 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
        VkDescriptorBufferInfo& buffer_info =
            current_constant_buffer_infos_[SpirvShaderTranslator::kConstantBufferFloatPixel];
        size_t float_constants_size =
@@ -81122,7 +81297,7 @@ index 001f36b..caa5bbe 100644
        uint8_t* mapping = uniform_buffer_pool_->Request(frame_current_, float_constants_size,
                                                         uniform_buffer_alignment, buffer_info.buffer,
                                                         buffer_info.offset);
-@@ -6489,14 +6848,16 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6489,14 +6907,16 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
        buffer_info.range = VkDeviceSize(float_constants_size);
        for (uint32_t i = 0; i < 4; ++i) {
          uint64_t float_constant_map_entry = current_float_constant_map_pixel_[i];
@@ -81147,7 +81322,7 @@ index 001f36b..caa5bbe 100644
          }
        }
        current_constant_buffers_up_to_date_ |= UINT32_C(1)
-@@ -6636,8 +6997,49 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6636,8 +7056,49 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
    assert_not_zero(current_graphics_descriptor_set_values_up_to_date_ &
                    (UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetSharedMemoryAndEdram));
    // Constant buffers.
@@ -81199,7 +81374,7 @@ index 001f36b..caa5bbe 100644
      VkDescriptorSet constants_descriptor_set;
      if (!constants_transient_descriptors_free_.empty()) {
        constants_descriptor_set = constants_transient_descriptors_free_.back();
-@@ -6726,14 +7128,27 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6726,14 +7187,27 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
    uint32_t descriptor_sets_remaining =
        descriptor_sets_needed & ~current_graphics_descriptor_sets_bound_up_to_date_;
    uint32_t descriptor_set_index;
@@ -84731,10 +84906,36 @@ index e886a88..fd74aaf 100644
  
  }  // namespace rex::ui
 diff --git a/src/ui/presenter.cpp b/src/ui/presenter.cpp
-index 7360ed9..34f7c39 100644
+index 7360ed9..ed70f8e 100644
 --- a/src/ui/presenter.cpp
 +++ b/src/ui/presenter.cpp
-@@ -1500,9 +1500,11 @@ Presenter::PaintResult Presenter::PaintAndPresent(bool execute_ui_drawers) {
+@@ -847,9 +847,25 @@ std::unique_lock<std::mutex> Presenter::ConsumeGuestOutput(
+   if (properties_out) {
+     *properties_out = properties;
+   }
++  guest_output_consumed_cv_.notify_all();
+   return std::move(consumer_lock);
+ }
+ 
++void Presenter::AwaitGuestOutputConsumed(std::chrono::milliseconds timeout) {
++  {
++    std::lock_guard<std::mutex> paint_mode_mutex_lock(paint_mode_mutex_);
++    if (paint_mode_ != PaintMode::kUIThreadOnRequest) {
++      return;
++    }
++  }
++  std::unique_lock<std::mutex> consumer_lock(guest_output_mailbox_consumer_mutex_);
++  guest_output_consumed_cv_.wait_for(consumer_lock, timeout, [this]() {
++    uint32_t acquired_and_ready =
++        guest_output_mailbox_acquired_and_ready_.load(std::memory_order_relaxed);
++    return (acquired_and_ready & 3) == (acquired_and_ready >> 2);
++  });
++}
++
+ Presenter::GuestOutputPaintFlow Presenter::GetGuestOutputPaintFlow(
+     const GuestOutputProperties& properties, uint32_t host_rt_width, uint32_t host_rt_height,
+     uint32_t max_rt_width, uint32_t max_rt_height, const GuestOutputPaintConfig& config) const {
+@@ -1500,9 +1516,11 @@ Presenter::PaintResult Presenter::PaintAndPresent(bool execute_ui_drawers) {
    PaintResult result = PaintAndPresentImpl(execute_ui_drawers);
    switch (result) {
      case PaintResult::kPresented:
@@ -84909,7 +85110,7 @@ index 914b311..69e65ba 100644
    if (vulkan_instance->extensions_.ext_KHR_wayland_surface) {
  #include <rex/ui/vulkan/functions/instance_khr_wayland_surface.inc>
 diff --git a/src/ui/vulkan/vulkan_presenter.cpp b/src/ui/vulkan/vulkan_presenter.cpp
-index 23645ef..9ce2604 100644
+index 23645ef..87ee499 100644
 --- a/src/ui/vulkan/vulkan_presenter.cpp
 +++ b/src/ui/vulkan/vulkan_presenter.cpp
 @@ -49,6 +49,10 @@
@@ -84923,7 +85124,30 @@ index 23645ef..9ce2604 100644
  REXCVAR_DEFINE_BOOL(vulkan_allow_present_mode_immediate, true, "UI/Vulkan",
                      "Allow immediate present mode (no vsync)");
  
-@@ -795,6 +799,16 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
+@@ -458,6 +462,7 @@ Surface::TypeFlags VulkanPresenter::GetSupportedSurfaceTypes() const {
+ 
+ bool VulkanPresenter::CaptureGuestOutput(RawImage& image_out) {
+   std::shared_ptr<GuestOutputImage> guest_output_image;
++  uint64_t guest_output_async_queue_ticket = 0;
+   {
+     uint32_t guest_output_mailbox_index;
+     std::unique_lock<std::mutex> guest_output_consumer_lock(
+@@ -465,10 +470,14 @@ bool VulkanPresenter::CaptureGuestOutput(RawImage& image_out) {
+     if (guest_output_mailbox_index != UINT32_MAX) {
+       assert_true(guest_output_images_[guest_output_mailbox_index].ever_successfully_refreshed);
+       guest_output_image = guest_output_images_[guest_output_mailbox_index].image;
++      guest_output_async_queue_ticket =
++          guest_output_images_[guest_output_mailbox_index].async_queue_ticket;
+     }
+     // Incremented the reference count of the guest output image - safe to leave
+     // the consumer critical section now.
+   }
++  // The refresh must be on the queue before this thread's submissions using it.
++  AwaitGuestOutputQueued(guest_output_async_queue_ticket);
+   if (!guest_output_image) {
+     return false;
+   }
+@@ -795,6 +804,16 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
        return SurfacePaintConnectResult::kFailureSurfaceUnusable;
      }
      VkResult vulkan_surface_create_result = VK_ERROR_UNKNOWN;
@@ -84940,7 +85164,79 @@ index 23645ef..9ce2604 100644
      switch (surface_type) {
  #if REX_PLATFORM_ANDROID
        case Surface::kTypeIndex_AndroidNativeWindow: {
-@@ -1840,6 +1854,13 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+@@ -1044,6 +1063,16 @@ void VulkanPresenter::DisconnectPaintingFromSurfaceFromUIThreadImpl() {
+   paint_context_.DestroySwapchainAndVulkanSurface();
+ }
+ 
++void VulkanPresenter::AwaitGuestOutputQueued(uint64_t async_queue_ticket) {
++  if (!async_queue_ticket) {
++    return;
++  }
++  std::shared_lock<std::shared_mutex> submitter_lock(async_queue_submitter_mutex_);
++  if (async_queue_submitter_) {
++    async_queue_submitter_->AwaitQueueSubmitted(async_queue_ticket);
++  }
++}
++
+ bool VulkanPresenter::RefreshGuestOutputImpl(
+     uint32_t mailbox_index, uint32_t frontbuffer_width, uint32_t frontbuffer_height,
+     std::function<bool(GuestOutputRefreshContext& context)> refresher, bool& is_8bpc_out_ref) {
+@@ -1095,11 +1124,24 @@ bool VulkanPresenter::RefreshGuestOutputImpl(
+   {
+     VulkanSubmissionTracker::FenceAcquisition fence_acqusition(
+         guest_output_image_refresher_submission_tracker_.AcquireFenceToAdvanceSubmission());
+-    const VulkanDevice::Queue::Acquisition queue_acquisition =
+-        vulkan_device_->AcquireQueue(vulkan_device_->queue_family_graphics_compute(), 0);
+-    if (dfn.vkQueueSubmit(queue_acquisition.queue(), 0, nullptr, fence_acqusition.fence()) !=
+-        VK_SUCCESS) {
+-      fence_acqusition.SubmissionSucceededSignalFailed();
++    // If the refresher's submissions are still on another thread, signal the
++    // fence after them there - the consumers wait for the ticket instead of this
++    // thread.
++    image_instance.async_queue_ticket = 0;
++    if (fence_acqusition.fence() != VK_NULL_HANDLE) {
++      std::shared_lock<std::shared_mutex> submitter_lock(async_queue_submitter_mutex_);
++      if (async_queue_submitter_) {
++        image_instance.async_queue_ticket =
++            async_queue_submitter_->EnqueueFenceSignal(fence_acqusition.fence());
++      }
++    }
++    if (!image_instance.async_queue_ticket) {
++      const VulkanDevice::Queue::Acquisition queue_acquisition =
++          vulkan_device_->AcquireQueue(vulkan_device_->queue_family_graphics_compute(), 0);
++      if (dfn.vkQueueSubmit(queue_acquisition.queue(), 0, nullptr, fence_acqusition.fence()) !=
++          VK_SUCCESS) {
++        fence_acqusition.SubmissionSucceededSignalFailed();
++      }
+     }
+   }
+ 
+@@ -1631,6 +1673,7 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+   GuestOutputProperties guest_output_properties;
+   GuestOutputPaintConfig guest_output_paint_config;
+   std::shared_ptr<GuestOutputImage> guest_output_image;
++  uint64_t guest_output_async_queue_ticket = 0;
+   {
+     uint32_t guest_output_mailbox_index;
+     std::unique_lock<std::mutex> guest_output_consumer_lock(ConsumeGuestOutput(
+@@ -1638,12 +1681,16 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+     if (guest_output_mailbox_index != UINT32_MAX) {
+       assert_true(guest_output_images_[guest_output_mailbox_index].ever_successfully_refreshed);
+       guest_output_image = guest_output_images_[guest_output_mailbox_index].image;
++      guest_output_async_queue_ticket =
++          guest_output_images_[guest_output_mailbox_index].async_queue_ticket;
+     }
+     // Incremented the reference count of the guest output image - safe to leave
+     // the consumer critical section now as everything here either will be using
+     // the new reference or is exclusively owned by main target painting (and
+     // multiple threads can't paint the main target at the same time).
+   }
++  // The refresh must be on the queue before this thread's submissions using it.
++  AwaitGuestOutputQueued(guest_output_async_queue_ticket);
+ 
+   if (guest_output_image) {
+     VkExtent2D max_framebuffer_extent =
+@@ -1840,6 +1887,13 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
                  swapchain_effect, paint_context_.swapchain_render_pass);
              if (swapchain_effect_pipeline.swapchain_pipeline == VK_NULL_HANDLE) {
                guest_output_flow.effect_count = 0;
