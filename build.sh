@@ -23,7 +23,7 @@
 #   --no-webgpu         Build with Vulkan renderer only (disables WebGPU/Dawn)
 #   --target TARGET     Build a specific CMake target (default: trials_hd)
 #   --web               Build the browser version (Emscripten + WebGPU, preset
-#                       web-wasm64-release; needs the generated code from a native build)
+#                       web-wasm32-release; needs the generated code from a native build)
 #   -h, --help          Show this help message
 set -euo pipefail
 
@@ -105,7 +105,7 @@ Options:
   --no-webgpu           Disable WebGPU renderer (build Vulkan only)
   --target TARGET       Build a specific CMake target (default: trials_hd)
   --web                 Build the browser version (WebAssembly + WebGPU) into
-                        out/build/web-wasm64-release/web; run it with ./run.sh --web.
+                        out/build/web-wasm32-release/web; run it with ./run.sh --web.
                         Needs Emscripten (~/emsdk or \$EMSDK) and a native build first
                         (it compiles the native build's generated code).
   -h, --help            Show this help message
@@ -218,7 +218,9 @@ if [[ $WEB -eq 1 ]]; then
     echo "Error: the web build has a single configuration (release); drop $CONFIG_GIVEN." >&2
     exit 1
   fi
-  PRESET="web-wasm64-release"
+  # wasm32: browsers bounds-check every Memory64 access; 32-bit memories use
+  # guard pages (docs/web-port/README.md W-L13). Preset web-wasm64-release stays.
+  PRESET="web-wasm32-release"
 fi
 BUILD_DIR="$ROOT_DIR/out/build/$PRESET"
 ASSETS_DIR="$ROOT_DIR/assets"

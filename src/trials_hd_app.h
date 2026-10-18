@@ -5,7 +5,6 @@
 #pragma once
 
 #include <atomic>
-#include <csignal>
 #include <cstdio>
 #include <chrono>
 #include <filesystem>
@@ -205,14 +204,6 @@ class TrialsHdApp : public rex::ReXApp {
     setenv("MVK_CONFIG_LOG_LEVEL", "1", 0);
     setenv("MVK_CONFIG_FAST_MATH_ENABLED", "1", 0);
     setenv("MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS", "1", 0);
-#endif
-#if defined(__linux__)
-    struct sigaction sa{};
-    sa.sa_handler = [](int) {
-      std::exit(0);
-    };
-    sigaction(SIGTERM, &sa, nullptr);
-    sigaction(SIGINT, &sa, nullptr);
 #endif
     // Native default: Vulkan. WebGPU is the web port's renderer; natively it
     // stays available with --gpu_plugin=webgpu (development of the web renderer).

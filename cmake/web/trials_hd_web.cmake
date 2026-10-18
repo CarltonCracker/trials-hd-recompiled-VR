@@ -34,7 +34,15 @@ option(TRIALSHD_WEB_NODE
 # wasm64 with shared memory (D1), real pthreads (D4), SIMD for SIMDe, native
 # wasm exceptions. -ffp-contract=off: the recompiled code needs the guest's
 # unfused multiply-adds (natively -ffp-model=strict, which has no meaning here).
-set(TRIALSHD_WEB_CODEGEN_FLAGS -sMEMORY64=1 -pthread -msimd128 -fwasm-exceptions)
+# TRIALSHD_WEB_WASM32: a 32-bit memory instead (W-L13). Chromium checks every
+# Memory64 access explicitly but elides wasm32's checks with guard pages: a
+# load/store-heavy kernel ran 1.5x faster as wasm32 (16.6, 2026-10-18).
+option(TRIALSHD_WEB_WASM32 "Web: 32-bit linear memory (4 GiB) instead of Memory64" OFF)
+if(TRIALSHD_WEB_WASM32)
+    set(TRIALSHD_WEB_CODEGEN_FLAGS -pthread -msimd128 -fwasm-exceptions)
+else()
+    set(TRIALSHD_WEB_CODEGEN_FLAGS -sMEMORY64=1 -pthread -msimd128 -fwasm-exceptions)
+endif()
 add_compile_options(
     ${TRIALSHD_WEB_CODEGEN_FLAGS}
     -fno-strict-aliasing
@@ -72,7 +80,11 @@ endif()
 set(REXGLUE_FLOOR_VERSION
     "${REXGLUE_DERIVED_MAJOR}.${REXGLUE_DERIVED_MINOR}.${REXGLUE_DERIVED_PATCH}")
 rex_version_channel(REXGLUE_VERSION_CHANNEL VERSION "${REXGLUE_FULL_VERSION}")
-set(REX_PLATFORM "web-wasm64")
+if(TRIALSHD_WEB_WASM32)
+    set(REX_PLATFORM "web-wasm32")
+else()
+    set(REX_PLATFORM "web-wasm64")
+endif()
 string(TIMESTAMP REXGLUE_BUILD_TIMESTAMP "%Y%m%d_%H%M")
 configure_file(${_sdk}/include/rex/version.h.in ${CMAKE_BINARY_DIR}/include/rex/version.h @ONLY)
 
@@ -474,7 +486,7 @@ set(_web_link_flags
     -sPROXY_TO_PTHREAD
     -sPTHREAD_POOL_SIZE=48
     -sINITIAL_MEMORY=3328mb
-    -sMAXIMUM_MEMORY=8gb
+    $<IF:$<BOOL:${TRIALSHD_WEB_WASM32}>,-sMAXIMUM_MEMORY=4gb,-sMAXIMUM_MEMORY=8gb>
     -sALLOW_MEMORY_GROWTH=1
     -sSTACK_SIZE=8mb
     -sDEFAULT_PTHREAD_STACK_SIZE=4mb

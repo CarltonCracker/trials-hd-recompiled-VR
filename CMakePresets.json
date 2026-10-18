@@ -172,6 +172,15 @@
       }
     },
     {
+      "name": "web-wasm32-release",
+      "displayName": "Web (WebAssembly, 32-bit memory) Release",
+      "description": "As web-wasm64-release with a 4 GiB wasm32 memory, whose accesses browsers check with guard pages instead of explicit bounds checks (docs/web-port/README.md W-L13).",
+      "inherits": "web-wasm64-release",
+      "cacheVariables": {
+        "TRIALSHD_WEB_WASM32": "ON"
+      }
+    },
+    {
       "name": "web-wasm64-node",
       "displayName": "Web build for Node.js (development)",
       "description": "The web build run by Node with direct access to the host file system, for headless boot checks (docs/web-port/README.md 11).",
@@ -221,6 +230,10 @@
     {
       "name": "web-wasm64-release",
       "configurePreset": "web-wasm64-release"
+    },
+    {
+      "name": "web-wasm32-release",
+      "configurePreset": "web-wasm32-release"
     },
     {
       "name": "web-wasm64-node",

@@ -7,11 +7,12 @@ WebAssembly with Emscripten and drawing through the browser's WebGPU. Written 20
 for the agents (and people) who will build it. This document is the specification and
 live progress record.
 
-**Status (2026-10-16, work paused by the user):** the game builds for the web and plays in
-desktop Chromium: menus, settings overlay, OPFS import, keyboard/gamepad rides, audio
-(WM1-WM5 done). Open: frame-rate dips in heavy scenes and a ~2.3x slower boot than native
-(WM6), Firefox/Safari (deferred), macOS review gates. **New agents: start with section
-16.H.**
+**Status (2026-10-18):** the game builds for the web and plays in desktop Chromium: menus,
+settings overlay, OPFS import, keyboard/gamepad rides, audio (WM1-WM5 done) and, since the
+switch to a **wasm32** build plus SIMD byte swaps, a steady 60 FPS while riding (WM6, 16.6
+2026-10-18). `./build.sh --web` and `./run.sh --web` build and serve it. Open: OPFS import
+and the other input scripts not yet re-run on wasm32, boot time, Firefox/Safari (deferred),
+macOS review gates. **New agents: start with section 16.H.**
 
 **This document is also the web port's task list.** Section 16 holds every task with its
 status. Agents claim, update and complete tasks there (rules in 16.0) and keep the rest of
@@ -68,7 +69,7 @@ Decisions (each is justified in section 7; change them only with a Notes-log ent
 
 | # | Decision | Why (short) |
 | --- | --- | --- |
-| D1 | **wasm64 (Memory64) first**, wasm32 kept as a measured fallback | The guest needs a 3 GiB window plus ~1 GiB host heap (4.4); wasm32 caps at 4 GiB total. The SDK assumes 64-bit host pointers everywhere. Shared Memory64 + threads already works in Chromium (5.6). |
+| D1 | **wasm64 (Memory64) first**, wasm32 kept as a measured fallback. *2026-10-18: wasm32 is now the default web build (W-L13): Chromium bounds-checks every Memory64 access, which cost ~1.5x on load/store-heavy code; the game fits 4 GiB (3.6 GiB peak).* | The guest needs a 3 GiB window plus ~1 GiB host heap (4.4); wasm32 caps at 4 GiB total. The SDK assumes 64-bit host pointers everywhere. Shared Memory64 + threads already works in Chromium (5.6). |
 | D2 | **Guest window of 2.75 GiB, aliases folded by a 256-entry table** (`addr >> 24`): physical views, `0x7F…` and `0x9…` map onto their native targets (7.9.2) | Wasm has no page aliasing; the codegen already routes every access through `REX_PHYS_HOST_OFFSET` (3.3); one load + add per access. |
 | D3 | **GPU-visible write tracking from codegen**, not page protection: physical-range stores set a bit in a 16 KiB dirty bitmap | No `mprotect`/`SIGSEGV` in wasm. Stores check the folded host physical range; loads only translate. |
 | D4 | **Real pthreads** for guest threads (36 host threads measured), `PROXY_TO_PTHREAD`, browser main thread kept free | Guest code blocks constantly; `Atomics.wait` is forbidden on the main thread. |
@@ -1609,6 +1610,18 @@ VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.json chromium --headless=new
 
 Without ANGLE-on-Vulkan Chromium exposes only SwiftShader to WebGPU.
 
+**NVIDIA (proprietary driver; measured 2026-10-17, Chromium 155, RTX 2070 SUPER in a
+Debian 13 container).** Headless Chromium gets either the hardware WebGPU adapter
+(`--use-gl=angle --use-angle=vulkan --enable-features=Vulkan`, *without*
+`--use-vulkan=native`, which makes Skia fail to create its headless Vulkan surface and
+WebGPU fall back to SwiftShader) or a composited canvas (`--use-angle=gl-egl`, but then
+WebGPU is SwiftShader), never both: page screenshots of the hardware-WebGPU canvas stay
+black (main-thread and worker canvases alike). A **headful** Chromium on an Xvfb display
+has both. `cdp.py` therefore picks per machine: with an AMD render node it uses the RADV
+recipe above, headless; otherwise it drops `--use-vulkan=native` and runs headful on its
+own Xvfb display (`--headful` / `--headless` override; needs `xvfb`). A player with a real
+display is not affected.
+
 ### 11.2 Harness
 
 - `tools/web/cdp.py`: a small Chrome DevTools Protocol client (websocket). It opens the
@@ -1665,7 +1678,7 @@ profile per thread with guest functions named `__imp__sub_<address>`.
 | WM3 | done 2026-10-16 (W-L10) | Game data import and persistence | Fresh profile → pick package → plays; reload → no re-import |
 | WM4 | done 2026-10-16 (16.6) | Rides render; input from keyboard and gamepad | `ride_middle_name_danger` completes; `check_fps_log.py 60` passes in Chromium |
 | WM5 | done 2026-10-16 (measured, 16.6; listening check by the user) | Audio | Music and effects audible; no underruns over a 2-minute ride |
-| WM6 | todo | 60 FPS at 720p in desktop Chrome (RX 6600) | 3 runs, min ≥ 55 FPS riding, logged in 4.3-style table |
+| WM6 | done 2026-10-18 (wasm32 build, RTX 2070 SUPER; 16.6) — not yet re-measured on the RX 6600 | 60 FPS at 720p in desktop Chrome (RX 6600) | 3 runs, min ≥ 55 FPS riding, logged in 4.3-style table |
 | WM7 | deferred 2026-10-16 (user: Chrome-based browsers first; Firefox 158 runs it, 16.6) | Firefox desktop | WM2–WM5 checks pass in Firefox |
 | WM8 | deferred 2026-10-16 (user: Chrome-based browsers first) | Safari (macOS) | WM2–WM5 checks pass, or a documented blocker |
 
@@ -1787,6 +1800,9 @@ details are at the top of the notes log (16.6).
 generated `generated/default/` first):
 
 ```sh
+./build.sh --web              # finds ~/emsdk (or $EMSDK); needs a native ./build.sh first
+./run.sh --web                # serves it on 127.0.0.1:8091 with assets/; --name=value -> page flags
+# Or by hand:
 export PATH=$PWD/.venv/bin:$PATH && source ~/emsdk/emsdk_env.sh   # ninja is in .venv
 tools/web/build.sh            # or: emcmake cmake --preset web-wasm64-release -B out/build/<dir>
 python3 tools/web/serve.py out/build/web-wasm64-release/web --assets assets --port 8091
@@ -1831,7 +1847,19 @@ workers are blocked, their stacks). A page URL with `#log` shows the log over th
 - `cdp.py` must release every auto-attached target (`runIfWaitingForDebugger`) or the
   AudioWorklet stays paused.
 
-**Next steps, in priority order:**
+**Next steps, in priority order (2026-10-18; the older list below is kept for its
+details):**
+1. Re-run on wasm32 the checks not repeated yet: OPFS import (`storage_browser.py`),
+   `keyboard_ride`, `settings_mouse`, `controller_settings`; and the RX 6600 / RX 7800 XT
+   ride numbers. Memory: 3.6 GiB of 4 GiB at peak in dev mode (served assets are cached in
+   linear memory; OPFS should use less). If it gets tight, lower
+   `-sDEFAULT_PTHREAD_STACK_SIZE` (4 MiB × 48 workers; host stacks never exceed 264 KiB, 4.5).
+2. First-use shader compiles still stall a frame (hundreds of ms) the first time a shader is
+   seen; later visits hit the browser/driver caches. Async pipelines would trade that for
+   brief pop-in; a warm-up from a stored pipeline list (W-S16) avoids both.
+3. Boot time (~2x native) - not re-measured on wasm32.
+
+**Older next steps (2026-10-16):**
 1. **Confirm on the user's PC** (Fedora, RX 7800 XT, Chromium): its build predated the
    fixes (its log still showed the `transfer pass` marker from `ff0a9bd`). After rebuilding
    from current `dev`, check that rides render and music is no longer choppy. If music is
@@ -1963,7 +1991,7 @@ Every task's "Done when" implicitly includes **`tools/check_native.sh check` pas
 | --- | --- | --- | --- | --- | --- |
 | W-L01 | done 2026-10-15 (section 7.9) | **Web platform design note.** Turn sections 7–9 into concrete interfaces: the `REX_PLATFORM_EMSCRIPTEN` layer, the memory-model macro and helpers (7.2, 8.1), the dirty-bitmap API (8.3), the SAB layouts for input and audio, the GPU-worker yield points (7.4), the ImGui draw-list mailbox (9.4). Write it into this document. | — | 3, 7, 8, 9 | Design note merged; W-S05, W-S16, W-S18 unblocked |
 | W-L02 | review 2026-10-15 (needs macOS check) | **Codegen changes.** Resolve the SIMDe mask-type collision (section 6 item 5) using the existing `0xF`/`0xFFFF` immediate on wasm (native overloads unchanged); emit web memory macros and dirty-marking store helpers under `__EMSCRIPTEN__`. Native raw-write expressions become identity macros; their expansions stay identical. | W-L01 | `src/codegen/builders/{memory,vector,context}.cpp`, 3.3 | Native build boots, golden scenes unchanged; all 107 files compile with `em++` without the spike's scratch headers |
-| W-L03 | todo (boot/ride measurements in 16.6 2026-10-16; decision still open) | **Memory-model cost.** Build a micro-benchmark from real generated functions (a physics-heavy one and a VMX-heavy one, driven with captured inputs) for native, wasm32 and wasm64; then compare the full game's busiest guest threads once WM1 runs. Decide A vs B (7.1) with numbers. | W-S03, W-S10, W-S11 | 7.1, 7.2 | Table of ns/call in 7.1; decision recorded in 1 (D1) |
+| W-L03 | done 2026-10-18 (micro-benchmarks in Chromium 155, 16.6: Memory64 bounds checks ~1.5x, scalar byte swaps ~1.6x; decision: wasm32, D1) | **Memory-model cost.** Build a micro-benchmark from real generated functions (a physics-heavy one and a VMX-heavy one, driven with captured inputs) for native, wasm32 and wasm64; then compare the full game's busiest guest threads once WM1 runs. Decide A vs B (7.1) with numbers. | W-S03, W-S10, W-S11 | 7.1, 7.2 | Table of ns/call in 7.1; decision recorded in 1 (D1) |
 | W-L04 | review 2026-10-15 (needs macOS check) | **Runtime memory for the web** (`xmemory.cpp`, `memory_posix.cpp` → `memory_emscripten.cpp`): one linear-memory window, folded physical views, bookkeeping-only protection, `MarkPhysicalWritten`, the dirty bitmap and write epochs; `TranslateVirtual`/`TranslatePhysical`/`GetPhysicalAddress` consistent with the macro. | W-L01 | 3.4, 8.1, 8.3 | Unit test (native-hosted with the web memory model compiled in): guest writes through all three views land in the same physical bytes; bitmap bits match the writes |
 | W-L05 | todo (delivery done in ff0a9bd; only the --web_dirty_verify mode is left, 16.H) | **Write tracking consumers**: `SharedMemory`, `PrimitiveProcessor` and the renderer's texture cache and memory mirror use the dirty bitmap on the web; debug assertion mode compares against chunk hashes (14.8). | W-L04, W-S09 | 8.3, renderer doc 8.3, 8.9 | WM4 ride shows no stale textures; assertion mode passes over `ride_middle_name_danger` |
 | W-L06 | done 2026-10-16 (WM2; overlays on the GPU worker, 16.6) | **GPU worker and yielding** (7.4): run the command processor on the canvas-owning pthread; JSPI yield at swap/ring waits (or the resumable loop if W-S05 fails); move presenter paint and ImGui drawing there (9.4). | W-L01, W-S05 | 7.3, 7.4, 9.4 | WM2: menus render and the settings overlay works |
@@ -1973,7 +2001,7 @@ Every task's "Done when" implicitly includes **`tools/check_native.sh check` pas
 | W-L10 | done 2026-10-16 (pi-gpt; committed by claude-opus-5.5, 16.6) | **Files and import**: WasmFS + OPFS backend, VFS host-path device on OPFS, import flow (picker, drag-drop, extraction worker using W-S13), license metadata, saves/settings/shader storage in OPFS, `storage.persist()` (8.6). | W-L01, W-S13 | 8.6, `src/package_license.cpp` | WM3 |
 | W-L11 | todo (GPU worker is not the bottleneck yet, 16.H) | **Browser CPU cost reduction** for the GPU worker if W-S12 or WM4 shows it bound: render bundles for static passes, fewer bind-group changes, larger uniform rings, batching small uploads. | W-S12, WM4 | 9.6, renderer doc 7.5 | WM6 or a documented ceiling with profiles |
 | W-L12 | done 2026-10-16 (16.6) | **Audio**: FFmpeg for wasm (XMA only), web audio driver with an AudioWorklet and SAB ring, AudioContext unlock on first gesture (8.5). | W-L01 | 8.5, SDK `src/audio/` | WM5 |
-| W-L13 | todo | **Option B (wasm32 remapped window)** if W-L03 or Safari requires it: heap range limits in the SDK, segment table macro, 32-bit pointer audit. | W-L03 | 7.1 | Same golden checks as WM2/WM4 in a wasm32 build |
+| W-L13 | done 2026-10-18 (no remapping needed: the 2.75 GiB window and the host heap fit 4 GiB; preset `web-wasm32-release`, the default; 16.6) | **Option B (wasm32 remapped window)** if W-L03 or Safari requires it: heap range limits in the SDK, segment table macro, 32-bit pointer audit. | W-L03 | 7.1 | Same golden checks as WM2/WM4 in a wasm32 build |
 | W-L14 | todo (pi-gpt out of usage 2026-10-16; review rows remain) | **Review gate** for small-model work: review each `review` task within a day; check native builds still pass. | — | 16.1 | Ongoing |
 | W-L15 | review 2026-10-15 (needs macOS check) | **Web build system** (10.1, 10.2): `web-wasm64-release` preset, `TRIALSHD_WEB` (OFF by default, `FATAL_ERROR` without Emscripten, 7.8), static WebGPU renderer library, third-party subset, shell HTML, link flags; boots to WM1 with the GPU plugin stubbed. Also: kernel/threading web layer (timers thread, affinity no-ops, exception handler and `dlopen` compiled out, fibers per W-S08, sockets stubbed). | W-L01, W-L02, W-L04, W-S10, W-S11 | 3.5, 8.2, 8.4, 10 | WM1 |
 | W-L16 | review 2026-10-15 (needs macOS check) | **Fast exact `fma` on wasm.** Wasm has no fused multiply-add; `std::fma` is musl's software routine, ~30% of the game's job-thread time in the W-L15 Node profile (`fma` + `normalize` under `sub_826697D0` and friends). 6,183 of the 6,440 generated `std::fma` calls are single-precision (`fmadds` family: `double(float(std::fma(a, b, c)))`). When `a` and `b` are float-representable, `a*b` is exact in double (48 of 53 bits), so `a*b + c` (with `-ffp-contract=off`) is bit-identical to `fma(a, b, c)`: checked 2026-10-15 over 198,959,703 random cases including NaN/Inf/subnormals and near-cancellation, 0 mismatches. Emit the single-precision forms through a macro (`REX_FMA_S`) that is `std::fma` natively (identity, as W-L02's macros) and a guarded fast path on the web; keep `std::fma` for the rest. | W-L02, W-L15 | 3.3, W-L02's identity-macro process | Native generated-code diff reviewed (macro names only) and golden scenes pass; web: same output in a W-L04-style unit test over the generated forms; profile share of `fma` < 5% |
@@ -1986,6 +2014,41 @@ is in 16.H. The critical path was W-L01 → W-L02/W-L04 → W-L15 (boot) → W-L
 (graphics) → W-L08/W-L10/W-L12.
 
 ### 16.6 Notes log
+
+- 2026-10-18 (claude-opus-5.5): **WM6: 60 FPS while riding, on a wasm32 build.** Machine:
+  Debian 13 container, RTX 2070 SUPER (proprietary driver), Chromium 155 headful on Xvfb
+  (11.1 NVIDIA note). Measured with the new frame timing (`--log_frame_timing=true`: every
+  guest swap timestamped; also the F2 performance overlay), over the 83 s riding window of
+  `ride_middle_name_danger` (captures `t2_loaded` to `t2_results`):
+
+  | Build | min | 5th pct | median | s < 55 FPS | worst frame |
+  | --- | --- | --- | --- | --- | --- |
+  | wasm64 (start of session) | 33 | 48 | 60 | 9 | 466 ms (first-use shaders) |
+  | wasm64 + SIMD byte swaps | 47-48 | 57-59 | 60 | 2-4 | 43-49 ms |
+  | **wasm32** + SIMD byte swaps, run 1 / 2 / 3 | 44 / 59 / 60 | 60 | 60 | 2 / 0 / 0 | 299 / 42 / 35 ms |
+
+  wasm32 run 1's two dips are the pause menu's first-use shader on a new browser origin.
+  Frame-loop phases (`log_simulation_rate` now logs ms per render: wait / update / render):
+  in the explosion section wasm64 spent update 11-13 + render 8.5-9 ms, wasm32 update ~7.5 +
+  render ~6.5 ms. Why: micro-benchmarks in Chromium 155 (`out/`-only sources) - a load/store
+  kernel over an L1-resident struct ran 3.04 ns/iter as wasm64 vs 1.96 as wasm32, and wasm32
+  with `--wasm-enforce-bounds-checks` 3.21: Memory64 accesses are always explicitly
+  bounds-checked (shared, non-shared or fixed-size; `--wasm-memory64-trap-handling` has no
+  effect). A guest-access kernel ran 38 ns/iter with LLVM's scalar byte-swap expansion vs 24
+  with the swap done by one SIMD shuffle (the access itself stays a volatile scalar
+  load/store): `web_guest.h` `Load16/32/64`, `ByteSwap32/64`; the PCH template's web
+  `REX_LOAD_*` now call them (regenerated: only the web block of `trials_hd_pch.h` changed).
+  The fold table and the dirty-mark check measured within noise. wasm32 build: one SDK fix
+  (CRT heap header / o1heap CLZ were 64-bit-only) and `sbrk` of the window in ≤ 1 GiB steps;
+  memory peaks at 3640 MiB of 4096. Menus vs native `baseline_webgpu`: panel 38.0-46.4 dB,
+  full frame 37.6-38.6 dB (wasm64 the same day: 29.6-45.0 panel; differences are animation
+  phase); audio 0 underruns. Hitches also fixed: achievement unlocks saved the unlock state to
+  OPFS on the game thread (0.6 s freeze mid-ride) - now saved in the background on the web.
+  Tooling: `./build.sh --web`, `./run.sh --web`; `cdp.py` headful-on-Xvfb on non-AMD GPUs;
+  `check_native.sh` `CHECK_GPU_INDEX`; native SIGTERM handler (PGO-only) removed - games
+  ignored the harness's SIGTERM and kept running. Native: `CHECK_GPU_INDEX=0
+  tools/check_native.sh check` with the reviewed PCH change accepted: both renderers 9
+  captures, worst 38.0 dB, NATIVE CHECK PASSED.
 
 - 2026-10-16 (claude-opus-5.5): **paused by the user; handoff in 16.H.** Last changes: hardware
   FMA on the web (`-Wl,--wrap=fma` to `src/core/fma_emscripten.cpp`: `f64x2.relaxed_madd`

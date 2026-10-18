@@ -90,13 +90,13 @@ Build the native game first to generate C++ from your own `default.xex`, then in
 [Emscripten](https://emscripten.org/docs/getting_started/downloads.html) (tested: 6.0.12):
 
 ```sh
-# Activates ~/emsdk automatically, or use an already activated toolchain.
-tools/web/build.sh
-python3 tools/web/serve.py out/build/web-wasm64-release/web
+./build.sh --web    # activates ~/emsdk (or $EMSDK) automatically
+./run.sh --web      # serves it on localhost with your assets/ and prints the URL
 ```
 
-Open **http://127.0.0.1:8080** in desktop Chrome/Edge with hardware WebGPU, shared
-Memory64 and JSPI support (Chromium 154 on Linux is the tested target). Linux may
+Open the printed URL (**http://127.0.0.1:8091/...**) in desktop Chrome/Edge with hardware
+WebGPU and JSPI support (Chromium 154-155 on Linux are the tested targets). F2 shows the
+performance overlay. Linux may
 require WebGPU flags; see [the web-port notes](docs/web-port/README.md#111-headless-chromium-with-hardware-webgpu-this-server).
 Other browsers and mobile are not verified.
 

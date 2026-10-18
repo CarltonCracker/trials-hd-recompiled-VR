@@ -130,7 +130,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("directory", nargs="?", default="out/build/web-wasm64-release/web")
+    parser.add_argument("directory", nargs="?", default="out/build/web-wasm32-release/web")
     parser.add_argument("--bind", default="127.0.0.1", help="listen address (default: loopback only)")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--assets", type=Path,

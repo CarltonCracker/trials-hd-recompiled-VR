@@ -13,6 +13,7 @@ fi
 if ! command -v ninja >/dev/null && [[ -x .venv/bin/ninja ]]; then
   export PATH="$PWD/.venv/bin:$PATH"
 fi
-emcmake cmake --preset web-wasm64-release
-cmake --build out/build/web-wasm64-release -j"${CMAKE_BUILD_PARALLEL_LEVEL:-8}"
-printf '\nServe locally: python3 tools/web/serve.py out/build/web-wasm64-release/web\n'
+preset="${TRIALSHD_WEB_PRESET:-web-wasm32-release}"  # or web-wasm64-release
+emcmake cmake --preset "$preset"
+cmake --build "out/build/$preset" -j"${CMAKE_BUILD_PARALLEL_LEVEL:-8}"
+printf '\nServe locally: python3 tools/web/serve.py out/build/%s/web\n' "$preset"

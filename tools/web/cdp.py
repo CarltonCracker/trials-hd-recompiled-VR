@@ -367,13 +367,14 @@ async def run(args):
     # NVIDIA (proprietary driver), measured 2026-10-17: headless Chromium gets either
     # the hardware WebGPU adapter or a composited canvas, never both (page
     # screenshots stay black). A headful browser on its own Xvfb display has both.
-    headful = args.headful if args.headful is not None else not amd
+    requested = getattr(args, "headful", None)  # tools may build args without it
+    headful = requested if requested is not None else not amd
     xvfb = None
     if headful:
         flags.remove("--headless=new")
-        if not args.viewport:
+        if not getattr(args, "viewport", None):
             args.viewport = "1280x720"  # the window also has browser UI
-        if "DISPLAY" not in env or args.headful is None:
+        if "DISPLAY" not in env or requested is None:
             xvfb, env["DISPLAY"] = start_xvfb()
     browser = subprocess.Popen(
         [chromium, *flags, *(getattr(args, "chromium_flag", None) or []),

@@ -440,6 +440,10 @@ extern "C" REX_FUNC(sub_82664F98) {
   double last_rate = -1;
   uint32_t rate_counter = 0;
   uint32_t ticks = 0, renders = 0;
+  // Where the loop's time goes (log_simulation_rate): pacing wait, fixed
+  // updates, render dispatch, then the two calls that end the frame.
+  using Seconds = std::chrono::duration<double>;
+  Seconds t_wait{}, t_update{}, t_render{}, t_present{}, t_end{};
   uint32_t last_state_table = 0;
   bool initialized = false;
   REXLOG_INFO("FPS unlock: real rendering, original 16,666 us fixed updates");
@@ -457,10 +461,12 @@ extern "C" REX_FUNC(sub_82664F98) {
       last_rate = rate;
       REXLOG_INFO("FPS unlock: rendering {}", rate > 0 ? fmt::format("at up to {:.2f} FPS", rate) : "uncapped");
     }
+    const auto wait_start = std::chrono::steady_clock::now();
     if (rate > 0 && initialized) {
       AccurateWaitUntil(std::min(next_render, previous + clock.UntilNextStep()));
     }
     const auto now = std::chrono::steady_clock::now();
+    t_wait += now - wait_start;
     const auto steps = clock.Advance(now - previous);
     previous = now;
     for (uint32_t i = 0; i < steps && Running(base); ++i) {
@@ -483,6 +489,8 @@ extern "C" REX_FUNC(sub_82664F98) {
       initialized = true;
     }
     if (!Running(base)) break;
+    const auto render_start = std::chrono::steady_clock::now();
+    t_update += render_start - now;
     if (initialized && (rate == 0 || now >= next_render)) {
       // At or below the 60 Hz tick rate, every frame shows a whole tick as the original did.
       g_render_alpha.store(rate == 0 || rate > 61 ? clock.InterpolationFraction() : 1.f);
@@ -493,21 +501,32 @@ extern "C" REX_FUNC(sub_82664F98) {
         next_render = now - next_render > period ? now + period : next_render + period;
       }
     }
+    const auto present_start = std::chrono::steady_clock::now();
+    t_render += present_start - render_start;
     ctx.r3.u64 = ctx.r1.u32 + 96;
     ctx.lr = 0x8266518C;
     sub_82124BF0(ctx, base);
+    const auto end_start = std::chrono::steady_clock::now();
+    t_present += end_start - present_start;
     if (now - report_time >= std::chrono::seconds(1)) {
       const double seconds = std::chrono::duration<double>(now - report_time).count();
       if (REXCVAR_GET(log_simulation_rate)) {
         REXLOG_INFO("fixed updates/sec: {:.1f} real renders/sec: {:.1f}",
                     ticks / seconds, renders / seconds);
+        const double ms = 1000.0 / std::max<uint32_t>(renders, 1);
+        REXLOG_INFO("frame loop ms/render: wait {:.2f} update {:.2f} render {:.2f} "
+                    "end1 {:.2f} end2 {:.2f}",
+                    t_wait.count() * ms, t_update.count() * ms, t_render.count() * ms,
+                    t_present.count() * ms, t_end.count() * ms);
       }
+      t_wait = t_update = t_render = t_present = t_end = {};
       ticks = renders = 0;
       report_time = now;
     }
     ctx.r3.u64 = 0;
     ctx.lr = 0x826651A0;
     sub_82124660(ctx, base);
+    t_end += std::chrono::steady_clock::now() - end_start;
   }
   g_unlocked_loop.store(false);
   ctx = saved;

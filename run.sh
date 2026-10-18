@@ -145,7 +145,11 @@ done
 # Web build: check it is built, then serve it on localhost.
 # -----------------------------------------------------------------------------
 if [[ $WEB -eq 1 ]]; then
-  WEB_DIR="$ROOT_DIR/out/build/web-wasm64-release/web"
+  # The default web build (wasm32), else a Memory64 build made with its preset.
+  WEB_DIR="$ROOT_DIR/out/build/web-wasm32-release/web"
+  if [[ ! -f "$WEB_DIR/trials_hd.wasm" && -f "$ROOT_DIR/out/build/web-wasm64-release/web/trials_hd.wasm" ]]; then
+    WEB_DIR="$ROOT_DIR/out/build/web-wasm64-release/web"
+  fi
   if [[ ! -f "$WEB_DIR/trials_hd.html" || ! -f "$WEB_DIR/trials_hd.wasm" || ! -f "$WEB_DIR/trials_hd.js" ]]; then
     echo "============================================================" >&2
     echo "Error: the web build was not found." >&2
