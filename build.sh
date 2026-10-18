@@ -407,11 +407,23 @@ echo "============================================================"
 # Configure preset if not yet configured, or when CMake flags were supplied, or when cleaning
 if [[ ! -f "$BUILD_DIR/build.ninja" ]] || [[ ${#CMAKE_EXTRA_ARGS[@]} -gt 0 ]]; then
   echo "==> Configuring with preset '$PRESET'..."
-  CONFIGURE=(cmake -S "$ROOT_DIR" --preset "$PRESET" "${CMAKE_EXTRA_ARGS[@]}")
+  if [[ "$PLATFORM" == "mac" && $WEB -eq 0 && ${#CMAKE_EXTRA_ARGS[@]} -eq 0 ]]; then
+    CONFIGURE=(cmake -S "$ROOT_DIR" --preset "$PRESET")
+  else
+    CONFIGURE=(cmake -S "$ROOT_DIR" --preset "$PRESET" "${CMAKE_EXTRA_ARGS[@]}")
+  fi
   if [[ $WEB -eq 1 ]]; then
     CONFIGURE=(emcmake "${CONFIGURE[@]}")
   fi
   "${CONFIGURE[@]}"
+fi
+
+# An explicit macOS game target bypasses the first-codegen ALL target.
+if [[ "$PLATFORM" == "mac" && $WEB -eq 0 && "$TARGET" == "trials_hd" && -f "$BUILD_DIR/trials_hd_codegen_ready.stamp" ]]; then
+  echo "==> Preparing generated game sources..."
+  cmake --build "$BUILD_DIR" -j"$JOBS" --target trials_hd_codegen
+  cmake -S "$ROOT_DIR" -B "$BUILD_DIR"
+  rm "$BUILD_DIR/trials_hd_codegen_ready.stamp"
 fi
 
 BUILD_CMD=(cmake --build "$BUILD_DIR" -j"$JOBS")
