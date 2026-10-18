@@ -1781,6 +1781,50 @@ index 0000000..a93c150
 +void MarkGuestWrite(uint32_t guest_address, uint32_t size);
 +
 +}  // namespace rex::memory::web
+diff --git a/include/rex/perf/frame_timing.h b/include/rex/perf/frame_timing.h
+new file mode 100644
+index 0000000..8a276d0
+--- /dev/null
++++ b/include/rex/perf/frame_timing.h
+@@ -0,0 +1,38 @@
++/**
++ * @file        perf/frame_timing.h
++ * @brief       Measured frame rate and frame times
++ *
++ * Every frame the game finishes is timestamped when its swap reaches the GPU
++ * command processor, so the numbers are what was really rendered: an FPS limit,
++ * frame pacing or VSync only show up in them through their effect on frames.
++ *
++ * @license     BSD 3-Clause License
++ *              See LICENSE file in the project root for full license text.
++ */
++#pragma once
++
++#include <cstddef>
++#include <cstdint>
++
++namespace rex::perf {
++
++struct FrameTiming {
++  double fps = 0;              // frames finished in the last second
++  double avg_frame_ms = 0;     // mean frame time over the last second
++  double worst_frame_ms = 0;   // longest frame in the last second (a frame still
++                               // in progress counts once it is the longest)
++  double low_1pct_fps = 0;     // 1% low: 1000 / 99th-percentile frame time, last 10 s
++  uint64_t total_frames = 0;
++};
++
++// Called by the GPU command processor at every guest swap (any thread).
++void RecordGuestFrame();
++
++// Current statistics (any thread).
++FrameTiming GetFrameTiming();
++
++// The most recent frame times in milliseconds, oldest first; returns how many
++// were written (at most max_count).
++size_t GetRecentFrameTimes(float* out, size_t max_count);
++
++}  // namespace rex::perf
 diff --git a/include/rex/platform.h b/include/rex/platform.h
 index e90418d..a9c828b 100644
 --- a/include/rex/platform.h
@@ -3250,6 +3294,18 @@ index b2d70f5..d7493df 100644
    return true;
  }
  
+diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
+index 1ddafd0..c2c7884 100644
+--- a/src/core/CMakeLists.txt
++++ b/src/core/CMakeLists.txt
+@@ -11,6 +11,7 @@ add_library(rexcore OBJECT
+     exception_handler.cpp
+     filesystem.cpp
+     filesystem_wildcard.cpp
++    frame_timing.cpp
+     hash.cpp
+     logging.cpp
+     memory.cpp
 diff --git a/src/core/atomic_posix.cpp b/src/core/atomic_posix.cpp
 index 378aa4b..6dd683c 100644
 --- a/src/core/atomic_posix.cpp
@@ -3498,6 +3554,147 @@ index 0000000..9af197b
 +}
 +
 +#endif  // REX_PLATFORM_EMSCRIPTEN
+diff --git a/src/core/frame_timing.cpp b/src/core/frame_timing.cpp
+new file mode 100644
+index 0000000..b9b4ac5
+--- /dev/null
++++ b/src/core/frame_timing.cpp
+@@ -0,0 +1,135 @@
++/**
++ * @file        core/frame_timing.cpp
++ * @brief       Measured frame rate and frame times (rex/perf/frame_timing.h)
++ *
++ * @license     BSD 3-Clause License
++ *              See LICENSE file in the project root for full license text.
++ */
++
++#include <rex/perf/frame_timing.h>
++
++#include <algorithm>
++#include <array>
++#include <chrono>
++#include <mutex>
++#include <vector>
++
++#include <rex/cvar.h>
++#include <rex/logging.h>
++
++REXCVAR_DEFINE_BOOL(log_frame_timing, false, "GPU",
++                    "Log the measured frame rate and frame times once per second");
++
++namespace rex::perf {
++
++namespace {
++
++using Clock = std::chrono::steady_clock;
++constexpr int64_t kSecond = 1'000'000'000;
++// Frame timestamps (ns): 10 s of history even at 800 FPS.
++constexpr size_t kHistory = 8192;
++// Statistics are recomputed at most this often, so a display stays readable.
++constexpr int64_t kRefresh = 100'000'000;
++
++std::mutex g_mutex;
++std::array<int64_t, kHistory> g_frames;
++uint64_t g_count = 0;  // frames recorded; the newest is g_frames[(g_count - 1) % kHistory]
++int64_t g_last_log = 0;
++int64_t g_computed_at = 0;
++FrameTiming g_cached;
++
++int64_t Now() {
++  return std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch())
++      .count();
++}
++
++int64_t FrameAt(uint64_t index) {
++  return g_frames[index % kHistory];
++}
++
++// g_mutex held.
++FrameTiming Compute(int64_t now) {
++  FrameTiming t;
++  t.total_frames = g_count;
++  if (g_count == 0) {
++    return t;
++  }
++  const uint64_t available = std::min<uint64_t>(g_count, kHistory);
++  const uint64_t newest = g_count - 1;
++  const uint64_t oldest = g_count - available;
++  // Frames finished in the last second; frame times ending in it.
++  uint32_t in_second = 0;
++  double sum_ms = 0;
++  uint32_t intervals = 0;
++  double worst_ms = double(now - FrameAt(newest)) / 1e6;  // the frame in progress
++  std::vector<double> last_10s;
++  last_10s.reserve(available);
++  for (uint64_t i = newest + 1; i-- > oldest;) {
++    const int64_t at = FrameAt(i);
++    if (now - at > 10 * kSecond) {
++      break;
++    }
++    const bool recent = now - at <= kSecond;
++    in_second += recent;
++    if (i > oldest) {
++      const double ms = double(at - FrameAt(i - 1)) / 1e6;
++      last_10s.push_back(ms);
++      if (recent) {
++        sum_ms += ms;
++        ++intervals;
++        worst_ms = std::max(worst_ms, ms);
++      }
++    }
++  }
++  // Right after the first frame, the rate is over the time since then.
++  const int64_t span = std::min<int64_t>(kSecond, now - FrameAt(oldest));
++  t.fps = span > 0 ? in_second * double(kSecond) / double(span) : 0;
++  t.avg_frame_ms = intervals ? sum_ms / intervals : 0;
++  t.worst_frame_ms = worst_ms;
++  if (!last_10s.empty()) {
++    auto p99 = last_10s.begin() + ptrdiff_t(double(last_10s.size() - 1) * 0.99);
++    std::nth_element(last_10s.begin(), p99, last_10s.end());
++    t.low_1pct_fps = *p99 > 0 ? 1000.0 / *p99 : 0;
++  }
++  return t;
++}
++
++}  // namespace
++
++void RecordGuestFrame() {
++  const int64_t now = Now();
++  std::lock_guard lock(g_mutex);
++  g_frames[g_count % kHistory] = now;
++  ++g_count;
++  if (REXCVAR_GET(log_frame_timing) && now - g_last_log >= kSecond) {
++    if (g_last_log) {
++      const FrameTiming t = Compute(now);
++      REXLOG_INFO("frame timing: {:.1f} FPS, avg {:.2f} ms, worst {:.2f} ms, 1% low {:.1f} FPS",
++                  t.fps, t.avg_frame_ms, t.worst_frame_ms, t.low_1pct_fps);
++    }
++    g_last_log = now;
++  }
++}
++
++FrameTiming GetFrameTiming() {
++  const int64_t now = Now();
++  std::lock_guard lock(g_mutex);
++  if (now - g_computed_at >= kRefresh) {
++    g_cached = Compute(now);
++    g_computed_at = now;
++  }
++  return g_cached;
++}
++
++size_t GetRecentFrameTimes(float* out, size_t max_count) {
++  std::lock_guard lock(g_mutex);
++  const uint64_t available = std::min<uint64_t>(g_count, kHistory);
++  const size_t n = size_t(std::min<uint64_t>(available ? available - 1 : 0, max_count));
++  for (size_t k = 0; k < n; ++k) {
++    const uint64_t i = g_count - n + k;  // interval ending at frame i
++    out[k] = float(double(FrameAt(i) - FrameAt(i - 1)) / 1e6);
++  }
++  return n;
++}
++
++}  // namespace rex::perf
 diff --git a/src/core/logging.cpp b/src/core/logging.cpp
 index 1645848..1ba3187 100644
 --- a/src/core/logging.cpp
@@ -4520,7 +4717,7 @@ index 5cfea05..b679125 100644
    // This is a _sorted_ (ascending due_) list of active timers managed by a
    // dedicated thread
 diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
-index a744375..4ed044b 100644
+index a744375..f998c2e 100644
 --- a/src/graphics/command_processor.cpp
 +++ b/src/graphics/command_processor.cpp
 @@ -9,6 +9,7 @@
@@ -4531,15 +4728,18 @@ index a744375..4ed044b 100644
  #include <algorithm>
  #include <cinttypes>
  #include <cmath>
-@@ -22,6 +23,7 @@
+@@ -20,8 +21,10 @@
+ #include <rex/cvar.h>
+ #include <rex/dbg.h>
  #include <rex/perf/counter.h>
++#include <rex/perf/frame_timing.h>
  #include <rex/chrono/clock.h>
  #include <rex/graphics/command_processor.h>
 +#include <rex/graphics/trials_fast_path.h>
  #include <rex/graphics/flags.h>
  #include <rex/graphics/graphics_system.h>
  #include <rex/graphics/pipeline/texture/info.h>
-@@ -54,6 +56,12 @@ REXCVAR_DEFINE_STRING(readback_resolve, "none", "GPU",
+@@ -54,6 +57,12 @@ REXCVAR_DEFINE_STRING(readback_resolve, "none", "GPU",
      .allowed({"none", "fast", "some", "full"})
      .lifecycle(rex::cvar::Lifecycle::kHotReload);
  
@@ -4552,7 +4752,7 @@ index a744375..4ed044b 100644
  REXCVAR_DEFINE_BOOL(readback_resolve_half_pixel_offset, false, "GPU",
                      "When draw resolution scaling is active, sample from the center of each "
                      "scaled block during resolve readback downscale")
-@@ -158,10 +166,29 @@ void CommandProcessor::InitializeShaderStorage(const std::filesystem::path& cach
+@@ -158,10 +167,29 @@ void CommandProcessor::InitializeShaderStorage(const std::filesystem::path& cach
                                                 uint32_t title_id, bool blocking) {}
  
  void CommandProcessor::CallInThread(std::function<void()> fn) {
@@ -4583,7 +4783,7 @@ index a744375..4ed044b 100644
    }
  }
  
-@@ -204,11 +231,7 @@ void CommandProcessor::WorkerThreadMain() {
+@@ -204,11 +232,7 @@ void CommandProcessor::WorkerThreadMain() {
    }
  
    while (worker_running_) {
@@ -4596,7 +4796,7 @@ index a744375..4ed044b 100644
  
      uint32_t write_ptr_index = write_ptr_index_.load();
      if (write_ptr_index == 0xBAADF00D || read_ptr_index_ == write_ptr_index) {
-@@ -219,8 +242,11 @@ void CommandProcessor::WorkerThreadMain() {
+@@ -219,8 +243,11 @@ void CommandProcessor::WorkerThreadMain() {
        PrepareForWait();
        uint32_t loop_count = 0;
        do {
@@ -4610,7 +4810,7 @@ index a744375..4ed044b 100644
            const int wait_time_ms = 5;
            rex::thread::Wait(write_ptr_index_event_.get(), true,
                              std::chrono::milliseconds(wait_time_ms));
-@@ -229,10 +255,10 @@ void CommandProcessor::WorkerThreadMain() {
+@@ -229,10 +256,10 @@ void CommandProcessor::WorkerThreadMain() {
          rex::thread::MaybeYield();
          loop_count++;
          write_ptr_index = write_ptr_index_.load();
@@ -4623,7 +4823,7 @@ index a744375..4ed044b 100644
          continue;
        }
      }
-@@ -355,7 +381,7 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
+@@ -355,7 +382,7 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
  
    // Volatile for the WAIT_REG_MEM loop.
    const_cast<volatile uint32_t&>(regs.values[index]) = value;
@@ -4632,7 +4832,7 @@ index a744375..4ed044b 100644
      REXGPU_DEBUG("GPU: Write to unknown register ({:04X} = {:08X})", index, value);
    }
  
-@@ -493,6 +519,16 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
+@@ -493,6 +520,16 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
  
  void CommandProcessor::WriteRegistersFromMem(uint32_t start_index, uint32_t* base,
                                               uint32_t num_registers) {
@@ -4649,7 +4849,7 @@ index a744375..4ed044b 100644
    for (uint32_t i = 0; i < num_registers; ++i) {
      uint32_t data = memory::load_and_swap<uint32_t>(base + i);
      WriteRegister(start_index + i, data);
-@@ -702,6 +738,11 @@ bool CommandProcessor::ExecutePacketType0(memory::RingBuffer* reader, uint32_t p
+@@ -702,6 +739,11 @@ bool CommandProcessor::ExecutePacketType0(memory::RingBuffer* reader, uint32_t p
  
    uint32_t base_index = (packet & 0x7FFF);
    uint32_t write_one_reg = (packet >> 15) & 0x1;
@@ -4661,7 +4861,16 @@ index a744375..4ed044b 100644
    for (uint32_t m = 0; m < count; m++) {
      uint32_t reg_data = reader->ReadAndSwap<uint32_t>();
      uint32_t target_index = write_one_reg ? base_index : base_index + m;
-@@ -989,7 +1030,23 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
+@@ -944,6 +986,8 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
+   }
+ #endif
+   rex::perf::Profiler::Flip();
++  // Measured frame rate (performance overlay, --log_frame_timing).
++  rex::perf::RecordGuestFrame();
+ 
+   // Xenia-specific VdSwap hook.
+   // VdSwap will post this to tell us we need to swap the screen/fire an
+@@ -989,7 +1033,23 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
  
    bool is_memory = (wait_info & 0x10) != 0;
  
@@ -4685,7 +4894,7 @@ index a744375..4ed044b 100644
    do {
      uint32_t value = 0;
      if (is_memory) {
-@@ -1029,13 +1086,21 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
+@@ -1029,13 +1089,21 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
          matched = true;
          break;
      }
@@ -4708,7 +4917,7 @@ index a744375..4ed044b 100644
          } else {
            rex::thread::Sleep(std::chrono::milliseconds(wait / 0x100));
          }
-@@ -1047,7 +1112,7 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
+@@ -1047,7 +1115,7 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
            return false;
          }
        } else {
@@ -4717,7 +4926,7 @@ index a744375..4ed044b 100644
        }
      }
    } while (!matched);
-@@ -1594,11 +1659,11 @@ bool CommandProcessor::ExecutePacketType3_VIZ_QUERY(memory::RingBuffer* reader,
+@@ -1594,11 +1662,11 @@ bool CommandProcessor::ExecutePacketType3_VIZ_QUERY(memory::RingBuffer* reader,
      // On hardware this clears the internal state of the scan converter (which
      // is different to the register)
      WriteRegister(XE_GPU_REG_VGT_EVENT_INITIATOR, VIZQUERY_START);

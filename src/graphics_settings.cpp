@@ -18,6 +18,7 @@
 #include <rex/logging.h>
 
 #include "keyboard_controls.h"
+#include "performance_overlay.h"
 #if defined(__EMSCRIPTEN__)
 #include <cmath>
 #include <rex/input/web/web_input_driver.h>
@@ -114,13 +115,15 @@ std::vector<std::pair<int, int>> AvailableResolutions(SDL_Window* window) {
 }
 
 // Gamepad buttons forwarded to ImGui navigation, in gamepad_was_down_ order.
-constexpr std::array<std::pair<SDL_GamepadButton, ImGuiKey>, 6> kNavButtons = {{
+constexpr std::array<std::pair<SDL_GamepadButton, ImGuiKey>, 8> kNavButtons = {{
     {SDL_GAMEPAD_BUTTON_DPAD_UP, ImGuiKey_GamepadDpadUp},
     {SDL_GAMEPAD_BUTTON_DPAD_DOWN, ImGuiKey_GamepadDpadDown},
     {SDL_GAMEPAD_BUTTON_DPAD_LEFT, ImGuiKey_GamepadDpadLeft},
     {SDL_GAMEPAD_BUTTON_DPAD_RIGHT, ImGuiKey_GamepadDpadRight},
     {SDL_GAMEPAD_BUTTON_SOUTH, ImGuiKey_GamepadFaceDown},
     {SDL_GAMEPAD_BUTTON_EAST, ImGuiKey_GamepadFaceRight},
+    {SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, ImGuiKey_GamepadL1},  // previous tab
+    {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, ImGuiKey_GamepadR1},  // next tab
 }};
 
 // Keys that can be bound, with their SDK names (keybind_* values). Leaves out
@@ -165,13 +168,32 @@ const char* BindableKeyName(ImGuiKey key) {
   return nullptr;
 }
 
+// Settings row label; the control that follows fills the rest of the row.
+void Label(const char* text, float label_width) {
+  ImGui::AlignTextToFramePadding();
+  ImGui::TextUnformatted(text);
+  ImGui::SameLine(label_width);
+  ImGui::SetNextItemWidth(-1);
+}
+
+void RestartNote(bool pending) {
+  if (pending) {
+    ImGui::SameLine();
+    ImGui::TextDisabled("(restart to apply)");
+  }
+}
+
 }  // namespace
 
 void ApplyStartupGraphicsSettings() {
   // Record the renderer chosen at startup (may have come from config or CLI).
   std::string renderer = REXCVAR_GET(gpu_plugin);
   if (renderer.empty()) {
+#if defined(__EMSCRIPTEN__)
     renderer = "webgpu";
+#else
+    renderer = "xenos";  // Vulkan is the native default (TrialsHdApp::OnPreSetup).
+#endif
   }
   g_startup_renderer = renderer;
 
@@ -291,7 +313,7 @@ void GraphicsSettingsDialog::FeedGamepadNavigation(ImGuiIO& io) {
   bool down[kNavButtons.size()] = {};
 #if defined(__EMSCRIPTEN__)
   if (auto source = rex::input::web::GetGamepadSource()) {
-    constexpr uint32_t buttons[] = {12, 13, 14, 15, 0, 1};
+    constexpr uint32_t buttons[] = {12, 13, 14, 15, 0, 1, 4, 5};
     for (uint32_t i = 0; i < 4; ++i) {
       rex::input::web::WebGamepad pad;
       if (!source(i, pad)) return;  // Keep held navigation keys during a seqlock write.
@@ -346,53 +368,16 @@ void GraphicsSettingsDialog::FeedGamepadNavigation(ImGuiIO& io) {
   }
 }
 
-void GraphicsSettingsDialog::OnDraw(ImGuiIO& io) {
-  FeedGamepadNavigation(io);
-
-  const ImVec2 center(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f);
-  ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-  // Sized for reading from a couch: scale with the output height.
-  const float ui_scale = std::max(1.0f, io.DisplaySize.y / 720.0f) * 1.6f;
-  ImGui::SetNextWindowSize(ImVec2(520 * ui_scale, 0), ImGuiCond_Always);
-  // Taller than small screens with the key list: scroll instead.
-  ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0),
-                                      ImVec2(FLT_MAX, io.DisplaySize.y * 0.92f));
-  // Larger text for the whole dialog, combo popups included (1.92 font stack).
-  ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * ui_scale);
-  bool open = true;
-  if (!ImGui::Begin("Settings", &open,
-                    ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
-                        ImGuiWindowFlags_NoSavedSettings)) {
-    ImGui::End();
-    ImGui::PopFont();
-    return;
-  }
-  if (ImGui::IsWindowAppearing()) {
-    ImGui::SetKeyboardFocusHere();
-  }
-  const float kLabelWidth = 170.0f * ui_scale;
-  auto label = [&](const char* text) {
-    ImGui::AlignTextToFramePadding();
-    ImGui::TextUnformatted(text);
-    ImGui::SameLine(kLabelWidth);
-    ImGui::SetNextItemWidth(-1);
-  };
-  auto restart_note = [](bool pending) {
-    if (pending) {
-      ImGui::SameLine();
-      ImGui::TextDisabled("(restart to apply)");
-    }
-  };
-
-  // Controls: keyboard emulation of the controller (a real controller keeps
-  // working too) and its keys.
-  ImGui::SeparatorText("Controls");
+// Controls: keyboard emulation of the controller (a real controller keeps
+// working too) and its keys.
+void GraphicsSettingsDialog::DrawControlsTab(float label_width, bool& key_bound) {
+  const float kLabelWidth = label_width;
+  auto label = [&](const char* text) { Label(text, label_width); };
   bool keyboard = GetBool("mnk_mode");
   label("Keyboard");
   if (ImGui::Checkbox("##keyboard", &keyboard)) {
     rex::cvar::SetFlagByName("mnk_mode", keyboard ? "true" : "false");
   }
-  bool key_bound = false;
   if (capture_binding_ >= 0 && ImGui::GetFrameCount() > capture_frame_) {
     // A fresh press (not the one that clicked the slot): bind it. Delete
     // clears the slot.
@@ -447,8 +432,11 @@ void GraphicsSettingsDialog::OnDraw(ImGuiIO& io) {
     ImGui::SameLine();
     ImGui::TextDisabled("Select a key, then press the new one (Delete clears)");
   }
+}
 
-  ImGui::SeparatorText("Graphics");
+void GraphicsSettingsDialog::DrawGraphicsTab(float label_width) {
+  auto label = [&](const char* text) { Label(text, label_width); };
+  auto restart_note = RestartNote;
 
 #if defined(__EMSCRIPTEN__)
   label("Renderer");
@@ -458,7 +446,7 @@ void GraphicsSettingsDialog::OnDraw(ImGuiIO& io) {
   // Renderer (Vulkan / WebGPU)
   std::string cur_renderer = REXCVAR_GET(gpu_plugin);
   if (cur_renderer.empty()) {
-    cur_renderer = "webgpu";
+    cur_renderer = "xenos";
   }
   label("Renderer");
   if (ImGui::BeginCombo("##renderer", cur_renderer == "webgpu" ? "WebGPU" : "Vulkan")) {
@@ -605,6 +593,71 @@ void GraphicsSettingsDialog::OnDraw(ImGuiIO& io) {
   }
   restart_note(vsync != g_startup_vsync);
 #endif
+
+  bool overlay = GetBool("show_performance_overlay");
+  label("Performance Overlay");
+  if (ImGui::Checkbox("##performance_overlay", &overlay)) {
+    rex::cvar::SetFlagByName("show_performance_overlay", overlay ? "true" : "false");
+    SyncPerformanceOverlay(imgui_drawer());
+  }
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip("Measured FPS, frame times and a frame-time graph (F2)");
+  }
+}
+
+void GraphicsSettingsDialog::OnDraw(ImGuiIO& io) {
+  FeedGamepadNavigation(io);
+
+  const ImVec2 center(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f);
+  ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+  // Sized for reading from a couch: scale with the output height.
+  const float ui_scale = std::max(1.0f, io.DisplaySize.y / 720.0f) * 1.6f;
+  ImGui::SetNextWindowSize(ImVec2(520 * ui_scale, 0), ImGuiCond_Always);
+  // Taller than small screens with the key list: scroll instead.
+  ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0),
+                                      ImVec2(FLT_MAX, io.DisplaySize.y * 0.92f));
+  // Larger text for the whole dialog, combo popups included (1.92 font stack).
+  ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * ui_scale);
+  bool open = true;
+  if (!ImGui::Begin("Settings", &open,
+                    ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
+                        ImGuiWindowFlags_NoSavedSettings)) {
+    ImGui::End();
+    ImGui::PopFont();
+    return;
+  }
+  if (ImGui::IsWindowAppearing()) {
+    ImGui::SetKeyboardFocusHere();
+  }
+  const float label_width = 170.0f * ui_scale;
+  bool key_bound = false;
+  // Tabs: click them, or LB / RB on a controller.
+  if (ImGui::IsKeyPressed(ImGuiKey_GamepadL1, false)) {
+    requested_tab_ = (tab_ + kTabCount - 1) % kTabCount;
+  } else if (ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false)) {
+    requested_tab_ = (tab_ + 1) % kTabCount;
+  }
+  auto tab = [&](int index, const char* name) {
+    const bool shown = ImGui::BeginTabItem(
+        name, nullptr, requested_tab_ == index ? ImGuiTabItemFlags_SetSelected : 0);
+    if (shown) {
+      tab_ = index;
+    }
+    return shown;
+  };
+  if (ImGui::BeginTabBar("##settings_tabs")) {
+    if (tab(0, "Controls")) {
+      DrawControlsTab(label_width, key_bound);
+      ImGui::EndTabItem();
+    }
+    if (tab(1, "Graphics")) {
+      capture_binding_ = -1;  // Key capture belongs to the Controls tab.
+      DrawGraphicsTab(label_width);
+      ImGui::EndTabItem();
+    }
+    ImGui::EndTabBar();
+  }
+  requested_tab_ = -1;
 
   ImGui::Separator();
   if (ImGui::Button("Save")) {

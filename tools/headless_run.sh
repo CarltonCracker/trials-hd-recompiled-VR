@@ -28,11 +28,15 @@ input_pid=""
 trap 'kill "$input_pid" "$game_pid" "$xvfb_pid" 2>/dev/null || true' EXIT
 sleep 1
 
-# Vulkan flags without a renderer choice mean the Vulkan renderer (WebGPU is
-# the default).
+# Renderer flags without a renderer choice pick that renderer (Vulkan is the
+# default; WebGPU flags mean the WebGPU renderer).
 args=("$@")
-if [[ " ${args[*]} " == *" --vulkan_"* && " ${args[*]} " != *" --gpu_plugin="* ]]; then
-  args+=(--gpu_plugin=xenos)
+if [[ " ${args[*]} " != *" --gpu_plugin="* ]]; then
+  if [[ " ${args[*]} " == *" --webgpu_"* ]]; then
+    args+=(--gpu_plugin=webgpu)
+  elif [[ " ${args[*]} " == *" --vulkan_"* ]]; then
+    args+=(--gpu_plugin=xenos)
+  fi
 fi
 set -- "${args[@]}"
 

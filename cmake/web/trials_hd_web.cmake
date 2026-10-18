@@ -148,6 +148,7 @@ set(TRIALSHD_WEB_SDK_CORE
     core/exception_handler.cpp
     core/filesystem.cpp
     core/filesystem_wildcard.cpp
+    core/frame_timing.cpp
     core/hash.cpp
     core/logging.cpp
     core/memory.cpp
@@ -433,6 +434,7 @@ add_executable(trials_hd
     src/main.cpp
     src/fallback_audio.cpp
     src/graphics_settings.cpp
+    src/performance_overlay.cpp
     src/keyboard_controls.cpp
     src/fps_unlock.cpp
     src/gpu_wait.cpp

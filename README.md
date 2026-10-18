@@ -176,7 +176,8 @@ Press **F1** (or controller **Guide** / **Back + Start**) to open the settings m
 
 - **Controls:** Customize keyboard key assignments or restore defaults.
 - **Graphics:**
-  - **Renderer:** WebGPU (default) or Vulkan (`--gpu_plugin=webgpu` / `--gpu_plugin=xenos`).
+  - **Renderer:** Vulkan (default) or WebGPU (`--gpu_plugin=xenos` / `--gpu_plugin=webgpu`).
+    WebGPU is the web port's renderer; natively it is kept for developing it.
   - **Display Mode:** Windowed, fullscreen, or desktop borderless.
   - **Render Resolution:** Internal resolution (1280x720, 2560x1440, 3840x2160).
   - **Unlock FPS & FPS Limit:** Decouples rendering frame rate from the fixed 60 Hz physics simulation.

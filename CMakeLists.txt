@@ -81,6 +81,7 @@ set(TRIALSHD_SOURCES
     src/main.cpp
     src/fallback_audio.cpp
     src/graphics_settings.cpp
+    src/performance_overlay.cpp
     src/keyboard_controls.cpp
     src/fps_unlock.cpp
     src/gpu_wait.cpp

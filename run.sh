@@ -83,8 +83,8 @@ Options:
   -h, --help            Show this help message
 
 Common game arguments:
-  --gpu_plugin=webgpu   Use WebGPU renderer (default)
-  --gpu_plugin=xenos    Use Vulkan renderer
+  --gpu_plugin=xenos    Use Vulkan renderer (default)
+  --gpu_plugin=webgpu   Use the WebGPU renderer (the web port's; for development)
   --present_fps_limit=N Target FPS cap (e.g. 60, 120, 144, 0 for uncapped)
   --host_vsync=bool     Enable or disable VSync (true/false)
   --log_level=level     Logging level (trace, debug, info, warn, err)

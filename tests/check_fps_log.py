@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Check runtime rates (not gameplay): check_fps_log.py LOG [render_limit]."""
+"""Check runtime rates (not gameplay): check_fps_log.py LOG [render_limit].
+
+With --log_frame_timing=true in the run, also summarizes the measured frame rate
+over the whole log (the performance overlay's numbers)."""
 import re
 import statistics
 import sys
@@ -33,3 +36,14 @@ if len(sys.argv) > 2:
 else:
     assert render > 65, f"rendering still capped at {render} FPS"
 print(f"fixed {fixed:.2f} Hz; real rendering {render:.1f} FPS; guest swaps {guest:.1f} FPS")
+# Measured frame timing over the whole run (--log_frame_timing=true), not only its
+# end: what the performance overlay shows, once per second.
+timing = [(float(f), float(w)) for f, w in re.findall(
+    r"frame timing: ([\d.]+) FPS, avg [\d.]+ ms, worst ([\d.]+) ms", text)]
+if timing:
+    fps = sorted(f for f, _ in timing)
+    p5 = fps[int(len(fps) * 0.05)]
+    slow = sum(f < 55 for f in fps)
+    print(f"measured over {len(fps)} s: min {fps[0]:.1f} FPS, 5th percentile {p5:.1f}, "
+          f"median {statistics.median(fps):.1f}; {slow} s below 55 FPS; "
+          f"worst frame {max(w for _, w in timing):.1f} ms")

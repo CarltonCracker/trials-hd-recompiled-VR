@@ -46,6 +46,13 @@ class GraphicsSettingsDialog : public rex::ui::ImGuiDialog {
 
  private:
   void FeedGamepadNavigation(ImGuiIO& io);
+  // Tab contents; key_bound reports a key binding made this frame.
+  void DrawControlsTab(float label_width, bool& key_bound);
+  void DrawGraphicsTab(float label_width);
+
+  static constexpr int kTabCount = 2;
+  int tab_ = 0;            // shown tab: 0 Controls, 1 Graphics
+  int requested_tab_ = -1;  // tab to select on the next frame (LB / RB)
 
   std::filesystem::path config_path_;
   std::function<void()> on_closed_;

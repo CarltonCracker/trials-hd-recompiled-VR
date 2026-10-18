@@ -38,6 +38,7 @@
 #include "generated/default/trials_hd_init.h"
 #include "fallback_audio.h"
 #include "graphics_settings.h"
+#include "performance_overlay.h"
 #include "keyboard_controls.h"
 #include "package_license.h"
 #include "virtual_pad.h"
@@ -213,8 +214,10 @@ class TrialsHdApp : public rex::ReXApp {
     sigaction(SIGTERM, &sa, nullptr);
     sigaction(SIGINT, &sa, nullptr);
 #endif
+    // Native default: Vulkan. WebGPU is the web port's renderer; natively it
+    // stays available with --gpu_plugin=webgpu (development of the web renderer).
     if (config.gpu_plugin.empty()) {
-      config.gpu_plugin = "webgpu";
+      config.gpu_plugin = "xenos";
     }
 
     REXLOG_INFO("OnPreSetup: gpu_plugin={}", config.gpu_plugin);
@@ -323,6 +326,7 @@ class TrialsHdApp : public rex::ReXApp {
 
   // Settings (controls and graphics): F1, the controller's Guide button, or
   // Back + Start. Achievements: F7 or the main menu Achievements button.
+  // Performance overlay: F2 (or the Graphics settings tab).
   void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {
     trials_hd::ApplyDisplayMode();
     rex::ui::RegisterBind("bind_graphics_settings", "F1", "Toggle settings",
@@ -330,6 +334,9 @@ class TrialsHdApp : public rex::ReXApp {
     rex::ui::UnregisterBind("bind_achievements");
     rex::ui::RegisterBind("bind_achievements", "F7", "Toggle achievements",
                           [this] { ToggleAchievements(); });
+    rex::ui::RegisterBind("bind_performance_overlay", "F2", "Toggle performance overlay",
+                          [this] { trials_hd::TogglePerformanceOverlay(imgui_drawer()); });
+    trials_hd::SyncPerformanceOverlay(drawer);
     combo_watcher_ = std::jthread([this](std::stop_token stop) { WatchSettingsCombo(stop); });
     (void)drawer;
   }
