@@ -32,6 +32,19 @@ function(_trialshd_sdk_changes out)
     set(${out} "${_changes}" PARENT_SCOPE)
 endfunction()
 
+# Drops index entries for files missing from the SDK tree. tools/export_sdk_patch.sh
+# marks the files a patch adds with `git add -N`; once a reversed patch deletes
+# them those entries would otherwise read as local changes.
+function(_trialshd_sdk_forget_deleted)
+    execute_process(COMMAND ${GIT_EXECUTABLE} ls-files --deleted
+                    WORKING_DIRECTORY ${_sdk_dir}
+                    OUTPUT_VARIABLE _deleted OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    if(NOT _deleted STREQUAL "")
+        string(REPLACE "\n" ";" _deleted "${_deleted}")
+        _trialshd_sdk_git(_r reset -q -- ${_deleted})
+    endif()
+endfunction()
+
 file(GLOB _patches "${TRIALSHD_ROOT}/patches/rexglue-sdk/*.patch")
 list(SORT _patches)
 foreach(_patch IN LISTS _patches)
@@ -65,6 +78,7 @@ foreach(_patch IN LISTS _patches)
             _trialshd_sdk_git(_r apply --reverse --check ${_old})
             if(_r EQUAL 0)
                 _trialshd_sdk_git(_r apply --reverse ${_old})
+                _trialshd_sdk_forget_deleted()
                 _trialshd_sdk_changes(_sdk_changes)
                 if(_r EQUAL 0 AND _sdk_changes STREQUAL "")
                     set(_previous ${_old})
