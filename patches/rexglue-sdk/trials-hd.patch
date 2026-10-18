@@ -80493,10 +80493,18 @@ index 0000000..fbe30d0
 +
 +#endif  // XENIA_UI_SHADERS_XESL_XESLI_
 diff --git a/src/graphics/shared_memory.cpp b/src/graphics/shared_memory.cpp
-index ec0df7c..7fe1f6b 100644
+index ec0df7c..5f34e3f 100644
 --- a/src/graphics/shared_memory.cpp
 +++ b/src/graphics/shared_memory.cpp
-@@ -270,6 +270,8 @@ void SharedMemory::RangeWrittenByGpu(uint32_t start, uint32_t length) {
+@@ -17,6 +17,7 @@
+ #include <rex/bit.h>
+ #include <rex/dbg.h>
+ #include <rex/graphics/shared_memory.h>
++#include <rex/graphics/trials_fast_path.h>
+ #include <rex/math.h>
+ #include <rex/memory.h>
+ 
+@@ -270,6 +271,8 @@ void SharedMemory::RangeWrittenByGpu(uint32_t start, uint32_t length) {
    // Mark the range as valid (so pages are not reuploaded until modified by the
    // CPU) and watch it so the CPU can reuse it and this will be caught.
    MakeRangeValid(start, length, true);
@@ -80505,7 +80513,37 @@ index ec0df7c..7fe1f6b 100644
  }
  
  bool SharedMemory::AllocateSparseHostGpuMemoryRange(uint32_t offset_allocations,
-@@ -343,8 +345,8 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
+@@ -291,6 +294,12 @@ void SharedMemory::MakeRangeValid(uint32_t start, uint32_t length, bool written_
+   uint32_t valid_block_first = valid_page_first >> 6;
+   uint32_t valid_block_last = valid_page_last >> 6;
+ 
++  // A valid page is always watched: a page is made valid only here, and the
++  // physical heaps drop a watch only together with the invalidation of the page
++  // in MemoryInvalidationCallback. Resolves mark megabytes of already valid
++  // pages every frame, so skip enabling the watches (a page loop in each
++  // physical heap view) if nothing becomes newly valid.
++  bool all_valid_already = trials::Enabled();
+   {
+     auto global_lock = global_critical_region_.Acquire();
+ 
+@@ -302,13 +311,15 @@ void SharedMemory::MakeRangeValid(uint32_t start, uint32_t length, bool written_
+       if (i == valid_block_last && (valid_page_last & 63) != 63) {
+         valid_bits &= (uint64_t(1) << ((valid_page_last & 63) + 1)) - 1;
+       }
++      all_valid_already =
++          all_valid_already && (system_page_flags_valid_[i] & valid_bits) == valid_bits;
+       system_page_flags_valid_[i] |= valid_bits;
+       uint64_t& gpu_written = system_page_flags_valid_and_gpu_written_[i];
+       gpu_written = written_by_gpu ? (gpu_written | valid_bits) : (gpu_written & ~valid_bits);
+     }
+   }
+ 
+-  if (memory_invalidation_callback_handle_) {
++  if (memory_invalidation_callback_handle_ && !all_valid_already) {
+     memory().EnablePhysicalMemoryAccessCallbacks(
+         valid_page_first << page_size_log2_,
+         (valid_page_last - valid_page_first + 1) << page_size_log2_, true, false);
+@@ -343,8 +354,8 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
    }
  
    // Some texture or buffer is empty, for example - safe to draw in this case.
@@ -80516,7 +80554,7 @@ index ec0df7c..7fe1f6b 100644
    for (size_t i = 0; i < count; ++i) {
      uint32_t start = ranges[i].first;
      uint32_t length = ranges[i].second;
-@@ -362,26 +364,28 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
+@@ -362,26 +373,28 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
  
    SCOPE_profile_cpu_f("gpu");
  
@@ -80562,7 +80600,7 @@ index ec0df7c..7fe1f6b 100644
  
    for (const std::pair<uint32_t, uint32_t>& range : merged_ranges) {
      if (!EnsureHostGpuMemoryAllocated(range.first, range.second)) {
-@@ -461,11 +465,11 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
+@@ -461,11 +474,11 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
    COUNT_profile_set("gpu/shared_memory/request_ranges_upload_count",
                      uint32_t(upload_ranges_.size()));
  
@@ -84756,7 +84794,7 @@ index bd6c797..d44104d 100644
    }
  
 diff --git a/src/system/xmemory.cpp b/src/system/xmemory.cpp
-index 76cc877..fa4a1fd 100644
+index 76cc877..04192ac 100644
 --- a/src/system/xmemory.cpp
 +++ b/src/system/xmemory.cpp
 @@ -10,6 +10,7 @@
@@ -84996,7 +85034,32 @@ index 76cc877..fa4a1fd 100644
  rex::memory::PageAccess BaseHeap::QueryRangeAccess(uint32_t low_address, uint32_t high_address) {
    if (low_address > high_address || low_address < heap_base_ ||
        (high_address - heap_base_) >= heap_size_) {
-@@ -2357,4 +2505,28 @@ uint32_t PhysicalHeap::GetPhysicalAddress(uint32_t address) const {
+@@ -2124,6 +2272,24 @@ void PhysicalHeap::EnableAccessCallbacks(uint32_t physical_address, uint32_t len
+     // Enabling data providers doesn't need to be deferred - providers will be
+     // polled for the last time without releasing the lock.
+     SystemPageFlagsBlock& page_flags_block = system_page_flags_[i >> 6];
++    if (enable_invalidation_notifications && (i == system_page_first || !(i & 63))) {
++      // Pages already notifying are left as they are - skip the rest of the
++      // 64-page block at once if that's all of it (resolves mark megabytes of
++      // already watched pages every frame).
++      uint32_t block_page_last = std::min(system_page_last, i | 63);
++      uint64_t block_mask =
++          (UINT64_MAX >> (63 - (block_page_last & 63))) & (UINT64_MAX << (i & 63));
++      if ((page_flags_block.notify_on_invalidation & block_mask) == block_mask) {
++        if (protect_system_page_first != UINT32_MAX) {
++          rex::memory::Protect(protect_base + protect_system_page_first * system_page_size_,
++                               (i - protect_system_page_first) * system_page_size_,
++                               protect_access);
++          protect_system_page_first = UINT32_MAX;
++        }
++        i = block_page_last;
++        continue;
++      }
++    }
+     uint64_t page_flags_bit = uint64_t(1) << (i & 63);
+     uint32_t guest_page_number =
+         rex::sat_sub(i * system_page_size_, host_address_offset()) >> page_size_shift_;
+@@ -2357,4 +2523,28 @@ uint32_t PhysicalHeap::GetPhysicalAddress(uint32_t address) const {
    return address;
  }
  
