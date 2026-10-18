@@ -40,6 +40,31 @@ CHROMIUM_FLAGS = [
 RADV_ICD = "/usr/share/vulkan/icd.d/radeon_icd.json"
 
 
+def amd_render_node():
+    for node in Path("/dev/dri").glob("renderD*"):
+        vendor = Path("/sys/class/drm") / node.name / "device" / "vendor"
+        if vendor.exists() and vendor.read_text().strip() == "0x1002":
+            return True
+    return False
+
+
+def start_xvfb():
+    """A private X display for a headful browser; returns (process, DISPLAY)."""
+    if not shutil.which("Xvfb"):
+        sys.exit("headful runs need Xvfb (apt install xvfb), or pass --headless")
+    read_fd, write_fd = os.pipe()
+    xvfb = subprocess.Popen(["Xvfb", "-displayfd", str(write_fd), "-screen", "0", "1920x1080x24",
+                             "-nolisten", "tcp"], pass_fds=(write_fd,),
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    os.close(write_fd)
+    with os.fdopen(read_fd) as f:
+        display = f.readline().strip()
+    if not display:
+        xvfb.kill()
+        sys.exit("Xvfb did not start")
+    return xvfb, f":{display}"
+
+
 def free_port():
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -333,10 +358,25 @@ async def run(args):
     keep = getattr(args, "profile", None)
     profile = str(keep) if keep else tempfile.mkdtemp(prefix="trials-hd-chromium-")
     env = dict(os.environ)
-    if Path(RADV_ICD).exists():
+    # RADV only when this machine has a usable AMD render node (11.1); an explicit
+    # VK_ICD_FILENAMES wins, and other GPUs keep the loader's default.
+    amd = amd_render_node()
+    if "VK_ICD_FILENAMES" not in env and Path(RADV_ICD).exists() and amd:
         env["VK_ICD_FILENAMES"] = RADV_ICD
+    flags = list(CHROMIUM_FLAGS)
+    # NVIDIA (proprietary driver), measured 2026-10-17: headless Chromium gets either
+    # the hardware WebGPU adapter or a composited canvas, never both (page
+    # screenshots stay black). A headful browser on its own Xvfb display has both.
+    headful = args.headful if args.headful is not None else not amd
+    xvfb = None
+    if headful:
+        flags.remove("--headless=new")
+        if not args.viewport:
+            args.viewport = "1280x720"  # the window also has browser UI
+        if "DISPLAY" not in env or args.headful is None:
+            xvfb, env["DISPLAY"] = start_xvfb()
     browser = subprocess.Popen(
-        [chromium, *CHROMIUM_FLAGS, *(getattr(args, "chromium_flag", None) or []),
+        [chromium, *flags, *(getattr(args, "chromium_flag", None) or []),
          f"--remote-debugging-port={port}",
          f"--user-data-dir={profile}", "about:blank"],
         env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
@@ -360,6 +400,8 @@ async def run(args):
             browser.wait(10)
         except subprocess.TimeoutExpired:
             browser.kill()
+        if xvfb:
+            xvfb.terminate()
         if not keep:
             shutil.rmtree(profile, ignore_errors=True)
 
@@ -380,6 +422,12 @@ def main():
     parser.add_argument("--chromium", default="chromium")
     parser.add_argument("--chromium-flag", action="append", default=[],
                         help="extra Chromium command-line flag (repeatable; experiments)")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--headful", dest="headful", action="store_true", default=None,
+                      help="visible browser window (on a private Xvfb display when DISPLAY is unset); "
+                           "default on machines without an AMD GPU")
+    mode.add_argument("--headless", dest="headful", action="store_false",
+                      help="headless browser (default with an AMD GPU)")
     parser.add_argument("--profile", type=Path,
                         help="browser profile directory to use and keep (default: a fresh one)")
     args = parser.parse_args()

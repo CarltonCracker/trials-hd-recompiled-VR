@@ -228,6 +228,10 @@ void ApplyDisplayMode() {
 
 float DisplayRefreshRate() {
   float rate = g_refresh_rate.load();
+#if defined(__EMSCRIPTEN__)
+  // The browser exposes no display modes: unknown, pace by present_fps_limit.
+  return rate;
+#endif
   if (rate <= 0.0f) {
     if (SDL_Window* window = FindGameWindow()) {
       const SDL_DisplayID display = SDL_GetDisplayForWindow(window);

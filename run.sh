@@ -11,15 +11,20 @@
 #   --debug             Launch the Debug build configuration
 #   --relwithdebinfo    Launch the RelWithDebInfo build configuration (default)
 #   --bin PATH          Path to a specific trials_hd executable
+#   --web               Serve the browser build (./build.sh --web) on localhost
+#   --port N            Web: port to serve on (default 8091)
+#   --no-assets         Web: don't serve assets/; the page asks to import the game
 #   -h, --help          Show this help message
 #
-# Any additional arguments will be forwarded directly to trials_hd.
+# Any additional arguments will be forwarded directly to trials_hd (with --web,
+# --name=value arguments become the page's runtime flags).
 #
 # Examples:
 #   ./run.sh
 #   ./run.sh --release
 #   ./run.sh --gpu_plugin=xenos
 #   ./run.sh --present_fps_limit=144
+#   ./run.sh --web --log_guest_fps=true
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -54,6 +59,9 @@ esac
 CONFIG=""
 EXE_PATH="${TRIALS_HD_EXE:-}"
 GAME_ARGS=()
+WEB=0
+WEB_PORT=8091
+WEB_ASSETS=1
 
 show_help() {
   cat <<EOF
@@ -67,6 +75,11 @@ Options:
   --debug               Run the Debug build configuration
   --relwithdebinfo      Run the RelWithDebInfo build configuration
   --bin PATH            Path to specific trials_hd binary
+  --web                 Serve the browser build on http://127.0.0.1:PORT (open it in
+                        Chrome/Edge/Chromium with WebGPU); Ctrl+C stops the server
+  --port N              Web: port to serve on (default $WEB_PORT)
+  --no-assets           Web: don't serve assets/; the page imports your game package
+                        into browser storage instead
   -h, --help            Show this help message
 
 Common game arguments:
@@ -101,6 +114,22 @@ while [[ $# -gt 0 ]]; do
       EXE_PATH="$2"
       shift 2
       ;;
+    --web)
+      WEB=1
+      shift
+      ;;
+    --port)
+      if [[ $# -lt 2 ]]; then
+        echo "Error: --port requires a port number." >&2
+        exit 1
+      fi
+      WEB_PORT="$2"
+      shift 2
+      ;;
+    --no-assets)
+      WEB_ASSETS=0
+      shift
+      ;;
     -h|--help)
       show_help
       exit 0
@@ -111,6 +140,59 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# -----------------------------------------------------------------------------
+# Web build: check it is built, then serve it on localhost.
+# -----------------------------------------------------------------------------
+if [[ $WEB -eq 1 ]]; then
+  WEB_DIR="$ROOT_DIR/out/build/web-wasm64-release/web"
+  if [[ ! -f "$WEB_DIR/trials_hd.html" || ! -f "$WEB_DIR/trials_hd.wasm" || ! -f "$WEB_DIR/trials_hd.js" ]]; then
+    echo "============================================================" >&2
+    echo "Error: the web build was not found." >&2
+    echo "Checked: $WEB_DIR/trials_hd.{html,js,wasm}" >&2
+    echo "" >&2
+    echo "Please build it first by running:" >&2
+    echo "  ./build.sh --web" >&2
+    echo "============================================================" >&2
+    exit 1
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "Error: python3 is needed to serve the web build." >&2
+    exit 1
+  fi
+  # Runtime flags travel in the page URL: --name=value -> name=value.
+  QUERY=()
+  SERVE_ARGS=("$WEB_DIR" --port "$WEB_PORT")
+  if [[ $WEB_ASSETS -eq 1 && -f "$ROOT_DIR/assets/default.xex" ]]; then
+    SERVE_ARGS+=(--assets "$ROOT_DIR/assets")
+    QUERY+=("web_assets_url=/assets")
+  fi
+  if [[ ${#GAME_ARGS[@]} -gt 0 ]]; then
+    for arg in "${GAME_ARGS[@]}"; do
+      if [[ "$arg" != --* ]]; then
+        echo "Error: with --web, game arguments must look like --name or --name=value (got '$arg')." >&2
+        exit 1
+      fi
+      QUERY+=("${arg#--}")
+    done
+  fi
+  URL="http://127.0.0.1:$WEB_PORT/trials_hd.html"
+  if [[ ${#QUERY[@]} -gt 0 ]]; then
+    URL+="?$(IFS='&'; echo "${QUERY[*]}")"
+  fi
+  echo "============================================================"
+  echo " Trials HD (web) at:"
+  echo "   $URL"
+  echo " Open it in a WebGPU browser (Chrome/Edge/Chromium) on this machine;"
+  if [[ " ${SERVE_ARGS[*]} " == *" --assets "* ]]; then
+    echo " game data is served from assets/ (use --no-assets to test the import)."
+  else
+    echo " the page asks for your game package or folder on first start."
+  fi
+  echo " Local use only: never publish this build. Ctrl+C stops the server."
+  echo "============================================================"
+  exec python3 "$ROOT_DIR/tools/web/serve.py" "${SERVE_ARGS[@]}"
+fi
 
 # If an explicit executable was not given, find it in the build directory
 if [[ -z "$EXE_PATH" ]]; then

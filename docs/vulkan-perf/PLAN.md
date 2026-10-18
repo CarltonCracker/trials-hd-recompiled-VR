@@ -569,7 +569,9 @@ runtime) and replace the hot ones with native implementations via `REX_FUNC` ove
 matrix math, culling. Also check `DrawInterpolated`'s per-node map lookups. Split into
 sub-tasks per function once identified; add them to section 6.
 
-**C13 — PGO/LTO coverage.** The `linux-amd64-pgo-*` presets exist (`tools/pgo_workflow.sh`).
+**C13 — PGO/LTO coverage.** *(2026-10-17: the PGO presets, `build.sh --pgo-*` and
+`tools/pgo_workflow.sh` were removed from the project at the user's request; the record
+below is kept as history.)* The `linux-amd64-pgo-*` presets existed (`tools/pgo_workflow.sh`).
 Check whether `librexgpu-xenos` and `librexruntime` are built with the profile (they are
 separate shared libraries); if not, extend the workflow to them, train on the ride
 benchmark, and measure 720p FPS.

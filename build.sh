@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Build script for Trials HD Recompiled (desktop Linux and macOS).
+# Build script for Trials HD Recompiled (desktop Linux and macOS, plus the
+# browser build with --web).
 #
 # Automatically detects host operating system and CPU architecture,
 # verifies or extracts game assets from an STFS package, configures CMake
@@ -21,6 +22,8 @@
 #   --clean-all         Remove the entire out/build directory before building
 #   --no-webgpu         Build with Vulkan renderer only (disables WebGPU/Dawn)
 #   --target TARGET     Build a specific CMake target (default: trials_hd)
+#   --web               Build the browser version (Emscripten + WebGPU, preset
+#                       web-wasm64-release; needs the generated code from a native build)
 #   -h, --help          Show this help message
 set -euo pipefail
 
@@ -75,6 +78,8 @@ FORCE_EXTRACT=0
 DO_CLEAN=0
 DO_CLEAN_ALL=0
 TARGET="trials_hd"
+WEB=0
+CONFIG_GIVEN=""
 CMAKE_EXTRA_ARGS=()
 BUILD_EXTRA_ARGS=()
 
@@ -94,22 +99,23 @@ Options:
   --release             Build Release configuration
   --debug               Build Debug configuration
   --relwithdebinfo      Build RelWithDebInfo configuration (default)
-  --pgo-generate        Build with PGO instrumentation (-fprofile-generate)
-  --pgo-use             Build with PGO profile optimization (-fprofile-use)
   -j, --jobs N          Compile with N parallel jobs (default: $DEFAULT_JOBS)
   --clean               Clean the current preset build directory
   --clean-all           Delete out/build entirely
   --no-webgpu           Disable WebGPU renderer (build Vulkan only)
   --target TARGET       Build a specific CMake target (default: trials_hd)
+  --web                 Build the browser version (WebAssembly + WebGPU) into
+                        out/build/web-wasm64-release/web; run it with ./run.sh --web.
+                        Needs Emscripten (~/emsdk or \$EMSDK) and a native build first
+                        (it compiles the native build's generated code).
   -h, --help            Show this help message
 
 Examples:
   ./build.sh                                          # Build if assets/ is already present
   ./build.sh --game "Trials HD (XBLA)"                # Extract assets (if missing) and build
   ./build.sh --release -j8                            # Optimized release build with 8 jobs
-  ./build.sh --pgo-generate                           # Build PGO instrumentation binary
-  ./build.sh --pgo-use                                # Build PGO-optimized binary
   ./build.sh --clean                                  # Fresh rebuild
+  ./build.sh --web                                    # Browser build (after a native build)
 EOF
 }
 
@@ -129,22 +135,17 @@ while [[ $# -gt 0 ]]; do
       ;;
     --release|release)
       CONFIG="release"
+      CONFIG_GIVEN="$1"
       shift
       ;;
     --debug|debug)
       CONFIG="debug"
+      CONFIG_GIVEN="$1"
       shift
       ;;
     --relwithdebinfo|relwithdebinfo)
       CONFIG="relwithdebinfo"
-      shift
-      ;;
-    --pgo-generate|pgo-generate)
-      CONFIG="pgo-generate"
-      shift
-      ;;
-    --pgo-use|pgo-use)
-      CONFIG="pgo-use"
+      CONFIG_GIVEN="$1"
       shift
       ;;
     -j)
@@ -179,6 +180,10 @@ while [[ $# -gt 0 ]]; do
       CMAKE_EXTRA_ARGS+=("-DTRIALSHD_WEBGPU=OFF")
       shift
       ;;
+    --web)
+      WEB=1
+      shift
+      ;;
     --target|-t)
       if [[ $# -lt 2 ]]; then
         echo "Error: --target requires a target name." >&2
@@ -208,6 +213,13 @@ while [[ $# -gt 0 ]]; do
 done
 
 PRESET="${PLATFORM}-${ARCH_PRESET}-${CONFIG}"
+if [[ $WEB -eq 1 ]]; then
+  if [[ -n "$CONFIG_GIVEN" ]]; then
+    echo "Error: the web build has a single configuration (release); drop $CONFIG_GIVEN." >&2
+    exit 1
+  fi
+  PRESET="web-wasm64-release"
+fi
 BUILD_DIR="$ROOT_DIR/out/build/$PRESET"
 ASSETS_DIR="$ROOT_DIR/assets"
 
@@ -276,6 +288,9 @@ PYEOF
 
 if verify_assets "$ASSETS_DIR" && [[ $FORCE_EXTRACT -eq 0 ]]; then
   echo "==> Assets verified in assets/ (all required files present; skipping extraction)"
+elif [[ $WEB -eq 1 && -z "$GAME_DIR" ]]; then
+  # The browser imports the game data itself; only the native build needs assets/.
+  echo "==> No verified assets/ (the browser can import your game package instead)"
 else
   if [[ -z "$GAME_DIR" ]]; then
     echo "============================================================" >&2
@@ -330,7 +345,31 @@ if ! command -v ninja >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! command -v clang++ >/dev/null 2>&1; then
+if [[ $WEB -eq 1 ]]; then
+  if [[ ! -f "$ROOT_DIR/generated/default/trials_hd_pch.h" ]]; then
+    echo "============================================================" >&2
+    echo "Error: generated/default is missing." >&2
+    echo "The web build compiles the code that the native build generates from" >&2
+    echo "your default.xex. Build the native game once first:" >&2
+    echo "  ./build.sh" >&2
+    echo "============================================================" >&2
+    exit 1
+  fi
+  if ! command -v emcmake >/dev/null 2>&1; then
+    EMSDK_DIR="${EMSDK:-$HOME/emsdk}"
+    if [[ ! -f "$EMSDK_DIR/emsdk_env.sh" ]]; then
+      echo "============================================================" >&2
+      echo "Error: Emscripten was not found (looked for $EMSDK_DIR/emsdk_env.sh)." >&2
+      echo "Install it, then re-run ./build.sh --web:" >&2
+      echo "  git clone https://github.com/emscripten-core/emsdk.git ~/emsdk" >&2
+      echo "  ~/emsdk/emsdk install 6.0.12 && ~/emsdk/emsdk activate 6.0.12" >&2
+      echo "============================================================" >&2
+      exit 1
+    fi
+    # shellcheck disable=SC1091
+    source "$EMSDK_DIR/emsdk_env.sh" >/dev/null 2>&1
+  fi
+elif ! command -v clang++ >/dev/null 2>&1; then
   echo "Warning: clang++ not found in PATH. CMake preset expects Clang." >&2
 fi
 
@@ -366,7 +405,11 @@ echo "============================================================"
 # Configure preset if not yet configured, or when CMake flags were supplied, or when cleaning
 if [[ ! -f "$BUILD_DIR/build.ninja" ]] || [[ ${#CMAKE_EXTRA_ARGS[@]} -gt 0 ]]; then
   echo "==> Configuring with preset '$PRESET'..."
-  cmake -S "$ROOT_DIR" --preset "$PRESET" "${CMAKE_EXTRA_ARGS[@]}"
+  CONFIGURE=(cmake -S "$ROOT_DIR" --preset "$PRESET" "${CMAKE_EXTRA_ARGS[@]}")
+  if [[ $WEB -eq 1 ]]; then
+    CONFIGURE=(emcmake "${CONFIGURE[@]}")
+  fi
+  "${CONFIGURE[@]}"
 fi
 
 BUILD_CMD=(cmake --build "$BUILD_DIR" -j"$JOBS")
@@ -379,6 +422,18 @@ fi
 
 echo "==> Compiling..."
 "${BUILD_CMD[@]}"
+
+if [[ $WEB -eq 1 ]]; then
+  if [[ -f "$BUILD_DIR/web/trials_hd.wasm" ]]; then
+    echo "============================================================"
+    echo " Web build complete!"
+    echo " Page:     $BUILD_DIR/web/trials_hd.html"
+    echo " Run with: ./run.sh --web   (serves it on localhost)"
+    echo " Local use only: the .wasm contains your recompiled game; never publish it."
+    echo "============================================================"
+  fi
+  exit 0
+fi
 
 # Handle first-time two-pass codegen requirement
 # When codegen runs for the first time, trials_hd is excluded from ALL until the

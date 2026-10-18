@@ -15,6 +15,8 @@
 # - either renderer (WebGPU, Vulkan) fails to boot through tests/headless/main_menu_nav.txt,
 #   or its menu captures fall below 33 dB PSNR against the baseline.
 # macOS cannot be checked here: see docs/web-port/README.md section 16.1.
+# CHECK_GPU_INDEX picks the Vulkan device / WebGPU adapter (default 1: the RX 6600 on
+# the original build server; use 0 where the only GPU is device 0).
 set -uo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -65,9 +67,9 @@ fi
 echo "== boot both renderers (main menu navigation)"
 for renderer in webgpu vulkan; do
   if [[ $renderer == webgpu ]]; then
-    args=(--gpu_plugin=webgpu --webgpu_headless=true --webgpu_adapter=1)
+    args=(--gpu_plugin=webgpu --webgpu_headless=true --webgpu_adapter="${CHECK_GPU_INDEX:-1}")
   else
-    args=(--gpu_plugin=xenos --vulkan_device=1 --vulkan_headless_surface=true)
+    args=(--gpu_plugin=xenos --vulkan_device="${CHECK_GPU_INDEX:-1}" --vulkan_headless_surface=true)
   fi
   out="$dir/${mode}_$renderer"
   rm -rf "$out" && mkdir -p "$out"

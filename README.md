@@ -63,8 +63,7 @@ brew install cmake ninja
 
 Optimized native presets disable Tracy profiling. To enable it, configure with
 `cmake --preset linux-amd64-relwithdebinfo -DREXGLUE_ENABLE_TRACY=ON` before building
-(use the matching macOS preset there). A plain preset configure disables it again;
-retrain PGO profiles after changing this option.
+(use the matching macOS preset there). A plain preset configure disables it again.
 
 <details>
 <summary>Manual CMake Instructions</summary>
