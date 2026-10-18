@@ -13,35 +13,9 @@ endif()
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Local changes to the ReXGlue SDK live in patches/rexglue-sdk/trials-hd.patch
-# (regenerated with tools/export_sdk_patch.sh) so the submodule can keep
-# tracking upstream. Apply it to a clean checkout; a tree with other local
-# changes is left alone (SDK development in progress).
-find_package(Git REQUIRED)
-file(GLOB TRIALSHD_SDK_PATCHES "${CMAKE_CURRENT_SOURCE_DIR}/patches/rexglue-sdk/*.patch")
-list(SORT TRIALSHD_SDK_PATCHES)
-foreach(_patch IN LISTS TRIALSHD_SDK_PATCHES)
-    execute_process(
-        COMMAND ${GIT_EXECUTABLE} apply --reverse --check ${_patch}
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/rexglue-sdk
-        RESULT_VARIABLE _already_applied OUTPUT_QUIET ERROR_QUIET)
-    execute_process(
-        COMMAND ${GIT_EXECUTABLE} status --porcelain --untracked-files=no
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/rexglue-sdk
-        OUTPUT_VARIABLE _sdk_changes OUTPUT_STRIP_TRAILING_WHITESPACE)
-    if(NOT _already_applied EQUAL 0 AND NOT _sdk_changes STREQUAL "")
-        message(STATUS "SDK tree has local changes; not re-applying ${_patch}")
-    elseif(NOT _already_applied EQUAL 0)
-        execute_process(
-            COMMAND ${GIT_EXECUTABLE} apply ${_patch}
-            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/rexglue-sdk
-            RESULT_VARIABLE _apply_result)
-        if(NOT _apply_result EQUAL 0)
-            message(FATAL_ERROR "Failed to apply SDK patch ${_patch}")
-        endif()
-        message(STATUS "Applied SDK patch ${_patch}")
-    endif()
-endforeach()
+# Local changes to the ReXGlue SDK (patches/rexglue-sdk/*.patch): applied to the
+# submodule, or updated after a pull. See cmake/sdk_patches.cmake.
+include(cmake/sdk_patches.cmake)
 
 # Browser build (docs/web-port/README.md): only with -DTRIALSHD_WEB=ON under
 # Emscripten's toolchain (preset web-wasm64-release). It has its own build
