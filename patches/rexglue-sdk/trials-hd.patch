@@ -1,4 +1,10 @@
 
+- ui: configurable single menu-background dim layer, with passive overlay and
+  achievement-notification opt-outs; shared display-relative menu scale and
+  viewport-bounded achievements layout with scaled fonts, icons and spacing
+- ui: support ImGui 1.92 dynamic font atlas textures and framebuffer DPI
+  density, so scaled settings/overlays rasterize at their displayed pixel size
+  instead of magnifying the initial 10px atlas; release/recreate on drawer changes
 - vulkan shared memory (Trials fast path, G1): uploads of CPU-written pages
   are moved to the start of the submission (one batched copy and two
   barriers) instead of being recorded between draws, where each upload ended
@@ -2387,10 +2393,10 @@ index 0000000..737caec
 +
 +}  // namespace rex::thread::web
 diff --git a/include/rex/ui/imgui_dialog.h b/include/rex/ui/imgui_dialog.h
-index a7ab6b3..5db4278 100644
+index a7ab6b3..ad341d0 100644
 --- a/include/rex/ui/imgui_dialog.h
 +++ b/include/rex/ui/imgui_dialog.h
-@@ -39,6 +39,11 @@ class ImGuiDialog {
+@@ -39,6 +39,15 @@ class ImGuiDialog {
  
    void Draw();
  
@@ -2399,9 +2405,56 @@ index a7ab6b3..5db4278 100644
 +  // show - returns false so the window is only repainted for new guest frames.
 +  virtual bool WantsContinuousPaint() const { return true; }
 +
++  // Menus dim the guest behind all UI windows when the consumer enables it.
++  // Passive overlays/notifications opt out even when they are visible.
++  virtual bool WantsBackgroundDim() const { return true; }
++
   protected:
    ImGuiDialog(ImGuiDrawer* imgui_drawer);
  
+diff --git a/include/rex/ui/imgui_drawer.h b/include/rex/ui/imgui_drawer.h
+index a570fa0..c8209a9 100644
+--- a/include/rex/ui/imgui_drawer.h
++++ b/include/rex/ui/imgui_drawer.h
+@@ -17,6 +17,7 @@
+ #include <functional>
+ #include <memory>
+ #include <optional>
++#include <unordered_map>
+ #include <vector>
+ 
+ #include <rex/ui/immediate_drawer.h>
+@@ -77,7 +78,8 @@ class ImGuiDrawer : public WindowInputListener, public UIDrawer {
+  private:
+   void Initialize();
+ 
+-  void SetupFontTexture();
++  bool UpdateTextures(const ImVector<ImTextureData*>& textures);
++  void DestroyTextures();
+ 
+   void RenderDrawLists(ImDrawData* data, UIDrawContext& ui_draw_context);
+ 
+@@ -112,7 +114,7 @@ class ImGuiDrawer : public WindowInputListener, public UIDrawer {
+   ImmediateDrawer* immediate_drawer_ = nullptr;
+   // Resources specific to an immediate drawer - must be destroyed before
+   // detaching the presenter.
+-  std::unique_ptr<ImmediateTexture> font_texture_;
++  std::unordered_map<ImTextureData*, std::unique_ptr<ImmediateTexture>> textures_;
+ 
+   // If there's an active pointer, the ImGui mouse is controlled by this touch.
+   // If it's TouchEvent::kPointerIDNone, the ImGui mouse is controlled by the
+diff --git a/include/rex/ui/overlay/achievement_notification.h b/include/rex/ui/overlay/achievement_notification.h
+index f9921ed..5f1deaf 100644
+--- a/include/rex/ui/overlay/achievement_notification.h
++++ b/include/rex/ui/overlay/achievement_notification.h
+@@ -18,6 +18,7 @@ namespace rex::ui {
+ class AchievementNotificationDialog : public ImGuiDialog {
+  public:
+   ~AchievementNotificationDialog() override = default;
++  bool WantsBackgroundDim() const override { return false; }
+ 
+   // Thread-safe implementations may receive events from guest threads.
+   virtual void Push(const rex::system::AchievementEvent& event) = 0;
 diff --git a/include/rex/ui/overlay/achievement_toast.h b/include/rex/ui/overlay/achievement_toast.h
 index 7642601..ada3c44 100644
 --- a/include/rex/ui/overlay/achievement_toast.h
@@ -2553,6 +2606,43 @@ index 536f710..665b647 100644
  #else
  #include <renderdoc_app.h>
  #endif
+diff --git a/include/rex/ui/style.h b/include/rex/ui/style.h
+index fd80f0b..7a231f5 100644
+--- a/include/rex/ui/style.h
++++ b/include/rex/ui/style.h
+@@ -15,6 +15,7 @@
+  *              value the corresponding overlay shipped with.
+  */
+ #pragma once
++#include <algorithm>
+ #include <imgui.h>
+ 
+ namespace rex::ui {
+@@ -30,6 +31,7 @@ struct AchievementsStyle {
+   ImVec4 progress_bar{0.30f, 0.80f, 0.40f, 1.00f};
+   ImVec4 unlocked_icon_tint{1.00f, 1.00f, 1.00f, 1.00f};
+   ImVec4 locked_icon_tint{0.45f, 0.45f, 0.45f, 0.80f};
++  ImVec2 window_size{640.0f, 560.0f};
+   ImVec2 window_padding{14.0f, 12.0f};
+   ImVec2 item_spacing{8.0f, 6.0f};
+   float icon_size = 44.0f;
+@@ -75,6 +77,16 @@ struct SettingsStyle {
+ };
+ 
+ struct Style {
++  // Opt-in menu treatment. A zero reference height preserves fixed SDK sizing.
++  ImVec4 menu_dim_color{0.0f, 0.0f, 0.0f, 0.0f};
++  float menu_scale = 1.0f;
++  float menu_reference_height = 0.0f;
++  float MenuScale(float display_height) const {
++    return menu_scale * (menu_reference_height > 0.0f
++                             ? std::max(1.0f, display_height / menu_reference_height)
++                             : 1.0f);
++  }
++
+   AchievementsStyle achievements;
+   ToastStyle toast;
+   ConsoleStyle console;
 diff --git a/include/rex/ui/vulkan/functions/device_1_0.inc b/include/rex/ui/vulkan/functions/device_1_0.inc
 index aa55a4a..7ef7169 100644
 --- a/include/rex/ui/vulkan/functions/device_1_0.inc
@@ -85208,7 +85298,7 @@ index 76cc877..04192ac 100644
 +
  }  // namespace rex::memory
 diff --git a/src/ui/imgui_drawer.cpp b/src/ui/imgui_drawer.cpp
-index f270f3c..d568c12 100644
+index f270f3c..53a0a89 100644
 --- a/src/ui/imgui_drawer.cpp
 +++ b/src/ui/imgui_drawer.cpp
 @@ -9,6 +9,7 @@
@@ -85219,7 +85309,136 @@ index f270f3c..d568c12 100644
  #include <cfloat>
  #include <cstring>
  #include <filesystem>
-@@ -436,12 +437,16 @@ void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
+@@ -98,6 +99,7 @@ ImGuiDrawer::ImGuiDrawer(rex::ui::Window* window, size_t z_order, FontSetupCallb
+ }
+ 
+ ImGuiDrawer::~ImGuiDrawer() {
++  DestroyTextures();
+   SetPresenter(nullptr);
+   SetWindowTextInputActive(false);
+   if (!dialogs_.empty()) {
+@@ -158,8 +160,12 @@ void ImGuiDrawer::Initialize() {
+   ImGui::SetCurrentContext(internal_state_);
+ 
+   auto& io = ImGui::GetIO();
++  // Without this, PushFont(size) only magnifies the initial 10px atlas.
++  io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures;
+ 
+   auto& platform_io = ImGui::GetPlatformIO();
++  platform_io.Renderer_TextureMaxWidth = 4096;
++  platform_io.Renderer_TextureMaxHeight = 4096;
+   platform_io.Platform_SetImeDataFn = PlatformSetImeData;
+   platform_io.Platform_ImeUserData = this;
+ 
+@@ -328,17 +334,40 @@ std::optional<ImGuiKey> ImGuiDrawer::VirtualKeyToImGuiKey(VirtualKey vkey) {
+   }
+ }
+ 
+-void ImGuiDrawer::SetupFontTexture() {
+-  if (font_texture_ || !immediate_drawer_) {
+-    return;
++bool ImGuiDrawer::UpdateTextures(const ImVector<ImTextureData*>& textures) {
++  for (ImTextureData* texture : textures) {
++    if (texture->Status == ImTextureStatus_WantDestroy) {
++      textures_.erase(texture);
++      texture->SetTexID(ImTextureID_Invalid);
++      texture->SetStatus(ImTextureStatus_Destroyed);
++    } else if (texture->Status == ImTextureStatus_WantCreate ||
++               texture->Status == ImTextureStatus_WantUpdates) {
++      // ImmediateDrawer has no subregion update API. Replace the whole texture
++      // only when glyphs change; its backend defers freeing in-flight resources.
++      // ImDrawCmd resolves TexID through ImTextureData, so atlas growth and new
++      // sizes requested during this frame use the replacement immediately.
++      assert_true(texture->Format == ImTextureFormat_RGBA32);
++      auto uploaded = immediate_drawer_->CreateTexture(
++          texture->Width, texture->Height, ImmediateTextureFilter::kLinear, false,
++          static_cast<const uint8_t*>(texture->GetPixels()));
++      if (!uploaded) {
++        return false;  // Leave the request pending and retry next frame.
++      }
++      texture->SetTexID(reinterpret_cast<ImTextureID>(uploaded.get()));
++      textures_[texture] = std::move(uploaded);
++      texture->SetStatus(ImTextureStatus_OK);
++    }
++  }
++  return true;
++}
++
++void ImGuiDrawer::DestroyTextures() {
++  for (auto& [texture, resource] : textures_) {
++    texture->SetTexID(ImTextureID_Invalid);
++    // ImGui requeues live textures for creation when their backend disappears.
++    texture->SetStatus(ImTextureStatus_Destroyed);
+   }
+-  ImGuiIO& io = GetIO();
+-  unsigned char* pixels;
+-  int width, height;
+-  io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
+-  font_texture_ = immediate_drawer_->CreateTexture(width, height, ImmediateTextureFilter::kLinear,
+-                                                   true, reinterpret_cast<uint8_t*>(pixels));
+-  io.Fonts->TexID = reinterpret_cast<ImTextureID>(font_texture_.get());
++  textures_.clear();
+ }
+ 
+ void ImGuiDrawer::SetPresenter(Presenter* new_presenter) {
+@@ -362,18 +391,10 @@ void ImGuiDrawer::SetImmediateDrawer(ImmediateDrawer* new_immediate_drawer) {
+   if (immediate_drawer_ == new_immediate_drawer) {
+     return;
+   }
+-  if (immediate_drawer_) {
+-    GetIO().Fonts->TexID = ImTextureID{};
+-    font_texture_.reset();
+-  }
++  DestroyTextures();
+   immediate_drawer_ = new_immediate_drawer;
+-  // Eagerly upload the font atlas only when a presenter is attached (SDK mode).
+-  // In detached mode (presenter_ == nullptr) the app's renderer device may not
+-  // exist yet at SetupPresentation, so defer to the idempotent Draw-time
+-  // SetupFontTexture().
+-  if (immediate_drawer_ && presenter_) {
+-    SetupFontTexture();
+-  }
++  // Upload after ImGui::Render: dynamic glyphs aren't known until the dialogs
++  // have drawn, and detached renderers may not have a device at setup time.
+ }
+ 
+ void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
+@@ -384,12 +405,6 @@ void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
+     return;
+   }
+ 
+-  // In detached mode the app's immediate drawer (and the renderer device
+-  // backing it) may only become usable on the first frame, after the guest
+-  // creates its D3D device. Upload the font atlas lazily and idempotently;
+-  // SetupFontTexture early-returns once font_texture_ is set.
+-  SetupFontTexture();
+-
+   if (dialogs_.empty()) {
+     return;
+   }
+@@ -411,9 +426,21 @@ void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
+   float physical_to_logical = float(window_->GetMediumDpi()) / float(window_->GetDpi());
+   io.DisplaySize.x = window_->GetActualPhysicalWidth() * physical_to_logical;
+   io.DisplaySize.y = window_->GetActualPhysicalHeight() * physical_to_logical;
++  // ImGui 1.92 bakes glyphs at this density while retaining logical layout and
++  // input coordinates. Avoid stretching low-density glyphs on HiDPI displays.
++  io.DisplayFramebufferScale = ImVec2(1.0f / physical_to_logical, 1.0f / physical_to_logical);
+ 
+   ImGui::NewFrame();
+ 
++  // One scrim behind every UI window, not one per menu (which would stack).
++  // Persistent passive dialogs must not dim the game when no menu is open.
++  if (style_.menu_dim_color.w > 0.0f &&
++      std::any_of(dialogs_.begin(), dialogs_.end(),
++                  [](const ImGuiDialog* dialog) { return dialog->WantsBackgroundDim(); })) {
++    ImGui::GetBackgroundDrawList()->AddRectFilled(
++        ImVec2(0, 0), io.DisplaySize, ImGui::ColorConvertFloat4ToU32(style_.menu_dim_color));
++  }
++
+   assert_true(!IsDrawingDialogs());
+   dialog_loop_next_index_ = 0;
+   while (dialog_loop_next_index_ < dialogs_.size()) {
+@@ -436,18 +463,25 @@ void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
    // it now if needed.
    DetachIfLastDialogRemoved();
  
@@ -85242,6 +85461,15 @@ index f270f3c..d568c12 100644
    }
  }
  
+ void ImGuiDrawer::RenderDrawLists(ImDrawData* data, UIDrawContext& ui_draw_context) {
+   ImGuiIO& io = ImGui::GetIO();
+ 
++  if (data->Textures && !UpdateTextures(*data->Textures)) {
++    return;
++  }
+   immediate_drawer_->Begin(ui_draw_context, io.DisplaySize.x, io.DisplaySize.y);
+ 
+   for (int i = 0; i < data->CmdListsCount; ++i) {
 diff --git a/src/ui/overlay/achievement_toast.cpp b/src/ui/overlay/achievement_toast.cpp
 index 53b8c0b..a21e89d 100644
 --- a/src/ui/overlay/achievement_toast.cpp
@@ -85259,35 +85487,112 @@ index 53b8c0b..a21e89d 100644
    auto now = std::chrono::steady_clock::now();
  
 diff --git a/src/ui/overlay/achievements_overlay.cpp b/src/ui/overlay/achievements_overlay.cpp
-index e886a88..fd74aaf 100644
+index e886a88..83837fb 100644
 --- a/src/ui/overlay/achievements_overlay.cpp
 +++ b/src/ui/overlay/achievements_overlay.cpp
-@@ -43,7 +43,8 @@ void AchievementsOverlayDialog::OnDraw(ImGuiIO& io) {
-   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, style.window_padding);
-   ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, style.item_spacing);
+@@ -10,6 +10,7 @@
+  */
+ #include <rex/ui/overlay/achievements_overlay.h>
  
++#include <algorithm>
+ #include <imgui.h>
+ 
+ #include <rex/runtime.h>
+@@ -33,17 +34,27 @@ ImmediateTexture* AchievementsOverlayDialog::GetIcon(
+ }
+ 
+ void AchievementsOverlayDialog::OnDraw(ImGuiIO& io) {
+-  const AchievementsStyle& style = imgui_drawer()->style().achievements;
+-
+-  ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, 40.0f), ImGuiCond_FirstUseEver,
+-                          ImVec2(0.5f, 0.0f));
+-  ImGui::SetNextWindowSize(ImVec2(640.0f, 560.0f), ImGuiCond_FirstUseEver);
+-  ImGui::SetNextWindowBgAlpha(0.92f);
+-
+-  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, style.window_padding);
+-  ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, style.item_spacing);
+-
 -  if (ImGui::Begin("Achievements##overlay", nullptr, ImGuiWindowFlags_NoCollapse)) {
++  const auto& ui_style = imgui_drawer()->style();
++  const AchievementsStyle& style = ui_style.achievements;
++  const float scale = ui_style.MenuScale(io.DisplaySize.y);
++
++  // Match the consumer's menu scale, but keep the list inside the viewport.
++  ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f),
++                          ImGuiCond_Always, ImVec2(0.5f, 0.5f));
++  ImGui::SetNextWindowSize(
++      ImVec2(std::min(style.window_size.x * scale, io.DisplaySize.x * 0.92f),
++             std::min(style.window_size.y * scale, io.DisplaySize.y * 0.92f)), ImGuiCond_Always);
++  ImGui::SetNextWindowBgAlpha(0.96f);
++
++  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
++                       ImVec2(style.window_padding.x * scale, style.window_padding.y * scale));
++  ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
++                       ImVec2(style.item_spacing.x * scale, style.item_spacing.y * scale));
++  ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * scale);
++
 +  bool open = true;
-+  if (ImGui::Begin("Achievements##overlay", &open, ImGuiWindowFlags_NoCollapse)) {
++  if (ImGui::Begin("Achievements##overlay", &open, ImGuiWindowFlags_NoCollapse |
++                    ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings)) {
      const auto achievements = achievements_->ListAchievements();
  
      int unlocked_count = 0;
-@@ -71,6 +72,10 @@ void AchievementsOverlayDialog::OnDraw(ImGuiIO& io) {
+@@ -67,10 +78,16 @@ void AchievementsOverlayDialog::OnDraw(ImGuiIO& io) {
+ 
+     float frac = total_count > 0 ? static_cast<float>(unlocked_count) / total_count : 0.0f;
+     ImGui::PushStyleColor(ImGuiCol_PlotHistogram, style.progress_bar);
+-    ImGui::ProgressBar(frac, ImVec2(-1.0f, 6.0f), "");
++    ImGui::ProgressBar(frac, ImVec2(-1.0f, 6.0f * scale), "");
      ImGui::PopStyleColor();
  
      ImGui::TextDisabled("Unlock progress is saved automatically");
-+    ImGui::SameLine(ImGui::GetWindowWidth() - 100.0f);
++    const float close_width = ImGui::CalcTextSize("Close (Esc)").x +
++                              ImGui::GetStyle().FramePadding.x * 2.0f;
++    ImGui::SameLine(ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x - close_width);
 +    if (ImGui::SmallButton("Close (Esc)")) {
 +      open = false;
 +    }
      ImGui::Separator();
      ImGui::Spacing();
  
-@@ -139,8 +144,11 @@ void AchievementsOverlayDialog::OnDraw(ImGuiIO& io) {
+@@ -90,7 +107,8 @@ void AchievementsOverlayDialog::OnDraw(ImGuiIO& io) {
+       draw_list->ChannelsSetCurrent(1);
+ 
+       const float row_start_y = ImGui::GetCursorScreenPos().y;
+-      const float pad = 4.0f;
++      const float pad = 4.0f * scale;
++      const float icon_size = style.icon_size * scale;
+       ImGui::Dummy(ImVec2(0.0f, pad * 0.5f));
+ 
+       // Icon on the left. Locked icons are dimmed so the state reads clearly.
+@@ -98,10 +116,10 @@ void AchievementsOverlayDialog::OnDraw(ImGuiIO& io) {
+       if (icon) {
+         ImVec4 tint = is_unlocked ? style.unlocked_icon_tint : style.locked_icon_tint;
+         ImGui::ImageWithBg(reinterpret_cast<ImTextureID>(icon),
+-                           ImVec2(style.icon_size, style.icon_size), ImVec2(0, 0), ImVec2(1, 1),
++                           ImVec2(icon_size, icon_size), ImVec2(0, 0), ImVec2(1, 1),
+                            ImVec4(0, 0, 0, 0), tint);
+       } else {
+-        ImGui::Dummy(ImVec2(style.icon_size, style.icon_size));
++        ImGui::Dummy(ImVec2(icon_size, icon_size));
+       }
+       ImGui::SameLine();
+ 
+@@ -129,7 +147,7 @@ void AchievementsOverlayDialog::OnDraw(ImGuiIO& io) {
+         const float x0 = ImGui::GetWindowPos().x + 2.0f;
+         const float x1 = x0 + ImGui::GetWindowSize().x - 4.0f;
+         draw_list->AddRectFilled(ImVec2(x0, row_start_y), ImVec2(x1, row_end_y),
+-                                 ImGui::GetColorU32(style.row_unlocked_bg), style.row_rounding);
++                                 ImGui::GetColorU32(style.row_unlocked_bg), style.row_rounding * scale);
+       }
+       draw_list->ChannelsMerge();
+ 
+@@ -139,8 +157,12 @@ void AchievementsOverlayDialog::OnDraw(ImGuiIO& io) {
      ImGui::EndChild();
    }
    ImGui::End();
 -
++  ImGui::PopFont();
    ImGui::PopStyleVar(2);
 +
 +  if (!open && on_close_) {

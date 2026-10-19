@@ -103,9 +103,11 @@ void Apply(SDL_Joystick* joystick, const std::string& line,
 
 void StartVirtualPadFromEnvironment(std::function<void(const std::string&)> on_capture) {
   const char* fifo = std::getenv("TRIALS_HD_VIRTUAL_PAD");
-  if (!fifo || !*fifo) {
+  static bool started = false;  // UI thread only
+  if (!fifo || !*fifo || started) {
     return;
   }
+  started = true;
   SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
   SDL_InitSubSystem(SDL_INIT_GAMEPAD);
 

@@ -25,10 +25,13 @@ Our code on top of the SDK (`src/`) is the app shell, game-specific function hoo
 
 ## Hard rules
 
-1. **No game content in git, ever.** The user supplies `default.xex` and data; it goes
-   in `assets/` (gitignored). Never commit `assets/`, `generated/default/`, `out/`,
+1. **No game content in git, ever.** The user supplies their package: the build takes
+   `default.xex` from it into `out/xex/`, and the game's setup screen installs the data
+   into `assets/` (both gitignored). Never commit `assets/`, `generated/default/`, `out/`,
    `*.xex`, `*.pak`, `*.xwb`, shader microcode, WGSL generated from it, disassembly,
-   dumps or screenshots. Config files hold **addresses only**.
+   dumps or screenshots. Config files hold **addresses only**. Builds of the game (code
+   generated from `default.xex`) may be redistributed, e.g. as release binaries, but
+   never with assets or `default.xex` (README notice).
 2. **Never publish or host a web build.** Its `.wasm` contains the user's recompiled game.
    The included server binds to localhost.
 3. **Don't edit `generated/`.** It is rewritten by codegen. Change behavior with hooks in
@@ -46,6 +49,7 @@ Our code on top of the SDK (`src/`) is the app shell, game-specific function hoo
 | Path | What it is |
 | --- | --- |
 | `src/` | App (`trials_hd_app.h`, `main.cpp`), game hooks, settings/input/UI, audio fallback |
+| `src/installer/` | First-start setup screen: STFS reader, game/DLC installer into `assets/`, its ImGui dialog |
 | `src/gpu_webgpu/` | WebGPU renderer plugin (`rexgpu-webgpu`): Xenos → WGSL translator, caches, resolves, presenter |
 | `src/webgpu/` | Small WebGPU device/surface wrapper used by `tools/webgpu_smoke` |
 | `src/web/`, `web/`, `cmake/web/` | Browser build: storage/input glue, page JS (input, audio, import), Emscripten CMake |
@@ -55,17 +59,18 @@ Our code on top of the SDK (`src/`) is the app shell, game-specific function hoo
 | `generated/rexglue.cmake` | SDK CMake glue (tracked). `generated/default/` is generated, gitignored |
 | `patches/rexglue-sdk/` | Our changes to the SDK, applied to the submodule at configure time |
 | `metadata/` | Achievement definitions read by the SDK |
-| `tools/` | Asset extraction, DLC install, packaging, Dawn build, web server (+ many dev tools on `dev`) |
+| `tools/` | STFS extractor CLI (build.sh's xex step), packaging, Dawn build, web server (+ many dev tools on `dev`) |
 | `tests/` (dev) | ctest unit tests, headless input scripts, GPU/threading suites |
 | `docs/` (dev) | Agent topic docs and the long research/task-board docs |
 
 ## Build, run, test
 
 ```sh
-./build.sh --game "/path/to/Trials HD (XBLA)"   # first time: extract assets/, then build
+./build.sh --game "/path/to/Trials HD (XBLA)"   # first time: default.xex → out/xex/, then build
 ./build.sh                                      # later builds (RelWithDebInfo; --release/--debug)
 ./build.sh --no-webgpu                          # skip Dawn/WebGPU (Vulkan only)
-./run.sh                                        # run (args pass through, e.g. --gpu_plugin=webgpu)
+./run.sh                                        # run (args pass through, e.g. --gpu_plugin=webgpu);
+                                                # no assets/ yet: the setup screen installs it
 ./build.sh --web && ./run.sh --web              # browser build (needs a native build + Emscripten)
 ctest --test-dir out/build/linux-amd64-relwithdebinfo --output-on-failure   # dev branch
 ```
@@ -86,6 +91,10 @@ Presets: `linux-amd64-*`, `mac-arm64-*`, `mac-amd64-*` (`debug`/`release`/`relwi
 - **The renderer default is Vulkan (`xenos`)** in code (`OnPreSetup` in
   `src/trials_hd_app.h`). Some older text (a `CMakeLists.txt` comment, the web-port and
   WebGPU research docs) says WebGPU; the code wins.
+- **The game installs its own data.** Without an installed `assets/` (or with
+  `--install_game` / `--install_dlc`), `OnFinalizePaths` shows the setup screen
+  (`src/installer/`) before the runtime exists; the runtime starts when it finishes. It
+  only accepts the package whose `default.xex` matches the one the build was made from.
 - **Game settings are cvars** saved to `trials_hd.toml` next to the binary; saves, cache
   and logs also live next to the binary (not in `~`). Any cvar works as `--name=value`.
 - **Headless runs** need the repo `.venv` active (Pillow, python-xlib) or
@@ -104,7 +113,7 @@ On `dev`: `docs/agents/<file>`. On `main`, read one without switching branches:
 | Changing the ReXGlue SDK, the patch file and how it is applied | `sdk-patches.md` |
 | Game behavior: hooks on recompiled functions, FPS unlock, reverse engineering | `game-hooks.md` |
 | Settings menu, cvars, keyboard/controller, overlays, audio fallback | `settings-ui-input.md` |
-| Assets, STFS extraction, DLC, license, where saves/config go | `game-data.md` |
+| Setup screen, STFS extraction, DLC, license, where saves/config go | `game-data.md` |
 | Vulkan renderer performance work (SDK `xenos` plugin) | `renderer-vulkan.md` |
 | WebGPU renderer (`src/gpu_webgpu/`) | `renderer-webgpu.md` |
 | Browser build (`src/web/`, `web/`, `cmake/web/`, `tools/web/`) | `web-port.md` |

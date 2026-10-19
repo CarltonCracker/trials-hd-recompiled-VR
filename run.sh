@@ -240,7 +240,9 @@ if [[ -z "$EXE_PATH" || ! -x "$EXE_PATH" ]]; then
   exit 1
 fi
 
-# If --game_data_root was not passed, pass repo assets if present
+# If --game_data_root was not passed, use the repo's assets/. Without it, the
+# game's first start shows the setup screen, which installs the game there
+# (rather than next to the binary in out/build, which --clean deletes).
 HAS_GAME_DATA_ROOT=0
 if [[ ${#GAME_ARGS[@]} -gt 0 ]]; then
   for arg in "${GAME_ARGS[@]}"; do
@@ -251,7 +253,7 @@ if [[ ${#GAME_ARGS[@]} -gt 0 ]]; then
   done
 fi
 
-if [[ $HAS_GAME_DATA_ROOT -eq 0 && -d "$ROOT_DIR/assets" ]]; then
+if [[ $HAS_GAME_DATA_ROOT -eq 0 ]]; then
   GAME_ARGS+=(--game_data_root="$ROOT_DIR/assets")
 fi
 

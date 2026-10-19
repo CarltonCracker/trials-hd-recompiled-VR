@@ -27,3 +27,6 @@ __pycache__/
 
 # Dawn checkout (tools/build_dawn.sh)
 /thirdparty/dawn/
+
+# Players' saves (custom tracks) copied into the checkout
+/*Save*/
