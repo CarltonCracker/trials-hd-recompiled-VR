@@ -63,8 +63,39 @@ fullscreen (web).
   repainting on its own.
 - `ui_theme.{h,cpp}`: ImGui colors sampled from the main menu (brown panels, rust-orange
   accents, tan text), applied in `OnConfigureStyle` after the SDK defaults.
+  The theme also configures the shared menu scale (`1.6 × max(1, height/720)`).
+  Settings and achievements use the same font scale and base width; achievements
+  scales icons/spacing too and scrolls within 92% of the viewport height.
 - Achievements: the SDK's `AchievementsOverlayDialog`; the list is in
   `RegisterDefaultAchievements` (`trials_hd_app.h`) and `metadata/achievements.toml`.
+
+**Menu backdrop:** interactive dialogs request `WantsBackgroundDim()` by default.
+The drawer adds one 60%-black rectangle on its background draw list, behind all
+ImGui windows. Multiple menus do not compound the dimming. Performance overlays
+and achievement notifications opt out; the persistent idle notifier must never
+leave the game dimmed. The Trials theme disables ImGui's separate modal dim color
+so native modal dialogs do not double-dim. Closing the last menu removes the
+backdrop even when the performance overlay remains visible.
+
+Verified 2026-10-18 with 1440p and 720p headless screenshots in local
+`out/ui-readability/{1440p,720p}/`. A fixed game-background patch measures 39.9%
+brightness with Settings, achievements, or both open, and 100% with only the FPS
+overlay or after closing the menus. Achievements uses the same 32px text / 1664px
+width as Settings at 1440p (16px / 832px at 720p).
+
+**Font sharpness (2026-10-18):** the SDK patch enables ImGui 1.92 dynamic texture
+requests in `ImGuiDrawer`. Settings asks for 32px text at 1440p; the old renderer
+stretched its initial 10px atlas with linear filtering. Fonts now rasterize at the
+requested size and framebuffer DPI density. Atlas updates replace the immediate
+texture only when glyphs change; the renderer retains responsibility for in-flight
+GPU resource lifetime. Keep the existing font, colors and layout size. Do not
+replace linear filtering with nearest filtering to hide undersized glyphs.
+
+Verified Controls, Graphics, FPS and achievements screenshots at 2560x1440 using
+Xvfb + software Vulkan; native-size comparisons are in the gitignored local
+`out/ui-sharpness/{settings,fps}-comparison.png`. The CPU-only `imgui_sharpness`
+ctest covers sizes 16–120px, DPI 100/125/150/200%, upload retry, stable frames,
+and detach/reattach/destruction. See `testing.md` for screenshot commands.
 
 ## Audio (`src/fallback_audio.{h,cpp}`)
 

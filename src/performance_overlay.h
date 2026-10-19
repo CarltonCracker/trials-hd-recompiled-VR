@@ -18,6 +18,7 @@ class PerformanceOverlay : public rex::ui::ImGuiDialog {
 
   // New game frames repaint it; it must not keep the window repainting on its own.
   bool WantsContinuousPaint() const override { return false; }
+  bool WantsBackgroundDim() const override { return false; }
 
  protected:
   void OnDraw(ImGuiIO& io) override;
