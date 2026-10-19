@@ -18,3 +18,9 @@ pc_settings:
   status: verified
   date: 2026-10-19
   evidence: specs/verifications/PC-settings.md
+upstream_integration:
+  status: verified
+  upstream: 41c50db
+  ui_commit: 394e3f3
+  ctests: 9
+  screenshots: out/merged-ui/

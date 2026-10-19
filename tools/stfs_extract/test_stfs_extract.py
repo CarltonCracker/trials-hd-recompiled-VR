@@ -60,7 +60,7 @@ class ExtractTests(unittest.TestCase):
         self.assertEqual((self.output / 'nested/payload.bin').read_bytes(), b'test')
         self.assertEqual((self.output / 'empty').read_bytes(), b'')
         self.assertEqual((self.output / 'package_license.toml').read_text(),
-                         "# Written by tools/stfs_extract.py from the package's license block.\nlicense_mask = 0x1\n")
+                         "# Written from the package's license block when the game was installed.\nlicense_mask = 0x1\n")
 
     def test_invalid_names(self):
         for name in ('../escaped.bin', str(self.root / 'absolute'), 'a/b', 'a\\b', 'C:evil', '.', '..',

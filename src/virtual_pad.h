@@ -14,7 +14,8 @@ namespace trials_hd {
 //   capture <path>   (passed to on_capture: save the current guest frame)
 //   set <cvar> <v>   (change a cvar at runtime, e.g. "set vsync false")
 // The pad goes through the same SDL controller path as a physical one, so test
-// runs exercise real controller handling. Does nothing when the variable is unset.
+// runs exercise real controller handling. Does nothing when the variable is
+// unset, or after the first call.
 void StartVirtualPadFromEnvironment(std::function<void(const std::string&)> on_capture);
 
 }  // namespace trials_hd

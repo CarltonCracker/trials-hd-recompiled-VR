@@ -2,18 +2,20 @@
 # Build script for Trials HD Recompiled (desktop Linux and macOS, plus the
 # browser build with --web).
 #
-# Automatically detects host operating system and CPU architecture,
-# verifies or extracts game assets from an STFS package, configures CMake
-# using the corresponding preset, and builds the project.
-# Automatically handles the initial two-pass codegen build on fresh checkouts.
+# Automatically detects host operating system and CPU architecture, takes the
+# game's default.xex (what the game code is generated from) out of the player's
+# STFS package, configures CMake using the corresponding preset, and builds the
+# project. Automatically handles the initial two-pass codegen build on fresh
+# checkouts. The rest of the game data is installed by the game itself: its
+# first start shows a setup screen that asks for the package (and DLC).
 #
 # Usage:
 #   ./build.sh [options] [extra cmake/build args]
 #
 # Options:
 #   --game, -g PATH     Path to game folder or STFS package (e.g. "Trials HD (XBLA)")
-#                       Required when the assets/ directory is missing or incomplete.
-#   --force-extract     Re-extract game assets even if assets/ is already verified
+#                       Required for the first build (out/xex/default.xex is missing).
+#   --force-extract     Take default.xex out of the package again
 #   --release           Build Release configuration
 #   --debug             Build Debug configuration
 #   --relwithdebinfo    Build RelWithDebInfo configuration (default)
@@ -94,8 +96,9 @@ Platform detected: $PLATFORM ($ARCH)
 
 Options:
   --game, -g PATH       Path to game folder or STFS package (e.g. "Trials HD (XBLA)")
-                        Required if the assets/ folder is missing or incomplete.
-  --force-extract       Force re-extraction of assets even if assets/ already exists
+                        Required for the first build: the game code is generated
+                        from its default.xex (kept in out/xex/).
+  --force-extract       Take default.xex out of the package again
   --release             Build Release configuration
   --debug               Build Debug configuration
   --relwithdebinfo      Build RelWithDebInfo configuration (default)
@@ -111,8 +114,8 @@ Options:
   -h, --help            Show this help message
 
 Examples:
-  ./build.sh                                          # Build if assets/ is already present
-  ./build.sh --game "Trials HD (XBLA)"                # Extract assets (if missing) and build
+  ./build.sh --game "Trials HD (XBLA)"                # First build
+  ./build.sh                                          # Later builds
   ./build.sh --release -j8                            # Optimized release build with 8 jobs
   ./build.sh --clean                                  # Fresh rebuild
   ./build.sh --web                                    # Browser build (after a native build)
@@ -223,20 +226,11 @@ if [[ $WEB -eq 1 ]]; then
   PRESET="web-wasm32-release"
 fi
 BUILD_DIR="$ROOT_DIR/out/build/$PRESET"
-ASSETS_DIR="$ROOT_DIR/assets"
+XEX_DIR="$ROOT_DIR/out/xex"
 
 # -----------------------------------------------------------------------------
-# Asset Verification & Extraction
+# The game's default.xex (codegen input)
 # -----------------------------------------------------------------------------
-verify_assets() {
-  local dir="$1"
-  [[ -d "$dir" ]] && \
-  [[ -f "$dir/default.xex" && -s "$dir/default.xex" ]] && \
-  [[ -f "$dir/data/data.pak" && -s "$dir/data/data.pak" ]] && \
-  [[ -f "$dir/data/data_menu.pak" && -s "$dir/data/data_menu.pak" ]] && \
-  [[ -f "$dir/package_license.toml" && -s "$dir/package_license.toml" ]]
-}
-
 locate_package() {
   local search_path="$1"
   python3 - "$search_path" <<'PYEOF'
@@ -288,18 +282,27 @@ sys.exit(1)
 PYEOF
 }
 
-if verify_assets "$ASSETS_DIR" && [[ $FORCE_EXTRACT -eq 0 ]]; then
-  echo "==> Assets verified in assets/ (all required files present; skipping extraction)"
-elif [[ $WEB -eq 1 && -z "$GAME_DIR" ]]; then
-  # The browser imports the game data itself; only the native build needs assets/.
-  echo "==> No verified assets/ (the browser can import your game package instead)"
+# Set when default.xex must be taken out of PACKAGE_FILE (after configuring:
+# the extractor is a small target of this project).
+PACKAGE_FILE=""
+XEX_CHANGED=0
+if [[ -s "$XEX_DIR/default.xex" && $FORCE_EXTRACT -eq 0 ]]; then
+  echo "==> Using out/xex/default.xex"
+elif [[ -s "$ROOT_DIR/assets/default.xex" && $FORCE_EXTRACT -eq 0 && -z "$GAME_DIR" ]]; then
+  # Checkouts from before the setup screen extracted the whole game to assets/.
+  echo "==> Using assets/default.xex (copied to out/xex/)"
+  mkdir -p "$XEX_DIR"
+  cp "$ROOT_DIR/assets/default.xex" "$XEX_DIR/default.xex"
+  XEX_CHANGED=1
+elif [[ $WEB -eq 1 ]]; then
+  # The web build compiles the native build's generated code (checked below).
+  :
 else
   if [[ -z "$GAME_DIR" ]]; then
     echo "============================================================" >&2
-    echo "Error: The 'assets' directory is missing or incomplete." >&2
-    echo "Trials HD requires game assets (default.xex, data.pak, package_license.toml)." >&2
-    echo "" >&2
-    echo "Please provide the path to your game folder using --game:" >&2
+    echo "Error: the first build needs your copy of Trials HD (XBLA)." >&2
+    echo "The game code is generated from its default.xex. Please provide the" >&2
+    echo "path to your game folder or package using --game:" >&2
     echo "  ./build.sh --game \"Trials HD (XBLA)\"" >&2
     echo "============================================================" >&2
     exit 1
@@ -316,17 +319,7 @@ else
     echo "Expected an STFS package (LIVE/PIRS/CON) for Trials HD (title 5841095A)." >&2
     exit 1
   fi
-
   echo "==> Found package: $PACKAGE_FILE"
-  echo "==> Extracting to $ASSETS_DIR..."
-  mkdir -p "$ASSETS_DIR"
-  python3 "$ROOT_DIR/tools/stfs_extract.py" "$PACKAGE_FILE" "$ASSETS_DIR"
-
-  if ! verify_assets "$ASSETS_DIR"; then
-    echo "Error: Asset extraction completed but required files were not found in $ASSETS_DIR." >&2
-    exit 1
-  fi
-  echo "==> Assets extracted and verified successfully."
 fi
 
 # -----------------------------------------------------------------------------
@@ -418,6 +411,17 @@ if [[ ! -f "$BUILD_DIR/build.ninja" ]] || [[ ${#CMAKE_EXTRA_ARGS[@]} -gt 0 ]]; t
   "${CONFIGURE[@]}"
 fi
 
+if [[ -n "$PACKAGE_FILE" ]]; then
+  echo "==> Taking default.xex out of the package..."
+  cmake --build "$BUILD_DIR" -j"$JOBS" --target stfs_extract
+  "$BUILD_DIR/stfs_extract" "$PACKAGE_FILE" "$XEX_DIR" --only default.xex
+  XEX_CHANGED=1
+fi
+if [[ $XEX_CHANGED -eq 1 && $WEB -eq 0 ]]; then
+  # The build records the xex's hash at configure time (CMakeLists.txt).
+  cmake -S "$ROOT_DIR" -B "$BUILD_DIR"
+fi
+
 # A fresh checkout configures before any game code is generated (see
 # CMakeLists.txt), and an explicit game target bypasses the first-codegen ALL
 # target: generate the code and reconfigure before building the game.
@@ -455,6 +459,7 @@ if [[ -f "$BUILD_DIR/trials_hd" ]]; then
   echo "============================================================"
   echo " Build complete!"
   echo " Executable: $BUILD_DIR/trials_hd"
-  echo " Run with:   $BUILD_DIR/trials_hd --game_data_root=$ROOT_DIR/assets"
+  echo " Run with:   ./run.sh"
+  echo " The first start asks for your game package (and DLC) and installs it."
   echo "============================================================"
 fi

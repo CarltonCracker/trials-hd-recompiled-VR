@@ -53,3 +53,21 @@ No CONVENTIONS.md exists; unrelated language/package rules do not apply. Existin
 large app/SDK files retain their structure rather than adding an unrelated
 refactor. Independent agent review and browser/macOS runtime tests were not run.
 All screenshots, dumps and logs stay gitignored. UI work remains on `dev` only.
+
+## Upstream integration
+
+UI commit `394e3f3` was merged with `origin/dev` at `41c50db` (six incoming
+commits, including the installer and custom-track list). Resolved two topic-doc
+conflicts and the headless harness conflict, retaining the installer root
+selection, virtual-pad isolation and periodic log flushing.
+
+Reconfigured with the updated x86-64-v2 preset and rebuilt the native game,
+runtime/plugins and test targets. All 9 ctests pass, including the new installer
+suite; 12 build-script tests and 10 STFS extraction tests also pass.
+
+Fresh 1440p runs on the merged build pass all three UI capture checkers. Inspected
+PC SETTINGS, FPS Counter with the new Game tab, the last achievement after stick
+scrolling, and the restored background after Close. Artifacts are local under
+`out/merged-ui/{pc_settings_menu,achievements_close,achievements_controller}/`.
+PC Settings open ratios are 0.393–0.396; closes restore 0.983–0.985. Achievements
+closes restore 2.505–2.506 times their dimmed baseline and reopening restores it.

@@ -18,7 +18,8 @@ void ApplyPackageLicense(const std::filesystem::path& game_data_root) {
   auto path = game_data_root / "package_license.toml";
   if (!std::filesystem::is_regular_file(path)) {
     REXLOG_INFO("No package_license.toml in game data; the game will run as a trial. "
-                "Re-extract the game package with tools/stfs_extract.py to record its license.");
+                "Install the game from its package (--install_game=PATH) to record its "
+                "license.");
     return;
   }
   try {

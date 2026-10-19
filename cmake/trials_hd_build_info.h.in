@@ -1,0 +1,6 @@
+// trials_hd - facts about this build, written by CMake (CMakeLists.txt).
+
+#pragma once
+
+// SHA-1 of the default.xex the game code was generated from; empty if unknown.
+#define TRIALSHD_BUILD_XEX_SHA1 "@TRIALSHD_BUILD_XEX_SHA1@"

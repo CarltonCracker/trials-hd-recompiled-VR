@@ -18,12 +18,13 @@ ctest --test-dir out/build/linux-amd64-relwithdebinfo --output-on-failure
 | `vk_gpu_profile` | Bookkeeping of the Vulkan timestamp profiler (no device) |
 | `fps_log`, `render_pose_log` | The log checkers `tests/check_fps_log.py` / `check_render_pose_log.py` against fixtures |
 | `tracy_default` | Tracy is off by default in optimized builds and can still be turned on |
+| `installer` (`tests/installer/`) | The setup screen's installer (`installer_cli` driver) on synthetic packages: game + DLC + a custom track found in a console content folder, layout/IDs/headers identical to `tools/add_dlc.py`, a track installs only its level (name from a non-English slot, the player's own record kept), other saves ignored, other `default.xex` versions refused, a failed first install leaves no `assets/` or `.installing/`, DLC into an existing install. Its own `trials_hd_build_info.h` stands in for the build's xex hash |
 
 ## Standalone Python tests
 
 ```sh
 python3 tests/build_script_test.py      # build.sh with mocked tools: first build, flags, web, Bash 3.2
-python3 tests/test_add_dlc.py           # DLC install
+python3 tests/test_add_dlc.py           # tools/add_dlc.py (the Python DLC tool)
 python3 tests/check_profiler_exit.py    # tools/profile sampler closes its pipes
 python3 tools/stfs_extract/test_stfs_extract.py <stfs_extract binary | node + wasm CLI>
 ```
@@ -37,7 +38,7 @@ Run `tests/build_script_test.py` after any `build.sh` change.
 - `tests/threading/`: POSIX alertable waits and the SDK timer queue
   (`alertable_wait_test`, `timer_queue_test`, `trials_fast_path_test`). See its README.
 
-## Headless game runs (needs `assets/`, Linux)
+## Headless game runs (Linux)
 
 ```sh
 source .venv/bin/activate              # Pillow + python-xlib, or xsend.py silently does nothing
@@ -56,6 +57,22 @@ every second so termination does not lose the final hook/verification messages.
 Renderer flags pick the renderer (`--webgpu_*` → WebGPU). On the original server `--vulkan_device=1` is the RX 6600. An intermittent `malloc_consolidate()`
 abort at startup is a known bug: rerun once before investigating.
 
+**Setup screen (first start).** `tests/installer/make_stfs.py <folder> <package>` packs a
+folder into a read-only STFS package (`--content-type 0x2 --name ...` for DLC), so the
+repo's own `assets/` can be repacked into a console content folder
+(`Content/0000000000000000/5841095A/{000D0000,00000002}/<file>`; never commit or share
+it). Stage a binary without data (`tools/package.sh <preset> <dir>`), run it from a
+folder without `assets/` with `GAME_DATA_ROOT=` (empty) and `TRIALS_HD_EXE=<dir>/trials_hd`,
+and either pass `--install_game=<content folder>` or play
+`INPUT=tests/headless/setup_screen.txt` (controller only, with `HOME` holding a `Games`
+link to the content folder). The virtual pad starts with the setup screen, so pad
+scripts drive it; the game doesn't get pad input after that install. Checked 2026-10-19: install identical to the original
+`assets/` (`diff -r`), game boots to the main menu.
+
+On a machine whose NVIDIA Vulkan driver crashes under Xvfb (segfault right after
+`OnCreateDialogs`, also before these changes; seen 2026-10-19 on an RTX 2070 SUPER), run
+on Mesa's software Vulkan: `VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json`.
+
 **Script format** (`tests/headless/*.txt`, one command per line, `#` comments; the header
 comment says what the script does and how to run it):
 
@@ -70,7 +87,7 @@ click <x> <y>               left-click at virtual-display coordinates
 set <cvar> <value>         change a cvar at runtime
 ```
 
-Scripts: menu walks (`main_menu_nav`, `keyboard_menu_nav`, `credits`), rides
+Scripts: `custom_tracks` (opens Play custom track and scrolls it), menu walks (`main_menu_nav`, `keyboard_menu_nav`, `credits`), rides
 (`ride_tutorial`, `ride_hello_world`, `ride_the_breakdown`, `ride_middle_name_danger`,
 `keyboard_ride`, `controller_ride`), settings (`settings_menu`, `controller_settings`,
 `settings_mouse`), `exit_button_test`, and `bench_fps` (the benchmark ride). The browser

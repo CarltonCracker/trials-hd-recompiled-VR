@@ -37,12 +37,17 @@
 #include "generated/default/trials_hd_init.h"
 #include "achievements_controls.h"
 #include "fallback_audio.h"
+#include "installer/game_installer.h"
 #include "graphics_settings.h"
 #include "performance_overlay.h"
 #include "keyboard_controls.h"
 #include "package_license.h"
 #include "ui_theme.h"
 #include "virtual_pad.h"
+
+#if !defined(__EMSCRIPTEN__)
+#include "installer/installer_dialog.h"
+#endif
 
 #if defined(__EMSCRIPTEN__)
 #include "web/null_graphics_system.h"
@@ -272,9 +277,10 @@ class TrialsHdApp : public rex::ReXApp {
     trials_hd::ApplyStartupGraphicsSettings();
   }
 
-  // Game content is never bundled: the player extracts their own copy of
-  // Trials HD into an `assets` folder (see README). Without --game_data_root,
-  // look next to the executable first, then in the working directory.
+  // Game content is never bundled: the player installs their own copy of
+  // Trials HD into an `assets` folder (the setup screen, OnFinalizePaths).
+  // Without --game_data_root, look next to the executable first, then in the
+  // working directory.
   void OnConfigurePaths(rex::PathConfig& paths) override {
 #if defined(__EMSCRIPTEN__)
     if (auto root = trials_hd::web::PersistentDataRoot(); !root.empty()) {
@@ -287,7 +293,7 @@ class TrialsHdApp : public rex::ReXApp {
     if (paths.game_data_root.empty()) {
       for (const auto& dir : {rex::filesystem::GetExecutableFolder() / "assets",
                               std::filesystem::current_path() / "assets"}) {
-        if (std::filesystem::is_regular_file(dir / "default.xex")) {
+        if (trials_hd::installer::IsGameInstalled(dir)) {
           paths.game_data_root = dir;
           break;
         }
@@ -325,6 +331,65 @@ class TrialsHdApp : public rex::ReXApp {
       }
     }
   }
+
+#if !defined(__EMSCRIPTEN__)
+  // The window and ImGui are up, the runtime is not: without an installed game
+  // (or with --install_game / --install_dlc, src/installer/installer_dialog.cpp),
+  // show the setup screen, and boot the game from the folder it installs to.
+  std::optional<rex::PathConfig> OnFinalizePaths(
+      const rex::PathConfig& defaults, std::function<void(rex::PathConfig)> resume) override {
+    trials_hd::InstallerDialog::Options options;
+    options.reinstall_game = !rex::cvar::GetFlagByName("install_game").empty();
+    for (std::string_view flag : {"install_game", "install_dlc"}) {
+      auto value = rex::cvar::GetFlagByName(flag);
+      if (!value.empty()) {
+        options.initial_paths.emplace_back(value);
+        // Used once: don't let a settings save keep it in trials_hd.toml.
+        rex::cvar::SetFlagByName(flag, "");
+      }
+    }
+    options.auto_install = !options.initial_paths.empty();
+    const auto& root = defaults.game_data_root;
+    if (!options.auto_install && !root.empty() && trials_hd::installer::IsGameInstalled(root)) {
+      return defaults;
+    }
+    if (!imgui_drawer()) {
+      REXLOG_ERROR("Trials HD is not installed and there is no window for the setup screen");
+      return defaults;
+    }
+    options.install_dir = root.empty() ? trials_hd::installer::DefaultInstallDir() : root;
+    REXLOG_INFO("Showing the setup screen (install to {})", options.install_dir.string());
+    // Lets test scripts drive the setup screen. Started this early, the pad is
+    // attached before the runtime's input system listens, so the game itself
+    // won't see it after the install (OnPostSetup's start is then a no-op).
+    StartVirtualPad();
+    installer_ = new trials_hd::InstallerDialog(
+        imgui_drawer(), std::move(options),
+        [this, defaults, resume = std::move(resume)](const std::filesystem::path& assets) {
+          installer_ = nullptr;
+          auto paths = defaults;
+          paths.game_data_root = assets;
+          trials_hd::ApplyPackageLicense(assets);
+          // The button that started the game is still down.
+          hold_input_until_released_ = true;
+          // Not from inside the dialog's ImGui frame: runtime setup is long
+          // and creates more UI.
+          app_context().CallInUIThreadDeferred([resume, paths] { resume(paths); });
+        },
+        [this] {
+          installer_ = nullptr;
+          app_context().RequestDeferredQuit();
+        });
+    return std::nullopt;
+  }
+
+  // A package or folder dropped on the window goes to the setup screen.
+  void OnFileDrop(rex::ui::FileDropEvent& e) override {
+    if (installer_) {
+      installer_->AddPath(e.filename());
+    }
+  }
+#endif
 
   // Report the license stored in the player's own package (full or trial).
   // Runs after the config file is loaded so an explicit setting there wins.
@@ -427,7 +492,8 @@ class TrialsHdApp : public rex::ReXApp {
     // threads, so it must not touch ImGui (not thread-safe).
     if (auto* input = static_cast<rex::input::InputSystem*>(runtime()->input_system())) {
       input->SetActiveCallback([this] {
-        return !graphics_settings_.load() && !achievements_open_.load() && !hold_input_until_released_.load();
+        return !graphics_settings_.load() && !achievements_open_.load() &&
+               !installer_open_.load() && !hold_input_until_released_.load();
       });
     }
 #if defined(TRIALSHD_CALL_TRACE)
@@ -435,12 +501,20 @@ class TrialsHdApp : public rex::ReXApp {
 #endif
 
 #if !defined(__EMSCRIPTEN__)
-    // Test harness only: no-op unless TRIALS_HD_VIRTUAL_PAD is set.
+    StartVirtualPad();
+#endif
+
+  }
+
+#if !defined(__EMSCRIPTEN__)
+  // Test harness only: no-op unless TRIALS_HD_VIRTUAL_PAD is set (and after
+  // the first call).
+  void StartVirtualPad() {
     trials_hd::StartVirtualPadFromEnvironment([this](const std::string& path) {
       app_context().CallInUIThreadDeferred([this, path] { CaptureGuestFrame(path); });
     });
-#endif
   }
+#endif
 
   void OnShutdown() override {
     combo_watcher_.request_stop();
@@ -472,6 +546,11 @@ class TrialsHdApp : public rex::ReXApp {
   }
 
   void ToggleGraphicsSettings() {
+#if !defined(__EMSCRIPTEN__)
+    if (installer_) {
+      return;  // The setup screen has the controller until the game starts.
+    }
+#endif
     if (auto* dialog = graphics_settings_.load()) {
       dialog->RequestClose();
       return;
@@ -479,6 +558,17 @@ class TrialsHdApp : public rex::ReXApp {
     if (!imgui_drawer()) {
       return;
     }
+    trials_hd::GraphicsSettingsDialog::GameTab game_tab{};
+#if !defined(__EMSCRIPTEN__)
+    if (runtime()) {
+      game_tab.installed_dlc = trials_hd::installer::InstalledDlcNames(game_data_root());
+      game_tab.installed_tracks = trials_hd::installer::InstalledTrackCount(game_data_root());
+      // Not from inside the settings menu's ImGui frame.
+      game_tab.on_add_dlc = [this] {
+        app_context().CallInUIThreadDeferred([this] { OpenDlcInstaller(); });
+      };
+    }
+#endif
     graphics_settings_ = new trials_hd::GraphicsSettingsDialog(
         imgui_drawer(), config_path(),
         [this] {
@@ -486,8 +576,32 @@ class TrialsHdApp : public rex::ReXApp {
           // The button that closed the menu is still down; don't let the game
           // see it as a fresh press.
           hold_input_until_released_ = true;
+        },
+        std::move(game_tab));
+  }
+
+#if !defined(__EMSCRIPTEN__)
+  // Settings, Game tab, Add DLC or tracks: the setup screen over the running
+  // game, without the base game. The game ignores the controller until it closes.
+  void OpenDlcInstaller() {
+    if (installer_ || !imgui_drawer()) {
+      return;
+    }
+    if (auto* dialog = graphics_settings_.load()) {
+      dialog->RequestClose();
+    }
+    trials_hd::InstallerDialog::Options options;
+    options.install_dir = game_data_root();
+    options.in_game = true;
+    installer_open_ = true;
+    installer_ = new trials_hd::InstallerDialog(
+        imgui_drawer(), std::move(options), nullptr, [this] {
+          installer_ = nullptr;
+          installer_open_ = false;
+          hold_input_until_released_ = true;
         });
   }
+#endif
 
   // Polls controllers for the menu shortcut (Guide, or Back + Start) and
   // toggles the menu on the UI thread; also ends the post-close input hold once
@@ -612,5 +726,9 @@ class TrialsHdApp : public rex::ReXApp {
   std::unique_ptr<rex::ui::ImGuiDialog> achievements_dialog_;
   std::atomic<bool> achievements_open_{false};
   std::atomic<bool> hold_input_until_released_{false};
+  std::atomic<bool> installer_open_{false};  // the DLC installer over the game
   std::jthread combo_watcher_;
+#if !defined(__EMSCRIPTEN__)
+  trials_hd::InstallerDialog* installer_ = nullptr;  // owns itself; UI thread only
+#endif
 };

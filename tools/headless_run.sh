@@ -2,11 +2,13 @@
 # Run trials_hd on a headless machine under Xvfb, logging to a file and saving
 # periodic screenshots of the virtual display.
 #
-# Usage: [LOG_LEVEL=trace] [INPUT=script] tools/headless_run.sh [seconds=60] [extra args...]
+# Usage: [LOG_LEVEL=trace] [INPUT=script] [GAME_DATA_ROOT=dir] tools/headless_run.sh [seconds=60] [extra args...]
 # HEADLESS_WIDTH / HEADLESS_HEIGHT override the default 1280x720 capture size.
 # Physical controllers are excluded by default so the virtual pad is player one;
 # an explicit SDL_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT overrides that filter.
 # Output goes to out/run/: trials_hd.log and shot_NNN.png (gitignored).
+# GAME_DATA_ROOT defaults to the repo's assets/; set it empty to let the game
+# find (or, on the setup screen, install) its own.
 # INPUT names a tools/xsend.py script that is played against the display (keys
 # act as controller input via --mnk_mode, which the port enables by default).
 set -euo pipefail
@@ -43,10 +45,15 @@ if [[ " ${args[*]} " != *" --gpu_plugin="* ]]; then
 fi
 set -- "${args[@]}"
 
+data_root="${GAME_DATA_ROOT-$root/assets}"
+data_args=()
+if [[ -n "$data_root" ]]; then
+  data_args=(--game_data_root="$data_root")
+fi
 SDL_VIDEODRIVER=x11 SDL_AUDIODRIVER=dummy \
   SDL_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT="${SDL_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT:-0x0000/0x0000}" \
   DISPLAY="$display" "$exe" \
-  --game_data_root="$root/assets" --log_level="${LOG_LEVEL:-debug}" \
+  ${data_args[@]+"${data_args[@]}"} --log_level="${LOG_LEVEL:-debug}" \
   --log_file="$out/trials_hd.log" --log_flush_interval=1 "$@" > "$out/stdout.log" 2>&1 &
 game_pid=$!
 

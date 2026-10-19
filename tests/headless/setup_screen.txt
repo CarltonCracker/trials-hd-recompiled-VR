@@ -1,0 +1,41 @@
+# First start without assets/: the setup screen, controller only. A opens the
+# file browser (in $HOME), d-pad down twice reaches the "Games" folder, A opens it,
+# A on "Use this folder" finds the game and DLC, A on "Install and play" installs
+# them and boots the game. Run a staged copy of the game (tools/package.sh) from a
+# folder without assets/, with HOME holding Games/ (your packages, e.g. packed with
+# tests/installer/make_stfs.py):
+#   HOME=<dir> GAME_DATA_ROOT= TRIALS_HD_EXE=<dist>/trials_hd \
+#     INPUT=tests/headless/setup_screen.txt tools/headless_run.sh 60
+wait 5
+shot setup_choose
+pad a 1
+wait 0.15
+pad a 0
+wait 1
+shot setup_browse
+pad down 1
+wait 0.15
+pad down 0
+wait 0.3
+pad down 1
+wait 0.15
+pad down 0
+wait 0.3
+shot setup_browse_games
+pad a 1
+wait 0.15
+pad a 0
+wait 1
+shot setup_in_games
+pad a 1
+wait 0.15
+pad a 0
+wait 3
+shot setup_found
+pad a 1
+wait 0.15
+pad a 0
+wait 1
+shot setup_installing
+wait 20
+shot setup_game
