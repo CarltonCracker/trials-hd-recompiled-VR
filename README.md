@@ -15,7 +15,7 @@ ReXGlue translates the game's PowerPC executable into C++ ahead of time and link
 
 ## Requirements
 
-- **Linux x86-64** (SSE4.2 / Vulkan 1.2+) or **macOS 12+** (Apple Silicon arm64 or Intel x86-64)
+- **Linux x86-64** (x86-64-v2: any CPU with SSE4.2, e.g. Intel Nehalem / AMD Bulldozer and newer; Vulkan 1.2+) or **macOS 12+** (any Apple Silicon, or Intel x86-64)
 - Clang 19+, CMake 3.25+, Ninja, Python 3, Git
 
 **Ubuntu / Debian:**

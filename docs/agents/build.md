@@ -80,6 +80,10 @@ targets need `find_package(Threads)` first; the target is `dawn::webgpu_dawn`.
 - `tools/package.sh [preset] [out]` assembles a runnable folder (default
   `dist/trials_hd-linux-x86_64`, from `linux-amd64-release`) with `stfs_extract.py` and a
   README; no game files.
+- CPU targets (`CMakePresets.json`): `-march=x86-64-v2` (SSE4.2, matches `build.sh`'s
+  message; the SDK adds `-msse4.1` to the generated code anyway) and `-mcpu=apple-m1` (all
+  Apple Silicon). They were `x86-64-v3` / `apple-m3` until 2026-10-19, which needed AVX2 /
+  an M3-class CPU; no measured speed-up was recorded for them.
 
 ## macOS notes
 
