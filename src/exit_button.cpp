@@ -1,4 +1,4 @@
-// trials_hd - "Exit Game" main menu button and clean quit handler.
+// trials_hd - native PC SETTINGS and EXIT GAME main-menu actions.
 
 #include <cstdint>
 #include <iterator>
@@ -9,18 +9,37 @@
 #include <rex/ppc/context.h>
 #include <rex/ppc/func.h>
 
+#include "guest_ui_text.h"
 #include "trials_hd_app.h"
 
 REX_EXTERN(__imp__sub_8265BA38);
+REX_EXTERN(__imp__sub_8265BC90);
 REX_EXTERN(__imp__sub_8265C648);
 REX_EXTERN(__imp__sub_82124A38);
+REX_EXTERN(sub_8265BB90);
 
-// MainMenu::OnInit - change "Return to Game Library" button to "EXIT GAME".
+namespace {
+// MainMenu::OnInit (sub_8265BA38) resolves the Download and Return controls
+// into these fields; sub_8265C648 compares the clicked handle against them.
+constexpr uint32_t kDownloadButtonOffset = 68;
+constexpr uint32_t kReturnButtonOffset = 72;
+
+void RenameDownloadButton(const PPCContext& ctx, uint8_t* base, uint32_t menu) {
+  const auto button = rex::memory::load_and_swap<uint32_t>(base + menu + kDownloadButtonOffset);
+  // The button displays source text, not the generic control-text component.
+  // The game's caption message copies UTF-16 into the control's own storage.
+  if (button && !trials_hd::SetGuestControlText(ctx, base, button, u"PC SETTINGS", sub_8265BB90)) {
+    REXLOG_WARN("Could not set PC SETTINGS caption on main-menu control 0x{:08X}", button);
+  }
+}
+}  // namespace
+
+// MainMenu::OnInit - replace the PC-specific menu captions.
 extern "C" REX_FUNC(sub_8265BA38) {
   uint32_t menu = ctx.r3.u32;
   __imp__sub_8265BA38(ctx, base);
 
-  uint32_t return_button = rex::memory::load_and_swap<uint32_t>(base + menu + 72);
+  uint32_t return_button = rex::memory::load_and_swap<uint32_t>(base + menu + kReturnButtonOffset);
   if (return_button != 0) {
 
     // Replace all occurrences of L"RETURN TO GAME LIBRARY" in guest memory with L"EXIT GAME"
@@ -53,11 +72,27 @@ extern "C" REX_FUNC(sub_8265BA38) {
   }
 }
 
-// MainMenu button click handler - quit if ReturnButton is pressed.
+// The game refreshes this caption after initialization and on license changes.
+extern "C" REX_FUNC(sub_8265BC90) {
+  const uint32_t menu = ctx.r3.u32;
+  __imp__sub_8265BC90(ctx, base);
+  RenameDownloadButton(ctx, base, menu);
+}
+
+// MainMenu click handler - bypass the old Xbox LIVE/download flow for Settings.
 extern "C" REX_FUNC(sub_8265C648) {
   uint32_t menu = ctx.r3.u32;
   uint32_t clicked_button = ctx.r4.u32;
-  uint32_t return_button = rex::memory::load_and_swap<uint32_t>(base + menu + 72);
+  const auto settings_button = rex::memory::load_and_swap<uint32_t>(base + menu + kDownloadButtonOffset);
+  if (clicked_button != 0 && clicked_button == settings_button) {
+    REXLOG_INFO("PC SETTINGS button pressed; opening host settings");
+    if (auto* app = TrialsHdApp::Instance()) {
+      app->ShowGraphicsSettings();
+    }
+    ctx.r3.u64 = 0;
+    return;
+  }
+  uint32_t return_button = rex::memory::load_and_swap<uint32_t>(base + menu + kReturnButtonOffset);
   if (clicked_button != 0 && clicked_button == return_button) {
     REXLOG_INFO("Exit Game button pressed; requesting application quit");
     if (auto* app = TrialsHdApp::Instance()) {

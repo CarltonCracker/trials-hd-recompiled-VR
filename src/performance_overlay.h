@@ -1,12 +1,9 @@
-// trials_hd - performance overlay: the measured frame rate, frame times and a
-// frame-time graph (rex/perf/frame_timing.h), drawn with ImGui over the game.
+// trials_hd - number-only FPS counter at the top-left of the game.
 //
-// F2 toggles it, as does Settings > Performance Overlay; the setting
-// (show_performance_overlay) is saved with the other settings.
+// F2 toggles it, as does Settings > FPS Counter. Keep the internal cvar/bind
+// names stable so saved show_performance_overlay preferences still work.
 
 #pragma once
-
-#include <array>
 
 #include <rex/ui/imgui_dialog.h>
 
@@ -23,8 +20,6 @@ class PerformanceOverlay : public rex::ui::ImGuiDialog {
  protected:
   void OnDraw(ImGuiIO& io) override;
 
- private:
-  std::array<float, 240> frame_times_{};
 };
 
 // Shows or hides the overlay to match show_performance_overlay. UI thread only.

@@ -15,6 +15,7 @@ Script lines (blank lines and # comments ignored):
   capture <name>         save the game's own frame to <shot_dir>/<name>.png (works
                          with --vulkan_headless_surface; needs pad_fifo)
   set <cvar> <value>     change a cvar at runtime (virtual pad), e.g. set vsync false
+  click <x> <y>         left-click at virtual-display coordinates
   move <title> <x> <y>  position a window (no window manager under Xvfb)
   focus <title>          give input focus to the first window whose title contains
                          <title> (needed under Xvfb: there is no window manager)
@@ -104,6 +105,15 @@ def main():
                 print(f"capture failed: {e}", flush=True)
         elif cmd in ("down", "up"):
             press(d, keycode(d, args[0]), cmd == "down")
+        elif cmd == "click":
+            xtest.fake_input(d, X.MotionNotify, x=int(args[0]), y=int(args[1]))
+            d.sync()
+            time.sleep(0.15)
+            xtest.fake_input(d, X.ButtonPress, 1)
+            d.sync()
+            time.sleep(0.15)
+            xtest.fake_input(d, X.ButtonRelease, 1)
+            d.sync()
         elif cmd == "move":
             win = find_window(d.screen().root, " ".join(args[:-2]))
             if not win:

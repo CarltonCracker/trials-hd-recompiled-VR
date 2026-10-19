@@ -1,4 +1,8 @@
 
+- ui: default achievements Close callback defers owner reset until after drawing,
+  keeping the dialog and icon textures alive through the current presentation
+- ui: achievements scroll-input provider for controller scrolling, page steps
+  and close actions, plus keyboard arrows/Page Up/Down and visible control hints
 - ui: configurable single menu-background dim layer, with passive overlay and
   achievement-notification opt-outs; shared display-relative menu scale and
   viewport-bounded achievements layout with scaled fonts, icons and spacing
@@ -2479,7 +2483,7 @@ index 7642601..ada3c44 100644
    AchievementIconCache icon_cache_;
  };
 diff --git a/include/rex/ui/overlay/achievements_overlay.h b/include/rex/ui/overlay/achievements_overlay.h
-index 294d706..77072bc 100644
+index 294d706..edcec77 100644
 --- a/include/rex/ui/overlay/achievements_overlay.h
 +++ b/include/rex/ui/overlay/achievements_overlay.h
 @@ -10,6 +10,8 @@
@@ -2491,20 +2495,34 @@ index 294d706..77072bc 100644
  #include <rex/system/achievement_manager.h>
  #include <rex/ui/imgui_dialog.h>
  #include <rex/ui/overlay/achievement_icon_cache.h>
-@@ -29,6 +31,8 @@ class AchievementsOverlayDialog : public ImGuiDialog {
+@@ -29,6 +31,21 @@ class AchievementsOverlayDialog : public ImGuiDialog {
                              rex::Runtime* runtime, rex::system::AchievementManager* achievements);
    ~AchievementsOverlayDialog() override;
  
++  // Invoked during Draw. Owners must defer destruction until drawing returns;
++  // the draw list may still reference this dialog's icon textures.
 +  void SetOnClose(std::function<void()> on_close) { on_close_ = std::move(on_close); }
++
++  struct ScrollInput {
++    float vertical = 0.0f;  // -1..1 continuous scrolling, positive down.
++    int page = 0;          // Edge-triggered page step, positive down.
++    bool close = false;
++  };
++  // Polled on the drawing thread; platform-specific controller code stays in
++  // the consumer. Use edges for page/close to avoid repeated activation.
++  void SetScrollInputProvider(std::function<ScrollInput()> provider) {
++    scroll_input_ = std::move(provider);
++  }
 +
   protected:
    void OnDraw(ImGuiIO& io) override;
  
-@@ -38,6 +42,7 @@ class AchievementsOverlayDialog : public ImGuiDialog {
+@@ -38,6 +55,8 @@ class AchievementsOverlayDialog : public ImGuiDialog {
  
    rex::system::AchievementManager* achievements_ = nullptr;
    AchievementIconCache icon_cache_;
 +  std::function<void()> on_close_;
++  std::function<ScrollInput()> scroll_input_;
  };
  
  }  // namespace rex::ui
@@ -85487,18 +85505,19 @@ index 53b8c0b..a21e89d 100644
    auto now = std::chrono::steady_clock::now();
  
 diff --git a/src/ui/overlay/achievements_overlay.cpp b/src/ui/overlay/achievements_overlay.cpp
-index e886a88..83837fb 100644
+index e886a88..62510e7 100644
 --- a/src/ui/overlay/achievements_overlay.cpp
 +++ b/src/ui/overlay/achievements_overlay.cpp
-@@ -10,6 +10,7 @@
+@@ -10,6 +10,8 @@
   */
  #include <rex/ui/overlay/achievements_overlay.h>
  
 +#include <algorithm>
++#include <cmath>
  #include <imgui.h>
  
  #include <rex/runtime.h>
-@@ -33,17 +34,27 @@ ImmediateTexture* AchievementsOverlayDialog::GetIcon(
+@@ -33,17 +35,27 @@ ImmediateTexture* AchievementsOverlayDialog::GetIcon(
  }
  
  void AchievementsOverlayDialog::OnDraw(ImGuiIO& io) {
@@ -85537,7 +85556,7 @@ index e886a88..83837fb 100644
      const auto achievements = achievements_->ListAchievements();
  
      int unlocked_count = 0;
-@@ -67,10 +78,16 @@ void AchievementsOverlayDialog::OnDraw(ImGuiIO& io) {
+@@ -67,15 +79,43 @@ void AchievementsOverlayDialog::OnDraw(ImGuiIO& io) {
  
      float frac = total_count > 0 ? static_cast<float>(unlocked_count) / total_count : 0.0f;
      ImGui::PushStyleColor(ImGuiCol_PlotHistogram, style.progress_bar);
@@ -85552,10 +85571,37 @@ index e886a88..83837fb 100644
 +    if (ImGui::SmallButton("Close (Esc)")) {
 +      open = false;
 +    }
++    if (scroll_input_) {
++      ImGui::TextDisabled("D-pad / stick: scroll   LB/RB: page   A/B/Back: close");
++    }
      ImGui::Separator();
      ImGui::Spacing();
  
-@@ -90,7 +107,8 @@ void AchievementsOverlayDialog::OnDraw(ImGuiIO& io) {
+     // ---- List --------------------------------------------------------------
+     ImGui::BeginChild("##achlist", ImVec2(0.0f, 0.0f), false);
++    // This is a read-only list, so scroll directly rather than requiring the
++    // player to focus a child window with A before the d-pad starts working.
++    // Poll even when unfocused to consume button edges without stale presses.
++    const ScrollInput input = scroll_input_ ? scroll_input_() : ScrollInput{};
++    if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)) {
++      float vertical = std::isfinite(input.vertical) ? input.vertical : 0.0f;
++      vertical += float(ImGui::IsKeyDown(ImGuiKey_DownArrow)) -
++                  float(ImGui::IsKeyDown(ImGuiKey_UpArrow));
++      const int page = input.page + int(ImGui::IsKeyPressed(ImGuiKey_PageDown)) -
++                       int(ImGui::IsKeyPressed(ImGuiKey_PageUp));
++      const float delta = ImGui::GetWindowHeight() *
++          (std::clamp(vertical, -1.0f, 1.0f) * 1.5f * std::min(io.DeltaTime, 0.1f) + page * 0.9f);
++      if (delta != 0.0f) {
++        ImGui::SetScrollY(ImGui::GetScrollY() + delta);
++      }
++      if (input.close) {
++        open = false;
++      }
++    }
+     ImDrawList* draw_list = ImGui::GetWindowDrawList();
+ 
+     for (const auto& a : achievements) {
+@@ -90,7 +130,8 @@ void AchievementsOverlayDialog::OnDraw(ImGuiIO& io) {
        draw_list->ChannelsSetCurrent(1);
  
        const float row_start_y = ImGui::GetCursorScreenPos().y;
@@ -85565,7 +85611,7 @@ index e886a88..83837fb 100644
        ImGui::Dummy(ImVec2(0.0f, pad * 0.5f));
  
        // Icon on the left. Locked icons are dimmed so the state reads clearly.
-@@ -98,10 +116,10 @@ void AchievementsOverlayDialog::OnDraw(ImGuiIO& io) {
+@@ -98,10 +139,10 @@ void AchievementsOverlayDialog::OnDraw(ImGuiIO& io) {
        if (icon) {
          ImVec4 tint = is_unlocked ? style.unlocked_icon_tint : style.locked_icon_tint;
          ImGui::ImageWithBg(reinterpret_cast<ImTextureID>(icon),
@@ -85578,7 +85624,7 @@ index e886a88..83837fb 100644
        }
        ImGui::SameLine();
  
-@@ -129,7 +147,7 @@ void AchievementsOverlayDialog::OnDraw(ImGuiIO& io) {
+@@ -129,7 +170,7 @@ void AchievementsOverlayDialog::OnDraw(ImGuiIO& io) {
          const float x0 = ImGui::GetWindowPos().x + 2.0f;
          const float x1 = x0 + ImGui::GetWindowSize().x - 4.0f;
          draw_list->AddRectFilled(ImVec2(x0, row_start_y), ImVec2(x1, row_end_y),
@@ -85587,7 +85633,7 @@ index e886a88..83837fb 100644
        }
        draw_list->ChannelsMerge();
  
-@@ -139,8 +157,12 @@ void AchievementsOverlayDialog::OnDraw(ImGuiIO& io) {
+@@ -139,8 +180,12 @@ void AchievementsOverlayDialog::OnDraw(ImGuiIO& io) {
      ImGui::EndChild();
    }
    ImGui::End();
@@ -85658,7 +85704,7 @@ index e1a5287..356ace6 100644
    std::unique_ptr<RenderDocAPI> renderdoc_api(new RenderDocAPI());
  
 diff --git a/src/ui/rex_app.cpp b/src/ui/rex_app.cpp
-index b94fe9e..fd751c4 100644
+index b94fe9e..ef700ff 100644
 --- a/src/ui/rex_app.cpp
 +++ b/src/ui/rex_app.cpp
 @@ -26,6 +26,9 @@
@@ -85760,18 +85806,21 @@ index b94fe9e..fd751c4 100644
  void ReXApp::SetupOverlays(rex::ui::Presenter* presenter, rex::ui::ImmediateDrawer* drawer) {
    imgui_drawer_ = std::make_unique<rex::ui::ImGuiDrawer>(
        window_.get(), 64, [this](ImFontAtlas* atlas) { OnConfigureFonts(atlas); },
-@@ -421,6 +459,10 @@ void ReXApp::SetupOverlays(rex::ui::Presenter* presenter, rex::ui::ImmediateDraw
+@@ -421,6 +459,13 @@ void ReXApp::SetupOverlays(rex::ui::Presenter* presenter, rex::ui::ImmediateDraw
        achievements_overlay_.reset();
      } else {
        achievements_overlay_ = CreateAchievementsOverlay();
 +      if (auto* overlay =
 +              dynamic_cast<ui::AchievementsOverlayDialog*>(achievements_overlay_.get())) {
-+        overlay->SetOnClose([this] { achievements_overlay_.reset(); });
++        overlay->SetOnClose([this] {
++          // Draw still owns the dialog and references its icon textures.
++          app_context().CallInUIThreadDeferred([this] { achievements_overlay_.reset(); });
++        });
 +      }
      }
    });
  
-@@ -575,6 +617,9 @@ void ReXApp::OnDestroy() {
+@@ -575,6 +620,9 @@ void ReXApp::OnDestroy() {
    settings_overlay_.reset();
    console_overlay_.reset();
    debug_overlay_.reset();

@@ -35,6 +35,7 @@
 #endif
 
 #include "generated/default/trials_hd_init.h"
+#include "achievements_controls.h"
 #include "fallback_audio.h"
 #include "graphics_settings.h"
 #include "performance_overlay.h"
@@ -102,6 +103,16 @@ class TrialsHdApp : public rex::ReXApp {
     });
   }
 
+  // Game-menu hooks run on guest threads. Only create ImGui dialogs on the UI
+  // thread, and don't toggle an already-open menu if a held button repeats.
+  void ShowGraphicsSettings() {
+    app_context().CallInUIThreadDeferred([this] {
+      if (!graphics_settings_.load()) {
+        ToggleGraphicsSettings();
+      }
+    });
+  }
+
   void ShowAchievements() {
     app_context().CallInUIThreadDeferred([this] {
       OpenAchievements();
@@ -122,7 +133,14 @@ class TrialsHdApp : public rex::ReXApp {
     }
     achievements_dialog_ = CreateAchievementsOverlay();
     if (auto* overlay = dynamic_cast<rex::ui::AchievementsOverlayDialog*>(achievements_dialog_.get())) {
-      overlay->SetOnClose([this] { CloseAchievements(); });
+      overlay->SetOnClose([this] {
+        // The callback runs inside ImGuiDialog::Draw. Keep the dialog and its
+        // icon textures alive until drawing/presentation have finished.
+        app_context().CallInUIThreadDeferred([this] { CloseAchievements(); });
+      });
+      overlay->SetScrollInputProvider([controls = trials_hd::AchievementControls{}]() mutable {
+        return controls.Poll();
+      });
     }
     achievements_open_ = (achievements_dialog_ != nullptr);
   }
@@ -323,7 +341,7 @@ class TrialsHdApp : public rex::ReXApp {
 
   // Settings (controls and graphics): F1, the controller's Guide button, or
   // Back + Start. Achievements: F7 or the main menu Achievements button.
-  // Performance overlay: F2 (or the Graphics settings tab).
+  // FPS counter: F2 (or the Graphics settings tab).
   void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {
     trials_hd::ApplyDisplayMode();
     rex::ui::RegisterBind("bind_graphics_settings", "F1", "Toggle settings",
@@ -331,7 +349,7 @@ class TrialsHdApp : public rex::ReXApp {
     rex::ui::UnregisterBind("bind_achievements");
     rex::ui::RegisterBind("bind_achievements", "F7", "Toggle achievements",
                           [this] { ToggleAchievements(); });
-    rex::ui::RegisterBind("bind_performance_overlay", "F2", "Toggle performance overlay",
+    rex::ui::RegisterBind("bind_performance_overlay", "F2", "Toggle FPS counter",
                           [this] { trials_hd::TogglePerformanceOverlay(imgui_drawer()); });
     trials_hd::SyncPerformanceOverlay(drawer);
     combo_watcher_ = std::jthread([this](std::stop_token stop) { WatchSettingsCombo(stop); });

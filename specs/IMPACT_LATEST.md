@@ -1,46 +1,48 @@
-# UI dimming and achievement scaling
+# Main-menu PC SETTINGS entry
 
 type: impact
-context: Follow-up to BUG-001, user-requested menu readability improvements.
+context: Replace Download Content with PC SETTINGS and capitalize FPS Counter.
 
-## Target
+## Scope
 
-Shared ImGui dialog/drawer composition, achievements layout, and Trials UI theme.
-
-## Dependents
-
-- Settings, achievements, SDK settings, console, debug, guest XAM dialogs and
-  message boxes: opt into a single shared background dim layer.
-- Performance overlay and persistent achievement notifications: explicitly opt out.
-- Settings and achievements: use one configured menu scale (1.6 × max(1, height/720)).
-- Vulkan and WebGPU immediate drawers: existing solid-rectangle path, no renderer changes.
-
-## Affected Stories
-
-No release-plan stories exist. Scope is the two requested UI changes.
-
-## Test Coverage
-
-Existing `imgui_sharpness` CPU harness covers real drawer texture lifetime and DPI.
-Extend it for dim visibility, passive overlays, multiple menus and shared scale.
-Headless screenshots will verify real achievements text/icons, wrapping, scroll,
-header controls and unchanged background when only the performance overlay is up.
+- Extend main-menu hooks in `exit_button.cpp` with the caption-refresh hook;
+  do not add duplicate hooks or edit generated code.
+- Download Content's button handle is stored at menu + 68, next to Exit at +72.
+  The recompiled initialization and click handler establish these fields; the
+  +68 branch leads to the Xbox LIVE/download flow.
+- After caption refresh (`sub_8265BC90`), set only this control's source text
+  through `sub_8265BB90` (message 2016 → `sub_821A0498` → `sub_82188B18`), using
+  temporary big-endian UTF-16 guest stack storage. The message handler copies
+  text. Runtime checks showed that generic XuiText/control-text setters do not
+  update this button's visible caption.
+  Avoid a new heap scan or editing shared localization strings/assets.
+- Selecting it queues an idempotent host Settings open on the UI thread and
+  bypasses the old online/download action. Preserve all other menu actions.
+- Display `FPS Counter` in Graphics settings; keep internal cvar/binding names.
 
 ## Risk: Medium
 
-Shared dialog policy must not dim for the always-registered achievement notifier.
-Default SDK dimming remains disabled until the consumer theme opts in. Disable
-ImGui's separate modal scrim in the Trials theme to avoid double dimming.
+Guest ABI/text lifetime and button identity must be correct. Preserve the original
+initialization return context, and do not close Settings if duplicate menu events
+arrive while A is held.
 
-## Plan
+## Verification
 
-1. Add independent per-dialog dim policy and one configurable background scrim.
-2. Centralize menu scale in per-drawer style; keep current Settings sizing.
-3. Scale achievements font, width, icons, spacing and controls; cap height to 92%
-   of the viewport and retain list scrolling. Center like Settings.
-4. Extend CPU tests, rebuild/stage, inspect 1440p and 720p screenshots, document.
+- CPU test big-endian label encoding, guest stack alignment/backchain, context
+  preservation, setter errors and invalid-control/stack handling.
+- Build and run all ctests.
+- 1440p screenshot: PC SETTINGS label replaces Download Content.
+- Controller navigation selects it and opens Settings without an online popup;
+  close and reopen it, then verify the Graphics `FPS Counter` label.
+- Keyboard entry should open the same menu. No game files/screenshots in git.
+- Isolate virtual-pad tests from physical controllers using the process-local
+  SDL gamepad filter; otherwise a connected controller can take player one.
 
-## Result
+Verification completed on 2026-10-19: all 8 ctests pass, and the real 1440p
+controller/keyboard captures pass. See `specs/verifications/PC-settings.md`.
 
-Completed. All 7 ctests pass; screenshot dim/restore checks pass at both
-resolutions. See `specs/verifications/UI-readability.md`.
+## Separate metadata publication
+
+The exact supplied `.recomp.json` was published alone on both remote branches:
+`main` 104717c, `dev` e3c72ce. The spec requires the default branch. Those commits contain no UI changes; recomp.fyi refresh timing is external to
+this repository.

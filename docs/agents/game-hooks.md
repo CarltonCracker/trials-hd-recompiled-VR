@@ -43,8 +43,19 @@ extern "C" REX_FUNC(sub_8212BC68) {           // ctx = guest registers, base = g
 | `crt_hooks.cpp` | `sub_822F81A0`, `sub_822F8628` (memcpy), `sub_822F8040` (memset), `sub_822F8E60` (strncmp), `sub_822F8ED8` (strncpy), `sub_822F8EB0` (u64 → double), `sub_822F7D30` (strlen helper) | Native CRT routines instead of byte-by-byte guest loops (memcpy alone was ~6% of the render thread). Web: marks written pages for GPU tracking |
 | `gpu_wait.cpp` | `sub_8212BB58`, `sub_8212BC68` | The D3D runtime's fence-wait loop (~700k calls/frame): progressive spin → yield → 20 µs sleep. Also sets Linux timer slack to 1 µs |
 | `offline_warning.cpp` | `sub_8261ECE0`, `sub_8263B570` | Clears the "offline warning" mask at `0x82768498` so no popup before each track |
-| `exit_button.cpp` | `sub_8265BA38`, `sub_8265C648`, `sub_82124A38` | Main menu "Return to Game Library" becomes "EXIT GAME" and quits cleanly |
+| `exit_button.cpp` | `sub_8265BA38`, `sub_8265BC90`, `sub_8265C648`, `sub_82124A38` | Main-menu "Download Content" becomes "PC SETTINGS" and opens the host settings dialog; "Return to Game Library" becomes "EXIT GAME" and quits cleanly |
 | `achievements_hook.cpp` | `sub_82124618`, `__imp__XamShowAchievementsUI` | Opens the SDK's ImGui achievements overlay |
+
+The PC SETTINGS entry uses the existing Download control at `menu + 68`; Exit is
+at `menu + 72`. After the game's caption refresh (`sub_8265BC90`), send its
+source-text message through `sub_8265BB90`. Message 2016 copies UTF-16 through
+`sub_821A0498` → `sub_82188B18` into the control's own storage. The generic
+`XuiText` and control-text setters do not change this button's visible caption.
+`guest_ui_text.h` supplies an aligned temporary guest call frame, big-endian text
+and a copied PPC context so the original initialization result/registers survive.
+Only this control changes; no localization files or shared strings are patched.
+The click hook skips the old Xbox LIVE/download path and queues an idempotent
+`ShowGraphicsSettings()` on the UI thread. Other button actions pass through.
 
 Non-hook game integration: `package_license.cpp` (license mask from the user's package),
 `TrialsHdApp::RegisterDefaultAchievements` (achievement list), the cvar defaults in

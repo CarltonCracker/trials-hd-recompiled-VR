@@ -19,3 +19,13 @@ bugs:
       - tests/headless/ui_sharpness.txt
       - docs/agents/settings-ui-input.md
       - docs/agents/testing.md
+  - bug_id: BUG-002
+    status: fixed
+    date: 2026-10-18
+    severity: high
+    priority: high
+    scope: ui
+    summary: Achievements Close callback destroys the dialog during drawing
+    file: specs/bugs/BUG-002-achievements-close.md
+    approach: Defer the app-owned dialog reset until the UI draw stack returns
+    risk_level: medium

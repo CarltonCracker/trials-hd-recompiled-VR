@@ -171,6 +171,10 @@ if(TRIALSHD_BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests")
     target_include_directories(imgui_sharpness_test PRIVATE src
         $<TARGET_PROPERTY:imgui::imgui,INTERFACE_INCLUDE_DIRECTORIES>)
     add_test(NAME imgui_sharpness COMMAND imgui_sharpness_test)
+    add_executable(guest_ui_text_test tests/guest_ui_text_test.cpp)
+    target_include_directories(guest_ui_text_test PRIVATE src)
+    target_link_libraries(guest_ui_text_test PRIVATE rex::runtime)
+    add_test(NAME guest_ui_text COMMAND guest_ui_text_test)
     # Bookkeeping of the vulkan_gpu_profile timestamp profiler (header only, no device).
     add_executable(vk_gpu_profile_test tests/vk_gpu_profile_test.cpp)
     target_link_libraries(vk_gpu_profile_test PRIVATE rex::runtime)

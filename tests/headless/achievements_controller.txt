@@ -1,0 +1,46 @@
+# 1440p controller regression: shoulders page, D-pad/sticks scroll, A/B close.
+# Run with the same display/window flags as achievements_close.txt for 45s.
+wait 24
+focus trials
+move trials 0 0
+wait 1
+tap F7 200
+wait 2
+shot controller_top
+pad rb 1
+wait 0.2
+pad rb 0
+wait 0.5
+shot controller_page_down
+pad lb 1
+wait 0.2
+pad lb 0
+wait 0.5
+shot controller_page_up
+pad down 1
+wait 1
+pad down 0
+wait 0.5
+shot controller_dpad
+axis ly 32767
+wait 1
+axis ly 0
+wait 0.5
+shot controller_stick
+axis ry -32768
+wait 3
+axis ry 0
+wait 0.5
+shot controller_reset
+pad a 1
+wait 0.2
+pad a 0
+wait 1
+shot controller_closed_a
+tap F7 200
+wait 1
+pad b 1
+wait 0.2
+pad b 0
+wait 1
+shot controller_closed_b

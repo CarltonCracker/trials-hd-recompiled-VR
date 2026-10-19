@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <string>
 
 #include <imgui.h>
 #include <rex/ui/imgui_dialog.h>
@@ -121,6 +122,7 @@ class Achievements final : public rex::ui::AchievementsOverlayDialog {
   ImVec2 size;
   ImVec2 position;
   float glyph_height = 0;
+  float scroll = 0;
  private:
   void OnDraw(ImGuiIO& io) override {
     AchievementsOverlayDialog::OnDraw(io);
@@ -135,17 +137,49 @@ class Achievements final : public rex::ui::AchievementsOverlayDialog {
         glyph_height = std::max(glyph_height, vertices[i + 2].pos.y - vertices[i].pos.y);
       }
     }
+    ImGui::BeginChild("##achlist");
+    scroll = ImGui::GetScrollY();
+    ImGui::EndChild();
+    ImGui::End();
+  }
+};
+
+class Counter final : public trials_hd::PerformanceOverlay {
+ public:
+  explicit Counter(rex::ui::ImGuiDrawer* drawer) : PerformanceOverlay(drawer) {}
+  ImVec2 position, size;
+ private:
+  void OnDraw(ImGuiIO& io) override {
+    ImGui::LogToClipboard();
+    PerformanceOverlay::OnDraw(io);
+    ImGui::LogFinish();
+    ImGui::Begin("##performance_overlay");
+    position = ImGui::GetWindowPos();
+    size = ImGui::GetWindowSize();
     ImGui::End();
   }
 };
 
 void CheckMenuComposition(Window& window, Drawer& target) {
+  std::string counter_text;
   rex::ui::ImGuiDrawer imgui(&window, 0, nullptr, trials_hd::ApplyUiTheme);
+  auto& platform = ImGui::GetPlatformIO();
+  platform.Platform_ClipboardUserData = &counter_text;
+  platform.Platform_SetClipboardTextFn = [](ImGuiContext*, const char* text) {
+    *static_cast<std::string*>(ImGui::GetPlatformIO().Platform_ClipboardUserData) = text;
+  };
   imgui.SetImmediateDrawer(&target);
   rex::ui::AppUIDrawContext frame(2560, 1440);
-  trials_hd::PerformanceOverlay overlay(&imgui);
+  Counter overlay(&imgui);
   rex::ui::AchievementToastDialog toast(&imgui, nullptr, nullptr);
   imgui.Draw(frame);
+  imgui.Draw(frame);
+  Check(counter_text.find_first_of("0123456789") != std::string::npos &&
+            counter_text.find_first_not_of("0123456789 \r\n\t") == std::string::npos,
+        "FPS counter must render one number without units, stats or a graph");
+  Check(overlay.position.x == 20 && overlay.position.y == 20,
+        "FPS counter must anchor at the top-left");
+  Check(overlay.size.x < 200 && overlay.size.y < 80, "FPS counter must remain compact");
   CheckDimming(false, 2560, 1440);
   {
     Dialog menu(&imgui);
@@ -198,6 +232,29 @@ void CheckMenuComposition(Window& window, Drawer& target) {
           "Achievements text must match the Settings font scale");
     CheckDimming(true, width, height);
   }
+  window.dpi = 96;
+  window.Resize(2560, 1440);
+  int page_request = 1;
+  bool close_request = false;
+  bool closed = false;
+  achievements.SetOnClose([&] { closed = true; });
+  achievements.SetScrollInputProvider([&] {
+    rex::ui::AchievementsOverlayDialog::ScrollInput input;
+    input.page = page_request;
+    input.close = close_request;
+    page_request = 0;
+    return input;
+  });
+  imgui.Draw(frame);
+  imgui.Draw(frame);
+  Check(achievements.scroll > 0, "Controller page-down must scroll the achievements list");
+  page_request = -1;
+  imgui.Draw(frame);
+  imgui.Draw(frame);
+  Check(achievements.scroll <= 1, "Controller page-up must return to the top");
+  close_request = true;
+  imgui.Draw(frame);
+  Check(closed, "Controller close action must invoke the owner's safe close callback");
   imgui.SetImmediateDrawer(nullptr);
 }
 }

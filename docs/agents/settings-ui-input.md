@@ -24,15 +24,17 @@ Cvars defined in this repo: `display_width`, `display_height`, `host_vsync`
 
 ## Settings menu (`src/graphics_settings.{h,cpp}`)
 
-`GraphicsSettingsDialog` (ImGui), opened with **F1**, controller **Guide** or **Back +
-Start** (a watcher thread in `TrialsHdApp::WatchSettingsCombo` polls controllers every
-30 ms). Tabs:
+`GraphicsSettingsDialog` (ImGui), opened from the main menu's **PC SETTINGS** entry
+(formerly Download Content), with **F1**, controller **Guide** or **Back + Start**
+(a watcher thread in `TrialsHdApp::WatchSettingsCombo` polls controllers every
+30 ms). The game-menu action queues an idempotent UI-thread open, not a toggle,
+so repeated activation cannot close it. Tabs:
 
 - **Controls:** keyboard on/off (`mnk_mode`), per-action key slots, Reset Keys.
 - **Graphics:** renderer (Vulkan/WebGPU → `gpu_plugin`, restart), WebGPU adapter, display
   mode, resolution, render scale (1x–3x of 1280x720), unlock FPS (restart), FPS limit
   (Unlimited/240/165/144/120/90/60/30), VSync (restart; also switches the present-mode
-  cvars), performance overlay.
+  cvars), **FPS Counter**.
 
 **Save** writes `trials_hd.toml`. Values needing a restart show a note
 (`g_startup_*` keep what's in effect). `ApplyStartupGraphicsSettings` runs in
@@ -53,14 +55,17 @@ never act twice. `ApplyKeyboardDefaults` applies the layout except where the use
 configured keys. **Change bindings only from the settings menu**: game threads read
 the strings without a lock while input is active.
 
-Other keys: **F2** performance overlay, **F7** achievements, double-click toggles
+Other keys: **F2** FPS counter, **F7** achievements, double-click toggles
 fullscreen (web).
 
 ## Overlays and theme
 
-- `performance_overlay.{h,cpp}`: frame rate, frame times and a graph from
-  `rex/perf/frame_timing.h`; cvar `show_performance_overlay`. It must not keep the window
-  repainting on its own.
+- `performance_overlay.{h,cpp}`: a number-only FPS counter at the top-left, with
+  no units, frame-time statistics or graph. It reads the measured frame rate from
+  `rex/perf/frame_timing.h`, keeps the existing color thresholds and crisp font
+  scaling, and does not dim the game or keep the window repainting on its own.
+  Settings calls it **FPS Counter**. Keep cvar `show_performance_overlay` and
+  binding `bind_performance_overlay` stable for saved preferences/shortcuts.
 - `ui_theme.{h,cpp}`: ImGui colors sampled from the main menu (brown panels, rust-orange
   accents, tan text), applied in `OnConfigureStyle` after the SDK defaults.
   The theme also configures the shared menu scale (`1.6 × max(1, height/720)`).
@@ -68,6 +73,24 @@ fullscreen (web).
   scales icons/spacing too and scrolls within 92% of the viewport height.
 - Achievements: the SDK's `AchievementsOverlayDialog`; the list is in
   `RegisterDefaultAchievements` (`trials_hd_app.h`) and `metadata/achievements.toml`.
+  Its Close/X callback must defer `CloseAchievements()` with
+  `CallInUIThreadDeferred`: the dialog and icon textures must stay alive until
+  the current drawing/presentation stack returns. Resetting the owning
+  `unique_ptr` inside `OnDraw` causes use-after-free and can freeze/crash the GPU.
+  Do not use the base self-deleting `Close()` on this externally owned dialog.
+  `achievements_controls.h` supplies controller input to the SDK list: D-pad or
+  either stick scrolls, LB/RB pages, A closes, and the existing B/Back shortcut
+  closes too. The first input poll consumes an already-held A so selecting the
+  game menu entry does not immediately dismiss the overlay. Keyboard arrows and
+  Page Up/Down also scroll. Hints are shown above the list; no child-window focus
+  step is required. Scrolling, paging and A apply only while achievements has focus.
+
+Verified 2026-10-19 with CPU UI tests and 1440p headless captures: the counter
+contains only digits at the top-left, the counter toggle is present in Graphics, and
+Close/X/Escape plus controller A/B closing allow reopening without a crash.
+D-pad/stick scrolling reaches the last achievement; LB/RB page and returning to
+the top works. Local artifacts are in `out/fps-counter/`,
+`out/achievements-controller/` and `out/achievements-close/final/`.
 
 **Menu backdrop:** interactive dialogs request `WantsBackgroundDim()` by default.
 The drawer adds one 60%-black rectangle on its background draw list, behind all

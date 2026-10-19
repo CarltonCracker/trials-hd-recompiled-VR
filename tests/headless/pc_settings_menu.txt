@@ -1,0 +1,56 @@
+# 1440p: renamed main-menu item opens host Settings via controller and keyboard.
+# Run for 50s with --display_width=2560 --display_height=1440 --fullscreen=false.
+wait 24
+focus trials
+move trials 0 0
+wait 1
+shot pc_main_menu
+# PC SETTINGS occupies the former Download Content position (index 7).
+pad down 1
+wait 0.2
+pad down 0
+wait 0.25
+pad down 1
+wait 0.2
+pad down 0
+wait 0.25
+pad down 1
+wait 0.2
+pad down 0
+wait 0.25
+pad down 1
+wait 0.2
+pad down 0
+wait 0.25
+pad down 1
+wait 0.2
+pad down 0
+wait 0.25
+pad down 1
+wait 0.2
+pad down 0
+wait 0.25
+pad down 1
+wait 0.2
+pad down 0
+wait 0.5
+shot pc_selected
+pad a 1
+wait 0.7
+pad a 0
+wait 2
+shot pc_settings_controller
+pad rb 1
+wait 0.2
+pad rb 0
+wait 1
+shot pc_settings_graphics
+tap F1 200
+wait 1
+shot pc_settings_closed
+tap Return 200
+wait 2
+shot pc_settings_keyboard
+tap F1 200
+wait 1
+shot pc_settings_closed_again

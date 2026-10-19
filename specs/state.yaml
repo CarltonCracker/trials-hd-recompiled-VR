@@ -1,11 +1,20 @@
 active_flow: null
 bug_cycle:
-  status: complete
-  completed_steps: [1, 2, 3, 4, 5]
+  bug_id: BUG-002
+  status: verified
+  completed_steps: [1, 2, 3, 4]
 handoff:
   next_skill: null
-  note: UI improvements verified on dev; see git history for publication status.
+  note: PC Settings, FPS counter and achievements fixes verified on dev. Keep screenshots local; see git history for commit/merge status.
 ui_readability:
   status: verified
   evidence: specs/verifications/UI-readability.md
   screenshots: out/ui-readability/
+fps_controller_close:
+  status: verified
+  date: 2026-10-19
+  evidence: specs/verifications/FPS-controller-close.md
+pc_settings:
+  status: verified
+  date: 2026-10-19
+  evidence: specs/verifications/PC-settings.md

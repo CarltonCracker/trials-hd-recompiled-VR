@@ -1,0 +1,27 @@
+# Regression: Close (Esc), reopen, title-bar X, reopen, and keyboard Escape.
+# Coordinates require a 2560x1440 display and game window.
+# HEADLESS_WIDTH=2560 HEADLESS_HEIGHT=1440 INPUT=tests/headless/achievements_close.txt \
+#   tools/headless_run.sh 45 --display_width=2560 --display_height=1440 \
+#     --fullscreen=false --show_performance_overlay=true
+wait 24
+focus trials
+move trials 0 0
+wait 1
+tap F7 200
+wait 2
+shot achievements_before_close
+click 1950 235
+wait 2
+shot achievements_closed_button
+tap F7 200
+wait 2
+shot achievements_reopened
+click 2090 76
+wait 2
+shot achievements_closed_x
+tap F7 200
+wait 2
+shot achievements_reopened_again
+tap Escape 200
+wait 1
+shot achievements_closed_escape
