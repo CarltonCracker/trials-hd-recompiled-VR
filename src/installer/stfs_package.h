@@ -1,9 +1,15 @@
+// trials_hd - reader for Xbox 360 STFS (LIVE/PIRS/CON) packages: the player's
+// game and DLC packages, extracted by the installer (game_installer.h), the web
+// import (src/web/web_files.cpp) and the dev CLI (tools/stfs_extract/main.cpp).
+// Block/hash math mirrors the SDK's src/filesystem/devices/stfs_container_device.cpp.
+
 #pragma once
 
 #include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -24,6 +30,11 @@ struct StfsEntry {
   uint32_t size = 0;
 };
 
+// ExtractAll progress: the entry being written and the file bytes written so far
+// out of all file bytes in the package. Return false to cancel the extraction.
+using ExtractProgress =
+    std::function<bool(const StfsEntry& entry, uint64_t bytes_done, uint64_t bytes_total)>;
+
 class StfsPackage {
  public:
   StfsPackage();
@@ -43,11 +54,16 @@ class StfsPackage {
   uint32_t license_mask() const;
 
   const std::vector<StfsEntry>& entries() const { return entries_; }
+  // Sum of all file sizes (what ExtractAll writes).
+  uint64_t total_file_bytes() const;
+  const StfsEntry* FindEntry(std::string_view path) const;
 
   bool ReadFile(const StfsEntry& entry, std::vector<uint8_t>& out_data, std::string* error = nullptr);
+  // Files are streamed to a temporary name and renamed when complete, so a
+  // failed or cancelled extraction never leaves a truncated file in place.
   bool ExtractAll(const std::filesystem::path& out_dir,
                   bool write_license = true,
-                  const std::function<void(const StfsEntry&, size_t, size_t)>& progress = nullptr,
+                  const ExtractProgress& progress = nullptr,
                   std::string* error = nullptr);
 
  private:
@@ -57,6 +73,8 @@ class StfsPackage {
   const uint8_t* GetTable(uint64_t off);
   bool NextBlock(uint32_t idx, uint32_t* next);
   bool ReadAt(uint64_t off, uint8_t* data, size_t size);
+  bool ExtractEntry(const StfsEntry& entry, const std::filesystem::path& destination,
+                    const std::function<bool(uint64_t)>& on_bytes, std::string* error);
 
   std::filesystem::path path_;
   struct Impl;

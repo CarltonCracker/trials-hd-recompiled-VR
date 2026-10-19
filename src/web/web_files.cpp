@@ -18,7 +18,7 @@
 #if defined(TRIALSHD_WEB_WASMFS)
 #include <emscripten/emscripten.h>
 #include <emscripten/wasmfs.h>
-#include "tools/stfs_extract/stfs_extract.h"
+#include "installer/stfs_package.h"
 #endif
 
 #include <rex/cvar.h>
@@ -91,9 +91,10 @@ bool InitializeStorage() {
             throw std::runtime_error("Select the Trials HD base game, not a save or DLC package");
           }
           if (!package.ExtractAll(root / "assets", true,
-                [](const stfs::StfsEntry& entry, size_t index, size_t total) {
-                  StorageStatus("Extracting " + std::to_string(index + 1) + "/" +
-                                std::to_string(total) + ": " + entry.path);
+                [](const stfs::StfsEntry& entry, uint64_t done, uint64_t total) {
+                  StorageStatus("Extracting " + std::to_string(done >> 20) + "/" +
+                                std::to_string(total >> 20) + " MB: " + entry.path);
+                  return true;
                 }, &error)) throw std::runtime_error(error);
           package.Close();
           std::filesystem::remove(source);

@@ -9,8 +9,12 @@
 
 #include <filesystem>
 #include <functional>
+#include <string>
+#include <vector>
 
 #include <rex/ui/imgui_dialog.h>
+
+#include "gamepad_nav.h"
 
 namespace trials_hd {
 
@@ -34,8 +38,15 @@ float DisplayRefreshRate();
 // on_closed runs just before that so the owner can drop its pointer.
 class GraphicsSettingsDialog : public rex::ui::ImGuiDialog {
  public:
+  // The Game tab: installed DLC and Add DLC (opens the installer, src/installer/).
+  // Without on_add_dlc (the web build) there is no Game tab.
+  struct GameTab {
+    std::vector<std::string> installed_dlc;
+    std::function<void()> on_add_dlc;
+  };
+
   GraphicsSettingsDialog(rex::ui::ImGuiDrawer* drawer, std::filesystem::path config_path,
-                         std::function<void()> on_closed);
+                         std::function<void()> on_closed, GameTab game_tab = {});
 
   // Closes the dialog after the current frame (it then deletes itself).
   void RequestClose() { Close(); }
@@ -49,14 +60,16 @@ class GraphicsSettingsDialog : public rex::ui::ImGuiDialog {
   // Tab contents; key_bound reports a key binding made this frame.
   void DrawControlsTab(float label_width, bool& key_bound);
   void DrawGraphicsTab(float label_width);
+  void DrawGameTab(float label_width);
+  int TabCount() const { return game_tab_.on_add_dlc ? 3 : 2; }
 
-  static constexpr int kTabCount = 2;
-  int tab_ = 0;            // shown tab: 0 Controls, 1 Graphics
+  int tab_ = 0;            // shown tab: 0 Controls, 1 Graphics, 2 Game
   int requested_tab_ = -1;  // tab to select on the next frame (LB / RB)
 
   std::filesystem::path config_path_;
   std::function<void()> on_closed_;
-  bool gamepad_was_down_[8] = {};
+  GameTab game_tab_;
+  GamepadNav nav_;
   // Keyboard binding waiting for a key press (index into kKeyboardBindings,
   // -1 = none), its alternative slot and the frame the wait started.
   int capture_binding_ = -1;

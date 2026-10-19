@@ -17,12 +17,9 @@
 #include <rex/cvar.h>
 #include <rex/logging.h>
 
+#include "gamepad_nav.h"
 #include "keyboard_controls.h"
 #include "performance_overlay.h"
-#if defined(__EMSCRIPTEN__)
-#include <cmath>
-#include <rex/input/web/web_input_driver.h>
-#endif
 
 REXCVAR_DEFINE_INT32(display_width, 0, "Display",
                      "Window width, or fullscreen mode width (0 = desktop resolution)")
@@ -113,18 +110,6 @@ std::vector<std::pair<int, int>> AvailableResolutions(SDL_Window* window) {
   }
   return {sizes.begin(), sizes.end()};
 }
-
-// Gamepad buttons forwarded to ImGui navigation, in gamepad_was_down_ order.
-constexpr std::array<std::pair<SDL_GamepadButton, ImGuiKey>, 8> kNavButtons = {{
-    {SDL_GAMEPAD_BUTTON_DPAD_UP, ImGuiKey_GamepadDpadUp},
-    {SDL_GAMEPAD_BUTTON_DPAD_DOWN, ImGuiKey_GamepadDpadDown},
-    {SDL_GAMEPAD_BUTTON_DPAD_LEFT, ImGuiKey_GamepadDpadLeft},
-    {SDL_GAMEPAD_BUTTON_DPAD_RIGHT, ImGuiKey_GamepadDpadRight},
-    {SDL_GAMEPAD_BUTTON_SOUTH, ImGuiKey_GamepadFaceDown},
-    {SDL_GAMEPAD_BUTTON_EAST, ImGuiKey_GamepadFaceRight},
-    {SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, ImGuiKey_GamepadL1},  // previous tab
-    {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, ImGuiKey_GamepadR1},  // next tab
-}};
 
 // Keys that can be bound, with their SDK names (keybind_* values). Leaves out
 // modifiers (a bare modifier bind never fires) and the overlay keys (F1 and
@@ -281,27 +266,24 @@ float VsyncRefreshRate() {
 
 GraphicsSettingsDialog::GraphicsSettingsDialog(rex::ui::ImGuiDrawer* drawer,
                                                std::filesystem::path config_path,
-                                               std::function<void()> on_closed)
+                                               std::function<void()> on_closed,
+                                               GameTab game_tab)
     : ImGuiDialog(drawer),
       config_path_(std::move(config_path)),
-      on_closed_(std::move(on_closed)) {}
+      on_closed_(std::move(on_closed)),
+      game_tab_(std::move(game_tab)) {}
 
 void GraphicsSettingsDialog::OnClose() {
   // Release any gamepad keys still held so ImGui doesn't keep them pressed.
   ImGuiIO& io = GetIO();
   io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableKeyboard;
-  for (size_t b = 0; b < kNavButtons.size(); ++b) {
-    if (gamepad_was_down_[b]) {
-      io.AddKeyEvent(kNavButtons[b].second, false);
-    }
-  }
+  nav_.Release(io);
   if (on_closed_) {
     on_closed_();
   }
 }
 
 void GraphicsSettingsDialog::FeedGamepadNavigation(ImGuiIO& io) {
-  io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
   // Keyboard navigation too, except while waiting for a key to bind (the arrow
   // keys would move the focus instead).
   if (capture_binding_ >= 0) {
@@ -309,58 +291,10 @@ void GraphicsSettingsDialog::FeedGamepadNavigation(ImGuiIO& io) {
   } else {
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
   }
-  io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
-  bool down[kNavButtons.size()] = {};
-#if defined(__EMSCRIPTEN__)
-  if (auto source = rex::input::web::GetGamepadSource()) {
-    constexpr uint32_t buttons[] = {12, 13, 14, 15, 0, 1, 4, 5};
-    for (uint32_t i = 0; i < 4; ++i) {
-      rex::input::web::WebGamepad pad;
-      if (!source(i, pad)) return;  // Keep held navigation keys during a seqlock write.
-      if (!pad.connected) continue;
-      for (size_t b = 0; b < kNavButtons.size(); ++b) {
-        down[b] = down[b] || (pad.buttons & (1u << buttons[b]));
-      }
-      if (std::isfinite(pad.axes[1])) {
-        down[0] = down[0] || pad.axes[1] < -0.5f;
-        down[1] = down[1] || pad.axes[1] > 0.5f;
-      }
-      if (std::isfinite(pad.axes[0])) {
-        down[2] = down[2] || pad.axes[0] < -0.5f;
-        down[3] = down[3] || pad.axes[0] > 0.5f;
-      }
-    }
-  }
-#else
-  int count = 0;
-  if (SDL_JoystickID* ids = SDL_GetGamepads(&count)) {
-    for (int i = 0; i < count; ++i) {
-      SDL_Gamepad* pad = SDL_GetGamepadFromID(ids[i]);
-      if (!pad) {
-        continue;
-      }
-      for (size_t b = 0; b < kNavButtons.size(); ++b) {
-        down[b] = down[b] || SDL_GetGamepadButton(pad, kNavButtons[b].first);
-      }
-      // Left stick doubles as the d-pad.
-      constexpr Sint16 kDeadzone = 16000;
-      down[0] = down[0] || SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY) < -kDeadzone;
-      down[1] = down[1] || SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY) > kDeadzone;
-      down[2] = down[2] || SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTX) < -kDeadzone;
-      down[3] = down[3] || SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTX) > kDeadzone;
-    }
-    SDL_free(ids);
-  }
-#endif
+  nav_.Feed(io);
   // B with no combo popup open closes the dialog; inside a popup ImGui uses it
   // to close the popup.
-  const bool b_pressed = down[5] && !gamepad_was_down_[5];
-  for (size_t b = 0; b < kNavButtons.size(); ++b) {
-    if (down[b] != gamepad_was_down_[b]) {
-      io.AddKeyEvent(kNavButtons[b].second, down[b]);
-      gamepad_was_down_[b] = down[b];
-    }
-  }
+  const bool b_pressed = nav_.Pressed(GamepadNav::kBack);
   if (b_pressed && capture_binding_ >= 0) {
     capture_binding_ = -1;  // Cancels waiting for a key.
   } else if (b_pressed && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId)) {
@@ -432,6 +366,27 @@ void GraphicsSettingsDialog::DrawControlsTab(float label_width, bool& key_bound)
     ImGui::SameLine();
     ImGui::TextDisabled("Select a key, then press the new one (Delete clears)");
   }
+}
+
+// Game: the installed DLC track packs, and Add DLC (the installer screen; the
+// game sees new DLC after a restart).
+void GraphicsSettingsDialog::DrawGameTab(float label_width) {
+  Label("DLC", label_width);
+  if (game_tab_.installed_dlc.empty()) {
+    ImGui::TextDisabled("None installed");
+  } else {
+    ImGui::BeginGroup();
+    for (const auto& name : game_tab_.installed_dlc) {
+      ImGui::TextUnformatted(name.c_str());
+    }
+    ImGui::EndGroup();
+  }
+  ImGui::Spacing();
+  if (ImGui::Button("Add DLC...")) {
+    game_tab_.on_add_dlc();
+  }
+  ImGui::SameLine();
+  ImGui::TextDisabled("Big Pack, Big Thrills");
 }
 
 void GraphicsSettingsDialog::DrawGraphicsTab(float label_width) {
@@ -633,9 +588,9 @@ void GraphicsSettingsDialog::OnDraw(ImGuiIO& io) {
   bool key_bound = false;
   // Tabs: click them, or LB / RB on a controller.
   if (ImGui::IsKeyPressed(ImGuiKey_GamepadL1, false)) {
-    requested_tab_ = (tab_ + kTabCount - 1) % kTabCount;
+    requested_tab_ = (tab_ + TabCount() - 1) % TabCount();
   } else if (ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false)) {
-    requested_tab_ = (tab_ + 1) % kTabCount;
+    requested_tab_ = (tab_ + 1) % TabCount();
   }
   auto tab = [&](int index, const char* name) {
     const bool shown = ImGui::BeginTabItem(
@@ -653,6 +608,11 @@ void GraphicsSettingsDialog::OnDraw(ImGuiIO& io) {
     if (tab(1, "Graphics")) {
       capture_binding_ = -1;  // Key capture belongs to the Controls tab.
       DrawGraphicsTab(label_width);
+      ImGui::EndTabItem();
+    }
+    if (game_tab_.on_add_dlc && tab(2, "Game")) {
+      capture_binding_ = -1;
+      DrawGameTab(label_width);
       ImGui::EndTabItem();
     }
     ImGui::EndTabBar();

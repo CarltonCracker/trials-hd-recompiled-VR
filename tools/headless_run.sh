@@ -2,8 +2,10 @@
 # Run trials_hd on a headless machine under Xvfb, logging to a file and saving
 # periodic screenshots of the virtual display.
 #
-# Usage: [LOG_LEVEL=trace] [INPUT=script] tools/headless_run.sh [seconds=60] [extra args...]
+# Usage: [LOG_LEVEL=trace] [INPUT=script] [GAME_DATA_ROOT=dir] tools/headless_run.sh [seconds=60] [extra args...]
 # Output goes to out/run/: trials_hd.log and shot_NNN.png (gitignored).
+# GAME_DATA_ROOT defaults to the repo's assets/; set it empty to let the game
+# find (or, on the setup screen, install) its own.
 # INPUT names a tools/xsend.py script that is played against the display (keys
 # act as controller input via --mnk_mode, which the port enables by default).
 set -euo pipefail
@@ -40,7 +42,12 @@ if [[ " ${args[*]} " != *" --gpu_plugin="* ]]; then
 fi
 set -- "${args[@]}"
 
-DISPLAY="$display" "$exe" --game_data_root="$root/assets" --log_level="${LOG_LEVEL:-debug}" \
+data_root="${GAME_DATA_ROOT-$root/assets}"
+data_args=()
+if [[ -n "$data_root" ]]; then
+  data_args=(--game_data_root="$data_root")
+fi
+DISPLAY="$display" "$exe" ${data_args[@]+"${data_args[@]}"} --log_level="${LOG_LEVEL:-debug}" \
   --log_file="$out/trials_hd.log" "$@" > "$out/stdout.log" 2>&1 &
 game_pid=$!
 

@@ -35,6 +35,14 @@ elif name == 'cmake':
         elif target == 'trials_hd':
             assert (build / 'sources_configured').exists(), 'link without generated objects'
             (build / 'trials_hd').touch()
+        elif target == 'stfs_extract':
+            # stfs_extract <package> <out_dir> --only default.xex
+            tool = build / 'stfs_extract'
+            tool.write_text(f'#!{sys.executable}\n'
+                            'import sys, pathlib\n'
+                            'out = pathlib.Path(sys.argv[2]); out.mkdir(parents=True, exist_ok=True)\n'
+                            '(out / sys.argv[4]).write_text("from " + sys.argv[1])\n')
+            tool.chmod(0o755)
     else:
         build = (Path(args[args.index('-B') + 1]) if '-B' in args else
                  root / 'out/build' / args[args.index('--preset') + 1])
@@ -49,15 +57,26 @@ elif name == 'cmake':
 
 class BuildScriptTest(unittest.TestCase):
     def run_build(self, system='Darwin', arch='arm64', configured=False,
-                  ready=False, stale_stamp=False, extra=(), fail_codegen=False):
+                  ready=False, stale_stamp=False, extra=(), fail_codegen=False,
+                  xex='out', package=False):
+        """xex: where a default.xex already is ('out', 'assets' or None).
+        package: put a game package in <root>/game for --game."""
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             shutil.copy(ROOT / 'build.sh', root)
-            for name in ('default.xex', 'data/data.pak', 'data/data_menu.pak',
-                         'package_license.toml'):
-                path = root / 'assets' / name
+            if xex:
+                path = root / ('out/xex' if xex == 'out' else 'assets') / 'default.xex'
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text('stub')
+            if package:
+                game = root / 'game/5841095A/000D0000'
+                game.mkdir(parents=True)
+                header = bytearray(0x1000)
+                header[:4] = b'LIVE'
+                header[0x344:0x348] = (0x000D0000).to_bytes(4, 'big')
+                header[0x360:0x364] = (0x5841095A).to_bytes(4, 'big')
+                (game / 'PACKAGE').write_bytes(header)
+                extra = (*extra, '--game', str(root / 'game'))
             generated = root / 'generated/default'
             generated.mkdir(parents=True)
             (generated / 'trials_hd_pch.h').touch()
@@ -94,6 +113,9 @@ class BuildScriptTest(unittest.TestCase):
             log = root / 'calls.jsonl'
             calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
             calls = [[arg.replace(str(root), '<root>') for arg in call] for call in calls]
+            built_xex = root / 'out/xex/default.xex'
+            self.built_xex = built_xex.read_text() if built_xex.exists() else None
+            self.output = result.stdout + result.stderr
             return result, calls, (build / 'trials_hd_codegen_ready.stamp').exists(), preset
 
     def test_first_build(self):
@@ -163,6 +185,44 @@ class BuildScriptTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertEqual(calls, [
                     ['--build', f'<root>/out/build/{preset}', '-j4', '--target', 'trials_hd']])
+
+    def test_first_build_needs_the_game(self):
+        result, calls, _, _ = self.run_build(xex=None)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('--game', self.output)
+        self.assertEqual(calls, [])
+
+    def test_xex_from_package(self):
+        result, calls, _, preset = self.run_build(system='Linux', arch='x86_64', xex=None,
+                                                  package=True)
+        self.assertEqual(result.returncode, 0, self.output)
+        build = f'<root>/out/build/{preset}'
+        self.assertEqual(calls, [
+            ['-S', '<root>', '--preset', preset],
+            ['--build', build, '-j4', '--target', 'stfs_extract'],
+            ['-S', '<root>', '-B', build],  # records the xex hash
+            ['--build', build, '-j4', '--target', 'trials_hd_codegen'],
+            ['-S', '<root>', '-B', build],
+            ['--build', build, '-j4', '--target', 'trials_hd'],
+        ])
+        self.assertIn('game/5841095A/000D0000/PACKAGE', self.built_xex)
+
+    def test_xex_from_older_assets_folder(self):
+        result, calls, _, preset = self.run_build(system='Linux', arch='x86_64',
+                                                  configured=True, ready=True, xex='assets')
+        self.assertEqual(result.returncode, 0, self.output)
+        self.assertEqual(self.built_xex, 'stub')
+        build = f'<root>/out/build/{preset}'
+        self.assertEqual(calls, [
+            ['-S', '<root>', '-B', build],
+            ['--build', build, '-j4', '--target', 'trials_hd'],
+        ])
+
+    def test_web_build_needs_no_xex(self):
+        result, calls, _, _ = self.run_build(configured=True, ready=True, xex=None,
+                                             extra=('--web',))
+        self.assertEqual(result.returncode, 0, self.output)
+        self.assertEqual(len(calls), 1)
 
 
 if __name__ == '__main__':

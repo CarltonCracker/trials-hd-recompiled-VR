@@ -43,17 +43,23 @@ brew install cmake ninja
    cd trials-hd-recompiled
    ```
 
-2. Build and extract your game files in one step:
+2. Build, pointing at your copy of the game once:
    ```sh
    ./build.sh --game "/path/to/Trials HD (XBLA)"
    ```
-   *`--game` accepts the game directory or STFS package file (title ID `5841095A`). Asset extraction only needs to run once.*
+   *`--game` accepts the game directory or STFS package file (title ID `5841095A`). The build only takes `default.xex` out of it (into `out/xex/`): the game code is generated from it. Later builds don't need `--game`.*
+
+3. Run it:
+   ```sh
+   ./run.sh
+   ```
+   The first start shows a setup screen that asks for your game package (and the optional DLC), installs them and starts the game. See [Running](#running).
 
 ### Build Options
 
 ```sh
-./build.sh                                    # Build with existing assets/
-./build.sh --game "/path/to/Trials HD (XBLA)" # Extract game package and build
+./build.sh --game "/path/to/Trials HD (XBLA)" # First build (takes default.xex from your package)
+./build.sh                                    # Later builds
 ./build.sh --release                          # Build Release configuration (default: RelWithDebInfo)
 ./build.sh --debug                            # Build Debug configuration
 ./build.sh --no-webgpu                        # Build Vulkan renderer only (skips Dawn/WebGPU)
@@ -70,14 +76,16 @@ Optimized native presets disable Tracy profiling. To enable it, configure with
 
 If you prefer building directly with CMake:
 
-1. Extract assets manually into `assets/`:
-   ```sh
-   python3 tools/stfs_extract.py "/path/to/5841095A/000D0000/<package file>" assets
-   ```
-
-2. Configure and build:
+1. Configure, then take `default.xex` out of your game package into `out/xex/`:
    ```sh
    cmake --preset linux-amd64-relwithdebinfo  # or mac-arm64-relwithdebinfo / mac-amd64-relwithdebinfo
+   cmake --build out/build/linux-amd64-relwithdebinfo --target stfs_extract
+   out/build/linux-amd64-relwithdebinfo/stfs_extract "/path/to/5841095A/000D0000/<package file>" out/xex --only default.xex
+   ```
+
+2. Build (reconfiguring first records the xex's version for the setup screen):
+   ```sh
+   cmake -S . -B out/build/linux-amd64-relwithdebinfo
    cmake --build out/build/linux-amd64-relwithdebinfo -j$(nproc)
    # First build only: run a second time to compile generated sources
    cmake --build out/build/linux-amd64-relwithdebinfo -j$(nproc)
@@ -91,7 +99,7 @@ Build the native game first to generate C++ from your own `default.xex`, then in
 
 ```sh
 ./build.sh --web    # activates ~/emsdk (or $EMSDK) automatically
-./run.sh --web      # serves it on localhost with your assets/ and prints the URL
+./run.sh --web      # serves it on localhost with your installed assets/ and prints the URL
 ```
 
 Open the printed URL (**http://127.0.0.1:8091/...**) in desktop Chrome/Edge with hardware
@@ -116,14 +124,6 @@ Browser gameplay, storage and audio acceptance checks are still in progress; the
 [web-port task board](docs/web-port/README.md#16-task-breakdown-for-agents-small-and-large-models)
 records the remaining gates.
 
-### Adding DLC / Addons (Optional)
-
-Install DLC track packs (*Big Pack* and *Big Thrills*) into `assets/`:
-
-```sh
-./add_dlc.sh "/path/to/addon_folder_or_package"
-```
-
 ---
 
 ## Running
@@ -140,9 +140,33 @@ Or run the binary directly from the build tree:
 ./out/build/linux-amd64-relwithdebinfo/trials_hd
 ```
 
-Game assets are loaded automatically from the `assets/` folder in the project root or next to the executable. Point to another location using `--game_data_root=/path/to/assets`.
+### First start: installing the game
 
-To create a self-contained release package (excluding game assets):
+Without an installed game, the game opens a setup screen instead (mouse, keyboard or
+controller). Choose your **Trials HD package** (the file in
+`<content folder>/0000000000000000/5841095A/000D0000/`) or any folder that contains it,
+with the built-in browser, the system file picker, or by dropping it onto the window.
+DLC track packs (*Big Pack*, *Big Thrills*) in the same folder are found too, as packages
+or extracted folders. **Install and play** extracts them into `assets/` and starts the
+game; later starts go straight to the game. The package must be the version this build
+was made from (the setup screen says so otherwise).
+
+To add DLC later, open the settings (**F1**, the controller's **Guide**, or **Back +
+Start**), go to the **Game** tab and choose **Add DLC...**; restart the game to play the
+new tracks.
+
+The same from the command line, without clicking:
+
+```sh
+./run.sh --install_game="/path/to/package-or-folder"   # game (and DLC found with it)
+./run.sh --install_dlc="/path/to/package-or-folder"    # add DLC to an installed game
+```
+
+`./run.sh` installs to the project's `assets/`; the binary on its own installs next to
+itself. Point to another location with `--game_data_root=/path/to/assets`.
+
+To create a self-contained folder of the build, e.g. to publish as a release (no game
+data; its first start shows the setup screen):
 ```sh
 tools/package.sh
 ```

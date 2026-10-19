@@ -5,7 +5,7 @@ How the game becomes a native (or browser) program, and where our code plugs in.
 ## From `default.xex` to `trials_hd`
 
 ```
-assets/default.xex ──rexglue codegen──▶ generated/default/*.cpp  (PowerPC → C++, gitignored)
+out/xex/default.xex ──rexglue codegen──▶ generated/default/*.cpp  (PowerPC → C++, gitignored)
         ▲                     ▲                    │
   user's own copy      config/codegen.toml         ▼
                        config/functions.toml   compiled with src/*.cpp, linked to
@@ -56,11 +56,12 @@ assets/default.xex ──rexglue codegen──▶ generated/default/*.cpp  (Powe
 | Phase | Hook | What we do |
 | --- | --- | --- |
 | Environment | `SetupEnvironment` (web only) | mount OPFS / finish first import |
-| | `OnConfigurePaths` | find `assets/` (next to exe, then cwd); keep saves, cache and config next to the exe; copy legacy `~/.local/share/trials_hd` saves |
+| | `OnConfigurePaths` | find an installed `assets/` (next to exe, then cwd); keep saves, cache and config next to the exe; copy legacy `~/.local/share/trials_hd` saves |
 | | `OnPostInitLogging` | apply the package license (`package_license.cpp`) |
 | Presentation | `OnPreSetup` | pick the GPU plugin (default `xenos`; if `webgpu` can't start, Linux re-execs itself with `--gpu_plugin=xenos`), fallback audio, startup graphics settings; web: register the static plugins |
 | | `OnConfigureStyle` | ImGui theme (`ui_theme.cpp`) |
 | | `OnCreateDialogs` | F1 settings, F7 achievements, F2 performance overlay, controller shortcut watcher thread |
+| Paths | `OnFinalizePaths` | window and ImGui up, no runtime yet: without an installed game (or with `--install_game`/`--install_dlc`) show the setup screen (`src/installer/`) and return `nullopt`; when it has installed, it applies the license and calls `resume(paths)` (deferred to the next UI tick), which constructs the runtime and launches |
 | Runtime | `OnPostSetup` | Trials-tuned cvar defaults (no memexport readback, small resolve readback, page state, Vulkan submit batching), keyboard defaults, achievements, input gate while menus are open, virtual pad (tests) |
 | Exit | `OnShutdown` | stop the watcher thread |
 

@@ -66,6 +66,10 @@ set(TRIALSHD_SOURCES
     src/package_license.cpp
     src/virtual_pad.cpp
     src/exit_button.cpp
+    src/gamepad_nav.cpp
+    src/installer/stfs_package.cpp
+    src/installer/game_installer.cpp
+    src/installer/installer_dialog.cpp
 )
 
 if(WIN32)
@@ -101,6 +105,21 @@ if(TRIALSHD_WEBGPU)
 endif()
 
 rexglue_setup_target(trials_hd GPU_PLUGINS ${TRIALSHD_GPU_PLUGINS})
+
+# The game code is generated from the player's default.xex (build.sh extracts
+# it from their package to out/xex/). Its SHA-1 goes into the binary so the
+# setup screen only installs the version the code was generated from.
+set(TRIALSHD_BUILD_XEX "${CMAKE_CURRENT_SOURCE_DIR}/out/xex/default.xex")
+set(TRIALSHD_BUILD_XEX_SHA1 "")
+if(EXISTS "${TRIALSHD_BUILD_XEX}")
+    file(SHA1 "${TRIALSHD_BUILD_XEX}" TRIALSHD_BUILD_XEX_SHA1)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${TRIALSHD_BUILD_XEX}")
+endif()
+configure_file(cmake/trials_hd_build_info.h.in
+               "${CMAKE_CURRENT_BINARY_DIR}/build_info/trials_hd_build_info.h" @ONLY)
+target_include_directories(trials_hd PRIVATE
+    "${CMAKE_CURRENT_BINARY_DIR}/build_info"
+    "${REXSDK_DIR}/thirdparty/crypto")  # TinySHA1.hpp
 
 # A fresh checkout has no generated code when CMake configures, so there is
 # nothing to compile the game from yet (CMake only lists generated sources that
@@ -178,6 +197,18 @@ if(TRIALSHD_BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests")
         add_test(NAME tracy_default COMMAND ${Python3_EXECUTABLE}
                  ${CMAKE_CURRENT_SOURCE_DIR}/tests/tracy_default_test.py ${CMAKE_COMMAND})
     endif()
+    # The game installer on synthetic packages, against tools/add_dlc.py. Its
+    # own build_info header stands in for the build's default.xex hash.
+    add_executable(installer_cli tests/installer/installer_cli.cpp
+                   src/installer/game_installer.cpp src/installer/stfs_package.cpp)
+    target_include_directories(installer_cli PRIVATE src tests/installer
+                               "${REXSDK_DIR}/thirdparty/crypto")
+    target_link_libraries(installer_cli PRIVATE rex::runtime)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME installer COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/tests/installer/test_installer.py
+                 $<TARGET_FILE:installer_cli>)
+    endif()
 endif()
 
 # Development tool: dumps the loaded XEX image for writing codegen overrides.
@@ -186,13 +217,12 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/xex_dump")
     target_link_libraries(xex_dump PRIVATE rex::runtime)
 endif()
 
-# Development tool: Xbox 360 STFS package extractor (W-S13).
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/stfs_extract")
-    add_library(stfs_extract_lib STATIC tools/stfs_extract/stfs_extract.cpp)
-    target_include_directories(stfs_extract_lib PUBLIC tools/stfs_extract)
-    add_executable(stfs_extract EXCLUDE_FROM_ALL tools/stfs_extract/main.cpp)
-    target_link_libraries(stfs_extract PRIVATE stfs_extract_lib)
-endif()
+# The game installer's STFS reader (src/installer/stfs_package.cpp) as a CLI:
+# build.sh takes default.xex out of the player's package with it before codegen
+# (it needs no generated code or SDK). Also lists and extracts packages (W-S13).
+add_executable(stfs_extract EXCLUDE_FROM_ALL tools/stfs_extract/main.cpp
+               src/installer/stfs_package.cpp)
+target_include_directories(stfs_extract PRIVATE src)
 
 # Standalone check of the WebGPU stack: window, surface, features/limits, and CPU benchmark.
 if(TRIALSHD_WEBGPU)

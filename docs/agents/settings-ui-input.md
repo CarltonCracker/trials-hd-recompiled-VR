@@ -16,7 +16,8 @@ kRequiresRestart)`. Cvars load from `<exe dir>/trials_hd.toml` and from the comm
 
 Cvars defined in this repo: `display_width`, `display_height`, `host_vsync`
 (`graphics_settings.cpp`); `fps_unlock`, `log_simulation_rate` (`fps_unlock.cpp`);
-`show_performance_overlay` (`performance_overlay.cpp`); `web_assets_url` (web); the
+`show_performance_overlay` (`performance_overlay.cpp`); `install_game`, `install_dlc`
+(`src/installer/installer_dialog.cpp`, `game-data.md`); `web_assets_url` (web); the
 `webgpu_*` cvars (`src/gpu_webgpu/`, `renderer-webgpu.md`). Important SDK cvars:
 `gpu_plugin`, `present_fps_limit`, `draw_resolution_scale_x/_y`, `fullscreen`, `vsync`,
 `mnk_mode`, `keybind_*`, `vulkan_device`, `log_guest_fps`, `game_data_root`,
@@ -33,6 +34,16 @@ Start** (a watcher thread in `TrialsHdApp::WatchSettingsCombo` polls controllers
   mode, resolution, render scale (1x–3x of 1280x720), unlock FPS (restart), FPS limit
   (Unlimited/240/165/144/120/90/60/30), VSync (restart; also switches the present-mode
   cvars), performance overlay.
+- **Game** (native, once the game runs): installed DLC (`installer::InstalledDlcNames`,
+  from the content headers) and **Add DLC...**, which closes the menu and opens the setup
+  screen over the game in DLC-only mode (`InstallerDialog::Options::in_game`,
+  `TrialsHdApp::OpenDlcInstaller`). The game's input is gated while it is open
+  (`installer_open_`); the game sees new DLC after a restart, which its done screen says.
+
+Controller navigation (d-pad/left stick, A, B, LB/RB) is `GamepadNav`
+(`src/gamepad_nav.{h,cpp}`), shared with the setup screen: it reads every controller
+(SDL, or the web page's snapshots) and feeds ImGui gamepad keys; `Pressed(kBack)` closes
+the menu. The menu stays closed while the setup screen is up.
 
 **Save** writes `trials_hd.toml`. Values needing a restart show a note
 (`g_startup_*` keep what's in effect). `ApplyStartupGraphicsSettings` runs in
@@ -80,4 +91,7 @@ With `TRIALS_HD_VIRTUAL_PAD=<fifo>`, an SDL virtual gamepad reads commands from 
 `btn <a|b|x|y|back|guide|start|ls|rs|lb|rb|up|down|left|right> <0|1>`,
 `axis <lx|ly|rx|ry|lt|rt> <value>`, `capture <path>` (guest frame as PPM, works with a
 headless surface), `set <cvar> <value>`. It goes through the real SDL controller path.
-`tools/headless_run.sh` + `tools/xsend.py` drive it (`testing.md`).
+`tools/headless_run.sh` + `tools/xsend.py` drive it (`testing.md`). It starts in
+`OnPostSetup`, once the runtime's input system listens for new controllers. When the
+first-start setup screen shows, it starts there instead so scripts can drive that screen;
+the game then doesn't get pad input after the install (attached before the input system).

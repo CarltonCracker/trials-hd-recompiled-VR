@@ -1,4 +1,6 @@
-#include "stfs_extract.h"
+// trials_hd - reader for Xbox 360 STFS packages (see stfs_package.h).
+
+#include "stfs_package.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -94,6 +96,21 @@ void StfsPackage::Close() {
   entries_.clear();
   licenses_.clear();
   file_size_ = 0;
+}
+
+uint64_t StfsPackage::total_file_bytes() const {
+  uint64_t total = 0;
+  for (const auto& entry : entries_) {
+    if (!entry.is_dir) total += entry.size;
+  }
+  return total;
+}
+
+const StfsEntry* StfsPackage::FindEntry(std::string_view path) const {
+  for (const auto& entry : entries_) {
+    if (entry.path == path) return &entry;
+  }
+  return nullptr;
 }
 
 uint32_t StfsPackage::license_mask() const {
@@ -359,9 +376,79 @@ bool StfsPackage::ReadFile(const StfsEntry& entry, std::vector<uint8_t>& out_dat
   return true;
 }
 
+bool StfsPackage::ExtractEntry(const StfsEntry& entry, const std::filesystem::path& destination,
+                               const std::function<bool(uint64_t)>& on_bytes,
+                               std::string* error) {
+  if (entry.size > file_size_) return Fail(error, "File size exceeds package size");
+  std::string temporary = destination.string() + ".tmp.XXXXXX";
+  int fd = mkstemp(temporary.data());
+  if (fd < 0) return Fail(error, "Failed to create temporary file for " + destination.string());
+  std::FILE* file = fdopen(fd, "wb");
+  if (!file) {
+    close(fd);
+    std::error_code ignored;
+    std::filesystem::remove(temporary, ignored);
+    return Fail(error, "Failed to write " + destination.string());
+  }
+  // Blocks are read one at a time (the chain can jump) but written in 1 MiB
+  // batches, which is also how often progress is reported.
+  constexpr size_t kBatch = 256 * kBlockSize;
+  std::vector<uint8_t> batch(kBatch);
+  size_t batched = 0;
+  uint32_t remaining = entry.size;
+  uint32_t blk = entry.start_block;
+  std::unordered_set<uint32_t> seen;
+  bool ok = true;
+  std::string message;
+  auto flush = [&] {
+    if (batched && std::fwrite(batch.data(), 1, batched, file) != batched) {
+      message = "Failed to write " + destination.string();
+      return false;
+    }
+    batched = 0;
+    return true;
+  };
+  while (ok && remaining > 0) {
+    uint32_t n = std::min<uint32_t>(kBlockSize, remaining);
+    if (blk >= total_blocks_ || !seen.insert(blk).second ||
+        !ReadAt(BlockToOffset(blk), batch.data() + batched, n)) {
+      message = "Invalid or truncated data chain for " + entry.path;
+      ok = false;
+      break;
+    }
+    batched += n;
+    remaining -= n;
+    if (!NextBlock(blk, &blk) || seen.contains(blk)) {
+      message = "Invalid data chain for " + entry.path;
+      ok = false;
+      break;
+    }
+    if (batched == kBatch || remaining == 0) {
+      const uint64_t written = entry.size - remaining;
+      ok = flush();
+      if (ok && on_bytes && !on_bytes(written)) {
+        message = "Cancelled";
+        ok = false;
+      }
+    }
+  }
+  if (std::fclose(file) != 0 && ok) {
+    message = "Failed to write " + destination.string();
+    ok = false;
+  }
+  std::error_code ec;
+  if (ok) std::filesystem::rename(temporary, destination, ec);
+  if (!ok || ec) {
+    std::error_code ignored;
+    std::filesystem::remove(temporary, ignored);
+    return Fail(error, ok ? "Failed to write " + destination.string() : message);
+  }
+  return true;
+}
+
 bool StfsPackage::ExtractAll(const std::filesystem::path& out_dir,
                              bool write_license,
-                             const std::function<void(const StfsEntry&, size_t, size_t)>& progress,
+                             const ExtractProgress& progress,
                              std::string* error) {
   std::error_code ec;
   std::filesystem::create_directories(out_dir, ec);
@@ -385,23 +472,24 @@ bool StfsPackage::ExtractAll(const std::filesystem::path& out_dir,
   bool license = write_license && content_type_ == 0x000D0000;
   if (license && !safe_path("package_license.toml")) return Fail(error, "Unsafe license path");
 
-  std::vector<uint8_t> buffer;
-  for (size_t i = 0; i < entries_.size(); ++i) {
-    const auto& entry = entries_[i];
-    if (progress) progress(entry, i, entries_.size());
+  const uint64_t bytes_total = total_file_bytes();
+  uint64_t bytes_done = 0;
+  for (const auto& entry : entries_) {
+    if (progress && !progress(entry, bytes_done, bytes_total)) return Fail(error, "Cancelled");
     auto destination = root / entry.path;
     std::filesystem::create_directories(entry.is_dir ? destination : destination.parent_path(), ec);
     if (ec) return Fail(error, "Failed to create directory: " + ec.message());
-    if (!entry.is_dir &&
-        (!ReadFile(entry, buffer, error) ||
-         !WriteFile(destination, reinterpret_cast<const char*>(buffer.data()), buffer.size(), error))) {
-      return false;
-    }
+    if (entry.is_dir) continue;
+    auto on_bytes = [&](uint64_t written) {
+      return !progress || progress(entry, bytes_done + written, bytes_total);
+    };
+    if (!ExtractEntry(entry, destination, on_bytes, error)) return false;
+    bytes_done += entry.size;
   }
 
   if (license) {
     std::ostringstream text;
-    text << "# Written by tools/stfs_extract.py from the package's license block.\n";
+    text << "# Written from the package's license block when the game was installed.\n";
     text << "license_mask = 0x" << std::uppercase << std::hex << license_mask() << "\n";
     auto data = text.str();
     return WriteFile(root / "package_license.toml", data.data(), data.size(), error);

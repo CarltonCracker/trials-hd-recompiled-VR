@@ -456,10 +456,11 @@ add_executable(trials_hd
     src/offline_warning.cpp
     src/package_license.cpp
     src/exit_button.cpp
+    src/gamepad_nav.cpp
     src/web/null_graphics_system.cpp
     src/web/web_files.cpp
     src/web/web_input.cpp
-    tools/stfs_extract/stfs_extract.cpp
+    src/installer/stfs_package.cpp
     $<TARGET_OBJECTS:trials_hd_web_sdk>
     $<TARGET_OBJECTS:trials_hd_web_imgui>
     $<TARGET_OBJECTS:trials_hd_web_recomp>

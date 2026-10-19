@@ -64,7 +64,7 @@ and `tests/check_render_pose_log.py` check the logs of a run.
 ## Reverse-engineering workflow (tools are on `dev`)
 
 1. **Dump the image:** `cmake --build <build> --target xex_dump`, then
-   `out/build/<preset>/xex_dump assets default.xex out/xex_dump` → `image.bin`,
+   `out/build/<preset>/xex_dump out/xex default.xex out/xex_dump` → `image.bin`,
    `sections.txt`. Keep dumps in `out/` (gitignored, derived from game files).
 2. **Disassemble:** `tools/disasm.py out/xex_dump 0x8212BC68 [before] [after]` (needs
    `capstone`; VMX128 prints as `.long`). The generated C++ in

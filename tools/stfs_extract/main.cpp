@@ -1,5 +1,10 @@
-#include "stfs_extract.h"
+// trials_hd - command-line front end of the game's STFS reader
+// (src/installer/stfs_package.h). build.sh uses it to take default.xex out of
+// the player's package for codegen; it also lists and extracts whole packages.
 
+#include "installer/stfs_package.h"
+
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <string>
@@ -7,16 +12,20 @@
 int main(int argc, char* argv[]) {
   if (argc < 3) {
     std::cerr << "Extract files from an Xbox 360 STFS (LIVE/PIRS/CON) package.\n\n"
-              << "Usage: stfs_extract <package> <out_dir> [--list]\n";
+              << "Usage: stfs_extract <package> <out_dir> [--list] [--only <path in package>]\n";
     return 1;
   }
 
   std::string pkg_path = argv[1];
   std::string out_dir = argv[2];
   bool list_only = false;
+  std::string only;
   for (int i = 3; i < argc; ++i) {
-    if (std::string(argv[i]) == "--list") {
+    std::string arg = argv[i];
+    if (arg == "--list") {
       list_only = true;
+    } else if (arg == "--only" && i + 1 < argc) {
+      only = argv[++i];
     }
   }
 
@@ -25,6 +34,34 @@ int main(int argc, char* argv[]) {
   if (!pkg.Open(pkg_path, &error)) {
     std::cerr << "Error: " << error << "\n";
     return 1;
+  }
+
+  if (!only.empty()) {
+    const auto* entry = pkg.FindEntry(only);
+    std::vector<uint8_t> data;
+    if (!entry || entry->is_dir) {
+      std::cerr << "Error: " << only << " is not in the package\n";
+      return 1;
+    }
+    if (!pkg.ReadFile(*entry, data, &error)) {
+      std::cerr << "Error: " << error << "\n";
+      return 1;
+    }
+    std::error_code ec;
+    const auto destination = std::filesystem::path(out_dir) / entry->name;
+    std::filesystem::create_directories(out_dir, ec);
+    const auto temporary = destination.string() + ".tmp";
+    std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
+    out.write(reinterpret_cast<const char*>(data.data()), std::streamsize(data.size()));
+    out.close();
+    if (out) std::filesystem::rename(temporary, destination, ec);
+    if (!out || ec) {
+      std::filesystem::remove(temporary, ec);
+      std::cerr << "Error: failed to write " << destination.string() << "\n";
+      return 1;
+    }
+    std::cout << destination.string() << "\n";
+    return 0;
   }
 
   std::cout << "title " << std::uppercase << std::hex << std::setw(8) << std::setfill('0')

@@ -2,13 +2,14 @@
 
 ## `build.sh` (the normal way)
 
-Detects the OS/arch, checks or extracts `assets/`, configures the matching preset and
-builds `trials_hd`.
+Detects the OS/arch, makes sure `out/xex/default.xex` (the codegen input) exists,
+configures the matching preset and builds `trials_hd`. It does not install the game data:
+the game's first start does (`game-data.md`).
 
 | Option | Effect |
 | --- | --- |
-| `--game, -g PATH` | Extract the base-game folder/STFS package into `assets/` first (once) |
-| `--force-extract` | Re-extract even if `assets/` verifies |
+| `--game, -g PATH` | Take `default.xex` out of the base-game folder/STFS package (first build) |
+| `--force-extract` | Take it out again even if `out/xex/default.xex` exists |
 | `--release` / `--debug` / `--relwithdebinfo` | Configuration (default RelWithDebInfo) |
 | `-j N`, `--jobs N` | Parallel jobs (default: all cores) |
 | `--clean` / `--clean-all` | Remove the preset's build dir / all of `out/build` |
@@ -17,8 +18,14 @@ builds `trials_hd`.
 | `--web` | Browser build, preset `web-wasm32-release`; needs `~/emsdk` (or `$EMSDK`) and a native build first |
 | `-D...` | Passed to CMake configure (forces a reconfigure) |
 
-Assets verify when `assets/default.xex`, `assets/data/data.pak` and the other expected files
-exist. Without them, `build.sh` asks for `--game`.
+**The xex:** `trials_hd_manifest.toml` points codegen at `out/xex/default.xex`. If it is
+missing, `build.sh` copies `assets/default.xex` (trees from before the setup screen) or,
+with `--game`, finds the package (inline Python `locate_package`), configures, builds the
+small `stfs_extract` target and runs `stfs_extract <package> out/xex --only default.xex`.
+After a new xex it reconfigures: `CMakeLists.txt` records the xex's SHA-1 at configure
+time (`file(SHA1)` → `build_info/trials_hd_build_info.h`, `TRIALSHD_BUILD_XEX_SHA1`), and
+the setup screen only installs a package with that `default.xex`. Without `--game` and no
+xex, `build.sh` stops and asks for it.
 
 **First build:** on a fresh tree the configure writes `trials_hd_codegen_ready.stamp` in
 the build dir (no generated sources yet). `build.sh` then builds `trials_hd_codegen`,
@@ -30,7 +37,8 @@ With plain CMake, run `cmake --build` twice instead.
 ## `run.sh`
 
 `./run.sh [--release|--debug|--relwithdebinfo] [--bin PATH] [game args…]` runs
-`out/build/<preset>/trials_hd` with `assets/`. `--web [--port N] [--no-assets]` serves the
+`out/build/<preset>/trials_hd` with `--game_data_root=<repo>/assets` (unless given), so the
+setup screen installs there rather than into the build dir (`--clean` would delete it). `--web [--port N] [--no-assets]` serves the
 browser build with `tools/web/serve.py` (default `127.0.0.1:8091`); `--name=value` args become
 page flags.
 
@@ -60,7 +68,8 @@ page flags.
 | `trials_hd_codegen` | Run codegen only |
 | `trials_hd_stage_libs` | Build `rexruntime` and the GPU plugins and copy them next to `trials_hd`. **Use this after SDK/renderer changes**; building `rexgpu-xenos` alone leaves the old copy in place |
 | `webgpu_smoke` | Standalone WebGPU check: window, surface, limits, CPU benchmark |
-| `stfs_extract` | Native STFS extractor CLI (`EXCLUDE_FROM_ALL`) |
+| `stfs_extract` | The installer's STFS reader as a CLI (`EXCLUDE_FROM_ALL`; `build.sh` uses `--only default.xex`) |
+| `installer_cli` | Test driver for the installer (`tests/installer/`, dev) |
 | `xex_dump` | Dumps the loaded XEX image for reverse engineering (dev; `EXCLUDE_FROM_ALL`) |
 | `xenos2wgsl` | Offline shader translator check (dev; built when `tools/xenos2wgsl` exists) |
 
@@ -78,8 +87,9 @@ targets need `find_package(Threads)` first; the target is `dawn::webgpu_dawn`.
 - At runtime the binary's folder also receives `trials_hd.toml`, saves (`5841095A/`),
   `achievements/`, `cache/`, `logs/` (`game-data.md`).
 - `tools/package.sh [preset] [out]` assembles a runnable folder (default
-  `dist/trials_hd-linux-x86_64`, from `linux-amd64-release`) with `stfs_extract.py` and a
-  README; no game files.
+  `dist/trials_hd-linux-x86_64`, from `linux-amd64-release`) with a README; no game files.
+  Its first start shows the setup screen and installs to `<folder>/assets`. The folder
+  may be published (e.g. as a release); never with an `assets/` in it (README notice).
 - CPU targets (`CMakePresets.json`): `-march=x86-64-v2` (SSE4.2, matches `build.sh`'s
   message; the SDK adds `-msse4.1` to the generated code anyway) and `-mcpu=apple-m1` (all
   Apple Silicon). They were `x86-64-v3` / `apple-m3` until 2026-10-19, which needed AVX2 /

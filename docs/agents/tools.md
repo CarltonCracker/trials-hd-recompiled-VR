@@ -7,11 +7,10 @@ Each script's header comment has its full usage. **(main)** marks tools that are
 
 | Tool | What it does |
 | --- | --- |
-| `build.sh`, `run.sh`, `add_dlc.sh` (repo root) **(main)** | Build, run, install DLC (`build.md`, `game-data.md`) |
-| `tools/stfs_extract.py` **(main)** | Extract an STFS package; writes `package_license.toml` for the base game |
-| `tools/stfs_extract/` **(main)** | The same extractor in C++ (`stfs_extract` target, web build) + `test_stfs_extract.py` (dev) |
-| `tools/add_dlc.py` **(main)** | Install DLC packages/folders into `assets/content/…` |
-| `tools/package.sh [preset] [out]` **(main)** | Runnable release folder in `dist/` (no game files) |
+| `build.sh`, `run.sh` (repo root) **(main)** | Build, run (`build.md`); the game installs its own data (`game-data.md`) |
+| `tools/stfs_extract/main.cpp` **(main)** | CLI over the game's STFS reader (`stfs_extract` target): `build.sh` takes `default.xex` out with `--only`; lists/extracts packages. `test_stfs_extract.py` (dev) checks it |
+| `tools/package.sh [preset] [out]` **(main)** | Runnable release folder in `dist/` (no game files; first start shows the setup screen) |
+| `add_dlc.sh`, `tools/add_dlc.py`, `tools/stfs_extract.py` | The Python extract/DLC tools the setup screen replaced; `tests/installer` compares against `add_dlc.py` |
 | `tools/build_dawn.sh [commit]` **(main)** | Build pinned Dawn into `out/dawn-install` (run by the first configure) |
 | `tools/gen_trace_shims.py` **(main)** | Call-counting wrappers for `-DTRIALSHD_CALL_TRACE=ON` |
 | `tools/webgpu_smoke/` **(main)** | WebGPU window/surface/limits check and CPU benchmark |
@@ -24,7 +23,7 @@ Each script's header comment has its full usage. **(main)** marks tools that are
 
 | Tool | What it does |
 | --- | --- |
-| `tools/headless_run.sh [s] [args]` | Run the game under Xvfb with `INPUT=` script; output in `out/run/` |
+| `tools/headless_run.sh [s] [args]` | Run the game under Xvfb with `INPUT=` script; output in `out/run/`. `GAME_DATA_ROOT=` (empty) runs without the repo's `assets/` (setup screen) |
 | `tools/xsend.py` | Plays a `tests/headless/*.txt` script (X11 XTEST keys + virtual pad FIFO) |
 | `tools/xwd_to_png.py` | Xvfb framebuffer (XWD) → PNG |
 | `tools/compare_captures.py` | PSNR/SSIM between captures |
