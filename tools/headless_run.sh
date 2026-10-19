@@ -3,6 +3,7 @@
 # periodic screenshots of the virtual display.
 #
 # Usage: [LOG_LEVEL=trace] [INPUT=script] [GAME_DATA_ROOT=dir] tools/headless_run.sh [seconds=60] [extra args...]
+# HEADLESS_WIDTH / HEADLESS_HEIGHT override the default 1280x720 capture size.
 # Output goes to out/run/: trials_hd.log and shot_NNN.png (gitignored).
 # GAME_DATA_ROOT defaults to the repo's assets/; set it empty to let the game
 # find (or, on the setup screen, install) its own.
@@ -23,7 +24,7 @@ display=":$((90 + RANDOM % 100))"
 pad_fifo="$out/pad.fifo"
 rm -f "$pad_fifo" && mkfifo "$pad_fifo"
 export TRIALS_HD_VIRTUAL_PAD="$pad_fifo"
-Xvfb "$display" -screen 0 1280x720x24 -fbdir "$out" -nolisten tcp &
+Xvfb "$display" -screen 0 "${HEADLESS_WIDTH:-1280}x${HEADLESS_HEIGHT:-720}x24" -fbdir "$out" -nolisten tcp &
 xvfb_pid=$!
 game_pid=""
 input_pid=""
@@ -47,7 +48,8 @@ data_args=()
 if [[ -n "$data_root" ]]; then
   data_args=(--game_data_root="$data_root")
 fi
-DISPLAY="$display" "$exe" ${data_args[@]+"${data_args[@]}"} --log_level="${LOG_LEVEL:-debug}" \
+SDL_VIDEODRIVER=x11 SDL_AUDIODRIVER=dummy DISPLAY="$display" "$exe" \
+  ${data_args[@]+"${data_args[@]}"} --log_level="${LOG_LEVEL:-debug}" \
   --log_file="$out/trials_hd.log" "$@" > "$out/stdout.log" 2>&1 &
 game_pid=$!
 

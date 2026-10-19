@@ -1,0 +1,21 @@
+bugs:
+  - bug_id: BUG-001
+    status: fixed
+    date: 2026-10-18
+    severity: medium
+    priority: medium
+    scope: ui
+    summary: Blurry ImGui text at 1440p from stretching a fixed font atlas
+    file: specs/bugs/BUG-001-imgui-sharpness.md
+    approach: Dynamic ImGui atlas textures with framebuffer DPI density
+    risk_level: medium
+    commit_message: "fix(ui): render crisp fonts and improve menu readability"
+    files_changed:
+      - patches/rexglue-sdk/trials-hd.patch
+      - tests/imgui_sharpness_test.cpp
+      - CMakeLists.txt
+      - tools/headless_run.sh
+      - tools/xsend.py
+      - tests/headless/ui_sharpness.txt
+      - docs/agents/settings-ui-input.md
+      - docs/agents/testing.md

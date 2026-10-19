@@ -91,11 +91,16 @@ void ApplyUiTheme(ImGuiStyle& style, rex::ui::Style& ui_style) {
   c[ImGuiCol_NavCursor] = Rgb(kGold);
   c[ImGuiCol_NavWindowingHighlight] = Rgb(kCream, 0.7f);
   c[ImGuiCol_NavWindowingDimBg] = Rgb(kInk, 0.2f);
-  c[ImGuiCol_ModalWindowDimBg] = Rgb(kInk, 0.6f);
+  // The shared menu scrim also covers native ImGui modals; don't dim twice.
+  c[ImGuiCol_ModalWindowDimBg] = Rgb(kInk, 0.0f);
+  ui_style.menu_dim_color = ImVec4(0, 0, 0, 0.60f);
+  ui_style.menu_scale = 1.6f;
+  ui_style.menu_reference_height = 720.0f;
 
   // The achievements list and unlock toast follow the same palette; the
   // console, debug and settings badge colors are status colors, left as is.
   auto& a = ui_style.achievements;
+  a.window_size = ImVec2(520.0f, 560.0f);
   a.unlocked_title = Rgb(kCream);
   a.unlocked_desc = Rgb(kTan);
   a.locked_title = Rgb(kMuted);

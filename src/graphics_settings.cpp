@@ -566,7 +566,7 @@ void GraphicsSettingsDialog::OnDraw(ImGuiIO& io) {
   const ImVec2 center(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f);
   ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
   // Sized for reading from a couch: scale with the output height.
-  const float ui_scale = std::max(1.0f, io.DisplaySize.y / 720.0f) * 1.6f;
+  const float ui_scale = imgui_drawer()->style().MenuScale(io.DisplaySize.y);
   ImGui::SetNextWindowSize(ImVec2(520 * ui_scale, 0), ImGuiCond_Always);
   // Taller than small screens with the key list: scroll instead.
   ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0),

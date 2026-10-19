@@ -13,6 +13,7 @@ ctest --test-dir out/build/linux-amd64-relwithdebinfo --output-on-failure
 | --- | --- |
 | `frame_clock` (`tests/frame_clock_test.cpp`) | Fixed 16,666 µs tick, 5-step hitch limit, interpolation fraction |
 | `render_pose` (`tests/render_pose_test.cpp`) | Pose interpolation used by the FPS unlock |
+| `imgui_sharpness` | Requested font sizes, DPI density, atlas lifetime/retry, menu dimming and achievements sizing at 720p/1440p (no GPU/window server) |
 | `vk_gpu_profile` | Bookkeeping of the Vulkan timestamp profiler (no device) |
 | `fps_log`, `render_pose_log` | The log checkers `tests/check_fps_log.py` / `check_render_pose_log.py` against fixtures |
 | `tracy_default` | Tracy is off by default in optimized builds and can still be turned on |
@@ -44,7 +45,8 @@ INPUT=tests/headless/keyboard_ride.txt tools/headless_run.sh 75 \
     --vulkan_device=1 --vulkan_headless_surface=true
 ```
 
-`tools/headless_run.sh [seconds] [game args…]` starts Xvfb, runs the game with logs and
+`tools/headless_run.sh [seconds] [game args…]` starts Xvfb, forces SDL X11 and silent
+audio (including from a Wayland desktop), runs the game with logs and
 periodic screenshots in `out/run/` (`trials_hd.log`, `shot_NNN.png`), and plays `INPUT`
 with `tools/xsend.py`. Renderer flags pick the renderer (`--webgpu_*` → WebGPU). On the
 original server `--vulkan_device=1` is the RX 6600. An intermittent `malloc_consolidate()`
@@ -75,6 +77,7 @@ down <keysym>              up <keysym>                focus <window title>
 pad <button> <0|1>         axis <axis> <value>        (virtual pad, src/virtual_pad.h)
 capture <name>             the game's own frame → <out>/<name>.png (works headless)
 shot <name>                Xvfb framebuffer → <out>/<name>.png
+move <title> <x> <y>        place the window inside the virtual display
 set <cvar> <value>         change a cvar at runtime
 ```
 
@@ -83,6 +86,27 @@ Scripts: menu walks (`main_menu_nav`, `keyboard_menu_nav`, `credits`), rides
 `keyboard_ride`, `controller_ride`), settings (`settings_menu`, `controller_settings`,
 `settings_mouse`), `exit_button_test`, and `bench_fps` (the benchmark ride). The browser
 harness `tools/web/cdp.py --script` plays the same files.
+
+### UI sharpness screenshots
+
+Run with a 2560x1440 virtual display and matching game window:
+
+```sh
+HEADLESS_WIDTH=2560 HEADLESS_HEIGHT=1440 INPUT=tests/headless/ui_sharpness.txt \
+    tools/headless_run.sh 45 --display_width=2560 --display_height=1440 \
+    --fullscreen=false --show_performance_overlay=true --vulkan_device=1
+```
+
+Select the software Vulkan device if hardware Vulkan cannot present to Xvfb
+(no DRI3). Its index depends on the machine; it was device 1 for the 2026-10-18
+verification. For 720p, change both display and window dimensions to 1280x720.
+
+This captures the performance overlay alone, Controls, Graphics, achievements,
+two menus together, and the game after closing them. The script moves the resized
+window to (0,0) and waits for repaint so Xvfb's lack of a window manager does not
+crop it or leave stale pixels. Key transitions include delays for software
+rendering. Use `shot`, **not** `capture`: guest captures omit the host ImGui pass.
+Keep screenshots in gitignored output directories; never commit them.
 
 ## Images and FPS
 
