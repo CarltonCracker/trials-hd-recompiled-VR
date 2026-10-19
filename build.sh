@@ -418,8 +418,10 @@ if [[ ! -f "$BUILD_DIR/build.ninja" ]] || [[ ${#CMAKE_EXTRA_ARGS[@]} -gt 0 ]]; t
   "${CONFIGURE[@]}"
 fi
 
-# An explicit macOS game target bypasses the first-codegen ALL target.
-if [[ "$PLATFORM" == "mac" && $WEB -eq 0 && "$TARGET" == "trials_hd" && -f "$BUILD_DIR/trials_hd_codegen_ready.stamp" ]]; then
+# A fresh checkout configures before any game code is generated (see
+# CMakeLists.txt), and an explicit game target bypasses the first-codegen ALL
+# target: generate the code and reconfigure before building the game.
+if [[ $WEB -eq 0 && "$TARGET" == "trials_hd" && -f "$BUILD_DIR/trials_hd_codegen_ready.stamp" ]]; then
   echo "==> Preparing generated game sources..."
   cmake --build "$BUILD_DIR" -j"$JOBS" --target trials_hd_codegen
   cmake -S "$ROOT_DIR" -B "$BUILD_DIR"
@@ -447,16 +449,6 @@ if [[ $WEB -eq 1 ]]; then
     echo "============================================================"
   fi
   exit 0
-fi
-
-# Handle first-time two-pass codegen requirement
-# When codegen runs for the first time, trials_hd is excluded from ALL until the
-# generated sources are written and CMake is re-run.
-if [[ "$TARGET" == "trials_hd" ]] && [[ ! -f "$BUILD_DIR/trials_hd" ]]; then
-  if [[ -f "$BUILD_DIR/trials_hd_codegen_ready.stamp" ]]; then
-    echo "==> Initial codegen completed. Running build pass to compile generated sources..."
-    "${BUILD_CMD[@]}"
-  fi
 fi
 
 if [[ -f "$BUILD_DIR/trials_hd" ]]; then

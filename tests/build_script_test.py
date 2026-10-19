@@ -96,10 +96,10 @@ class BuildScriptTest(unittest.TestCase):
             calls = [[arg.replace(str(root), '<root>') for arg in call] for call in calls]
             return result, calls, (build / 'trials_hd_codegen_ready.stamp').exists(), preset
 
-    def test_macos_first_build(self):
-        for arch in ('arm64', 'x86_64'):
-            with self.subTest(arch=arch):
-                result, calls, stamp, preset = self.run_build(arch=arch)
+    def test_first_build(self):
+        for system, arch in (('Darwin', 'arm64'), ('Darwin', 'x86_64'), ('Linux', 'x86_64')):
+            with self.subTest(system=system, arch=arch):
+                result, calls, stamp, preset = self.run_build(system=system, arch=arch)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 build = f'<root>/out/build/{preset}'
                 self.assertEqual(calls, [
@@ -110,11 +110,14 @@ class BuildScriptTest(unittest.TestCase):
                 ])
                 self.assertFalse(stamp)
 
-    def test_macos_interrupted_first_build(self):
-        result, calls, stamp, _ = self.run_build(configured=True, stale_stamp=True)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(len(calls), 3)
-        self.assertFalse(stamp)
+    def test_interrupted_first_build(self):
+        for system, arch in (('Darwin', 'arm64'), ('Linux', 'x86_64')):
+            with self.subTest(system=system):
+                result, calls, stamp, _ = self.run_build(
+                    system=system, arch=arch, configured=True, stale_stamp=True)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(len(calls), 3)
+                self.assertFalse(stamp)
 
     def test_macos_flags_survive_reconfigure(self):
         result, calls, _, _ = self.run_build(extra=('--no-webgpu', '-DREXGLUE_ENABLE_TRACY=ON'))
@@ -143,7 +146,7 @@ class BuildScriptTest(unittest.TestCase):
         ])
         self.assertTrue(stamp)
 
-    def test_linux_configure_with_flags_is_unchanged(self):
+    def test_linux_configure_with_flags(self):
         result, calls, _, preset = self.run_build(
             system='Linux', arch='x86_64', ready=True, extra=('-DTEST=ON',))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -152,12 +155,11 @@ class BuildScriptTest(unittest.TestCase):
             ['--build', f'<root>/out/build/{preset}', '-j4', '--target', 'trials_hd'],
         ])
 
-    def test_incremental_build_and_linux_flow_unchanged(self):
+    def test_incremental_build(self):
         for system, arch in (('Darwin', 'arm64'), ('Linux', 'x86_64')):
             with self.subTest(system=system):
                 result, calls, _, preset = self.run_build(
-                    system=system, arch=arch, configured=True, ready=True,
-                    stale_stamp=system == 'Linux')
+                    system=system, arch=arch, configured=True, ready=True)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertEqual(calls, [
                     ['--build', f'<root>/out/build/{preset}', '-j4', '--target', 'trials_hd']])
