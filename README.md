@@ -7,7 +7,7 @@ A static recompilation of **Trials HD** (Xbox 360 / XBLA, title ID `5841095A`) f
 
 ReXGlue translates the game's PowerPC executable into C++ ahead of time and links it against a native runtime (kernel HLE, WebGPU or Vulkan GPU backend, SDL input/audio).
 
-> **Note:** This repository contains no game code or assets. You must provide your own legally obtained copy of Trials HD (`default.xex`). The recompiled C++ code is generated locally during the build and must not be redistributed.
+> **Note:** This repository contains no game code or assets. You need your own legally obtained copy of Trials HD. **Game assets must never be redistributed:** nothing from the game package (`default.xex`, the `.pak` data, audio, or an installed `assets/` folder). The C++ code recompiled from `default.xex`, and builds of the game made from it, may be redistributed (for example as release binaries) as long as they include no assets: players install the game data from their own copy on first start.
 
 **Status:** Playable with controller or keyboard, high-refresh-rate rendering (with the original fixed 60 Hz physics simulation), and native WebGPU or Vulkan graphics backends.
 

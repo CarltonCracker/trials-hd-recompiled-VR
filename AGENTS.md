@@ -28,7 +28,9 @@ Our code on top of the SDK (`src/`) is the app shell, game-specific function hoo
 1. **No game content in git, ever.** The user supplies `default.xex` and data; it goes
    in `assets/` (gitignored). Never commit `assets/`, `generated/default/`, `out/`,
    `*.xex`, `*.pak`, `*.xwb`, shader microcode, WGSL generated from it, disassembly,
-   dumps or screenshots. Config files hold **addresses only**.
+   dumps or screenshots. Config files hold **addresses only**. Builds of the game (code
+   generated from `default.xex`) may be redistributed, e.g. as release binaries, but
+   never with assets or `default.xex` (README notice).
 2. **Never publish or host a web build.** Its `.wasm` contains the user's recompiled game.
    The included server binds to localhost.
 3. **Don't edit `generated/`.** It is rewritten by codegen. Change behavior with hooks in
