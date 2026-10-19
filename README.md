@@ -97,7 +97,7 @@ Build the native game first to generate C++ from your own `default.xex`, then in
 Open the printed URL (**http://127.0.0.1:8091/...**) in desktop Chrome/Edge with hardware
 WebGPU and JSPI support (Chromium 154-155 on Linux are the tested targets). F2 shows the
 performance overlay. Linux may
-require WebGPU flags; see [the web-port notes](docs/web-port/README.md#111-headless-chromium-with-hardware-webgpu-this-server).
+require WebGPU flags; see [the web-port notes](https://github.com/snufflyyy/trials-hd-recompiled/blob/dev/docs/web-port/README.md#111-headless-chromium-with-hardware-webgpu-this-server).
 Other browsers and mobile are not verified.
 
 On first visit, select your **Trials HD base-game package** or extracted assets folder.
@@ -113,7 +113,7 @@ on the canvas toggles fullscreen. Audio starts after a key press or click.
 **Never publish or host the build output:** its `.wasm` contains your recompiled game
 code. The included server binds to localhost. No game assets are bundled or uploaded.
 Browser gameplay, storage and audio acceptance checks are still in progress; the
-[web-port task board](docs/web-port/README.md#16-task-breakdown-for-agents-small-and-large-models)
+[web-port task board](https://github.com/snufflyyy/trials-hd-recompiled/blob/dev/docs/web-port/README.md#16-task-breakdown-for-agents-small-and-large-models)
 records the remaining gates.
 
 ### Adding DLC / Addons (Optional)
@@ -198,20 +198,6 @@ Native builds store all game saves, user profiles, achievements, shader caches, 
 - **Logs:** `logs/` (`trials_hd.log`)
 
 No data is written to system or user home directories (e.g. `~/.local/share/trials_hd` or `~/Library/Application Support/trials_hd`). Everything is self-contained in the build folder next to the settings config. Custom storage paths can still be specified if desired using `--user_data_root=/path/to/data` or `--cache_root=/path/to/cache`.
-
----
-
-## Headless Testing
-
-Automated headless tests and benchmarks run under Xvfb:
-
-```sh
-# Run a scripted test ride
-INPUT=tests/headless/keyboard_ride.txt tools/headless_run.sh 60
-
-# Run timing and regression tests
-ctest --test-dir out/build/linux-amd64-relwithdebinfo --output-on-failure
-```
 
 ---
 

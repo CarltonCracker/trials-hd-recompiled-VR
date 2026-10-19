@@ -1,2 +1,0 @@
-# CDP recorder and browser harness (install into the project's .venv).
-websockets>=15,<17
