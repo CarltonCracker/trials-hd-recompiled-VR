@@ -38,10 +38,12 @@ float DisplayRefreshRate();
 // on_closed runs just before that so the owner can drop its pointer.
 class GraphicsSettingsDialog : public rex::ui::ImGuiDialog {
  public:
-  // The Game tab: installed DLC and Add DLC (opens the installer, src/installer/).
-  // Without on_add_dlc (the web build) there is no Game tab.
+  // The Game tab: installed DLC and custom tracks, and Add DLC or tracks (opens
+  // the installer, src/installer/). Without on_add_dlc (the web build) there is
+  // no Game tab.
   struct GameTab {
     std::vector<std::string> installed_dlc;
+    size_t installed_tracks;  // zero when value-initialized (GameTab{})
     std::function<void()> on_add_dlc;
   };
 

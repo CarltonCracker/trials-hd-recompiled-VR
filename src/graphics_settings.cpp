@@ -368,8 +368,8 @@ void GraphicsSettingsDialog::DrawControlsTab(float label_width, bool& key_bound)
   }
 }
 
-// Game: the installed DLC track packs, and Add DLC (the installer screen; the
-// game sees new DLC after a restart).
+// Game: the installed DLC track packs and custom tracks, and Add DLC or tracks
+// (the installer screen; the game sees them after a restart).
 void GraphicsSettingsDialog::DrawGameTab(float label_width) {
   Label("DLC", label_width);
   if (game_tab_.installed_dlc.empty()) {
@@ -381,12 +381,18 @@ void GraphicsSettingsDialog::DrawGameTab(float label_width) {
     }
     ImGui::EndGroup();
   }
+  Label("Custom tracks", label_width);
+  if (game_tab_.installed_tracks == 0) {
+    ImGui::TextDisabled("None installed");
+  } else {
+    ImGui::Text("%zu installed", game_tab_.installed_tracks);
+  }
   ImGui::Spacing();
-  if (ImGui::Button("Add DLC...")) {
+  if (ImGui::Button("Add DLC or tracks...")) {
     game_tab_.on_add_dlc();
   }
   ImGui::SameLine();
-  ImGui::TextDisabled("Big Pack, Big Thrills");
+  ImGui::TextDisabled("Big Pack, Big Thrills, custom tracks");
 }
 
 void GraphicsSettingsDialog::DrawGraphicsTab(float label_width) {

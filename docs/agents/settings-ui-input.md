@@ -35,8 +35,8 @@ Start** (a watcher thread in `TrialsHdApp::WatchSettingsCombo` polls controllers
   (Unlimited/240/165/144/120/90/60/30), VSync (restart; also switches the present-mode
   cvars), performance overlay.
 - **Game** (native, once the game runs): installed DLC (`installer::InstalledDlcNames`,
-  from the content headers) and **Add DLC...**, which closes the menu and opens the setup
-  screen over the game in DLC-only mode (`InstallerDialog::Options::in_game`,
+  from the content headers), the number of custom tracks, and **Add DLC or tracks...**,
+  which closes the menu and opens the setup screen over the game without the base game (`InstallerDialog::Options::in_game`,
   `TrialsHdApp::OpenDlcInstaller`). The game's input is gated while it is open
   (`installer_open_`); the game sees new DLC after a restart, which its done screen says.
 

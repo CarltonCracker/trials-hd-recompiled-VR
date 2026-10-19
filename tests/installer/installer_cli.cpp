@@ -21,6 +21,8 @@ const char* KindName(SourceKind kind) {
       return "dlc-package";
     case SourceKind::kDlcFolder:
       return "dlc-folder";
+    case SourceKind::kCustomTrack:
+      return "track";
   }
   return "?";
 }
@@ -48,6 +50,8 @@ int main(int argc, char** argv) {
   for (const auto& source : result.sources) {
     if (source.kind == SourceKind::kBaseGame) {
       plan.base_game = source;
+    } else if (source.kind == SourceKind::kCustomTrack) {
+      plan.tracks.push_back(source);
     } else {
       plan.dlc.push_back(source);
     }

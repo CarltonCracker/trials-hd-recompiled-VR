@@ -540,10 +540,11 @@ class TrialsHdApp : public rex::ReXApp {
     if (!imgui_drawer()) {
       return;
     }
-    trials_hd::GraphicsSettingsDialog::GameTab game_tab;
+    trials_hd::GraphicsSettingsDialog::GameTab game_tab{};
 #if !defined(__EMSCRIPTEN__)
     if (runtime()) {
       game_tab.installed_dlc = trials_hd::installer::InstalledDlcNames(game_data_root());
+      game_tab.installed_tracks = trials_hd::installer::InstalledTrackCount(game_data_root());
       // Not from inside the settings menu's ImGui frame.
       game_tab.on_add_dlc = [this] {
         app_context().CallInUIThreadDeferred([this] { OpenDlcInstaller(); });
@@ -562,8 +563,8 @@ class TrialsHdApp : public rex::ReXApp {
   }
 
 #if !defined(__EMSCRIPTEN__)
-  // Settings, Game tab, Add DLC: the setup screen over the running game, for DLC
-  // only. The game ignores the controller until it closes.
+  // Settings, Game tab, Add DLC or tracks: the setup screen over the running
+  // game, without the base game. The game ignores the controller until it closes.
   void OpenDlcInstaller() {
     if (installer_ || !imgui_drawer()) {
       return;

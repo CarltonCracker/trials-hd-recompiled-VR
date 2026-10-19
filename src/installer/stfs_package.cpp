@@ -166,17 +166,26 @@ bool StfsPackage::Open(const std::filesystem::path& path, std::string* error) {
   total_blocks_ = read_be32(vd + 0x1C);
   title_id_ = read_be32(hdr.data() + 0x360);
 
-  // Decode utf-16-be display name
+  // Display name: 18 UTF-16 BE slots of 0x80 bytes, one per language; packages
+  // made on a console carry only the creator's language (a German console
+  // fills slot 4), so take the first non-empty one.
   display_name_.clear();
-  for (size_t i = 0; i < 0x80; i += 2) {
-    uint16_t c = (static_cast<uint16_t>(hdr[0x411 + i]) << 8) |
-                 static_cast<uint16_t>(hdr[0x411 + i + 1]);
-    if (c == 0) break;
-    if (c < 0x80) {
-      display_name_ += static_cast<char>(c);
-    } else {
-      display_name_ += static_cast<char>(0xC0 | ((c >> 6) & 0x1F));
-      display_name_ += static_cast<char>(0x80 | (c & 0x3F));
+  for (size_t slot = 0; slot < 18 && display_name_.empty(); ++slot) {
+    const size_t base = 0x411 + slot * 0x80;
+    for (size_t i = 0; i < 0x80; i += 2) {
+      uint16_t c = (static_cast<uint16_t>(hdr[base + i]) << 8) |
+                   static_cast<uint16_t>(hdr[base + i + 1]);
+      if (c == 0) break;
+      if (c < 0x80) {
+        display_name_ += static_cast<char>(c);
+      } else if (c < 0x800) {
+        display_name_ += static_cast<char>(0xC0 | (c >> 6));
+        display_name_ += static_cast<char>(0x80 | (c & 0x3F));
+      } else {
+        display_name_ += static_cast<char>(0xE0 | (c >> 12));
+        display_name_ += static_cast<char>(0x80 | ((c >> 6) & 0x3F));
+        display_name_ += static_cast<char>(0x80 | (c & 0x3F));
+      }
     }
   }
 
@@ -444,6 +453,12 @@ bool StfsPackage::ExtractEntry(const StfsEntry& entry, const std::filesystem::pa
     return Fail(error, ok ? "Failed to write " + destination.string() : message);
   }
   return true;
+}
+
+bool StfsPackage::ExtractFile(const StfsEntry& entry, const std::filesystem::path& destination,
+                              std::string* error) {
+  if (entry.is_dir) return Fail(error, entry.path + " is a directory");
+  return ExtractEntry(entry, destination, nullptr, error);
 }
 
 bool StfsPackage::ExtractAll(const std::filesystem::path& out_dir,

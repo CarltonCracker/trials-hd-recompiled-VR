@@ -59,6 +59,10 @@ class StfsPackage {
   const StfsEntry* FindEntry(std::string_view path) const;
 
   bool ReadFile(const StfsEntry& entry, std::vector<uint8_t>& out_data, std::string* error = nullptr);
+  // One file to `destination` (its folder must exist), streamed and renamed
+  // into place when complete, like ExtractAll.
+  bool ExtractFile(const StfsEntry& entry, const std::filesystem::path& destination,
+                   std::string* error = nullptr);
   // Files are streamed to a temporary name and renamed when complete, so a
   // failed or cancelled extraction never leaves a truncated file in place.
   bool ExtractAll(const std::filesystem::path& out_dir,

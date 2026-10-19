@@ -3,10 +3,11 @@
 
 Usage: tests/installer/test_installer.py <installer_cli binary>
 
-Packs a stand-in game and DLC with make_stfs.py, installs them with the C++
-installer and checks the result against tools/add_dlc.py (the DLC layout, IDs
-and headers the game already reads), the xex version check and the
-interrupted-install guard.
+Packs a stand-in game, DLC and custom tracks with make_stfs.py, installs them
+with the C++ installer and checks the result against tools/add_dlc.py (the DLC
+layout, IDs and headers the game already reads), custom tracks (only the level,
+as the player's saved game), the xex version check and the interrupted-install
+guard.
 """
 import os
 from pathlib import Path
@@ -29,6 +30,9 @@ if not CLI:
 # Must hash to TRIALSHD_BUILD_XEX_SHA1 in tests/installer/trials_hd_build_info.h.
 TEST_XEX = b'trials hd installer test xex\n'
 BIG_PACK_ID = 'B1A493BA359C56825FB0BD67F37931CEFA71695958'
+# A custom track's saved game, named as the game names them.
+TRACK_NAME = '0009000000179f1410b5fb4f-3-0.x'
+PLAYER_TRACKS = 'content/B13EBABEBABEBABE/5841095A'
 
 
 def write(path, data):
@@ -69,6 +73,18 @@ class InstallerTest(unittest.TestCase):
         pack(game, self.game_package, '--license', '0xFFFFFFFF')
         self.dlc_package = self.content / f'00000002/{BIG_PACK_ID}'
         pack(dlc, self.dlc_package, '--content-type', '0x2', '--name', 'Trials HD - Big Pack')
+        # A custom track: the level plus its creator's best run and replay.
+        track = self.root / 'src/track'
+        write(track / 'record.bin', b'creator record')
+        write(track / 'ghost.bin', b'creator ghost')
+        write(track / 'user_created_track.trk', b'\xde\xad\xba\xbe level')
+        self.track_package = self.content / f'00000001/{TRACK_NAME}'
+        pack(track, self.track_package, '--content-type', '0x1', '--name-slot', '4',
+             '--name', 'Benutzerdefinierte Strecke: Vertigo', '--license', '0')
+        # Another saved game, without a track: not installed.
+        other = self.root / 'src/other_save'
+        write(other / 'progress.bin', b'not a track')
+        pack(other, self.content / '00000001/OTHER-0-0.x', '--content-type', '0x1')
 
     def cli(self, *args):
         result = subprocess.run(CLI + [str(a) for a in args], capture_output=True, text=True,
@@ -79,7 +95,7 @@ class InstallerTest(unittest.TestCase):
         code, lines = self.cli('scan', self.root / 'Content')
         self.assertEqual(code, 0)
         self.assertEqual([line.split()[1] for line in lines if line.startswith('source')],
-                         ['game', 'dlc-package'])
+                         ['game', 'dlc-package', 'track'])
         self.assertIn(BIG_PACK_ID, lines[1])
 
     def test_install_matches_add_dlc(self):
@@ -100,6 +116,32 @@ class InstallerTest(unittest.TestCase):
         self.assertTrue(expected)
         for name, data in expected.items():
             self.assertEqual(installed.get(name), data, name)
+
+    def test_custom_track_installs_only_the_level(self):
+        assets = self.root / 'out/assets'
+        code, lines = self.cli('install', self.root / 'Content', assets)
+        self.assertEqual(code, 0, lines)
+        package = assets / PLAYER_TRACKS / '00000001' / TRACK_NAME
+        self.assertEqual(sorted(p.name for p in package.iterdir()), ['user_created_track.trk'])
+        self.assertEqual((package / 'user_created_track.trk').read_bytes(),
+                         b'\xde\xad\xba\xbe level')
+        self.assertFalse((assets / PLAYER_TRACKS / '00000001/OTHER-0-0.x').exists())
+        header = (assets / PLAYER_TRACKS / 'Headers/00000001' / (TRACK_NAME + '.header')).read_bytes()
+        self.assertEqual(len(header), 332)
+        self.assertEqual(int.from_bytes(header[4:8], 'big'), 1)  # saved game
+        self.assertEqual(header[8:264].decode('utf-16-be').split('\0')[0],
+                         'Benutzerdefinierte Strecke: Vertigo')
+        self.assertEqual(header[264:306].decode('ascii').split('\0')[0], TRACK_NAME)
+
+    def test_track_keeps_the_players_record(self):
+        assets = self.root / 'assets'
+        code, _ = self.cli('install', self.game_package, assets)
+        self.assertEqual(code, 0)
+        package = assets / PLAYER_TRACKS / '00000001' / TRACK_NAME
+        write(package / 'record.bin', b'player record')
+        code, lines = self.cli('install', self.track_package, assets)
+        self.assertEqual(code, 0, lines)
+        self.assertEqual((package / 'record.bin').read_bytes(), b'player record')
 
     def test_extracted_dlc_folder_matches_add_dlc(self):
         assets = self.root / 'assets'

@@ -43,6 +43,7 @@ extern "C" REX_FUNC(sub_8212BC68) {           // ctx = guest registers, base = g
 | `crt_hooks.cpp` | `sub_822F81A0`, `sub_822F8628` (memcpy), `sub_822F8040` (memset), `sub_822F8E60` (strncmp), `sub_822F8ED8` (strncpy), `sub_822F8EB0` (u64 → double), `sub_822F7D30` (strlen helper) | Native CRT routines instead of byte-by-byte guest loops (memcpy alone was ~6% of the render thread). Web: marks written pages for GPU tracking |
 | `gpu_wait.cpp` | `sub_8212BB58`, `sub_8212BC68` | The D3D runtime's fence-wait loop (~700k calls/frame): progressive spin → yield → 20 µs sleep. Also sets Linux timer slack to 1 µs |
 | `offline_warning.cpp` | `sub_8261ECE0`, `sub_8263B570` | Clears the "offline warning" mask at `0x82768498` so no popup before each track |
+| `custom_track_list.cpp` | `sub_825BED48`, `sub_825BCB78` | Lists every custom track: refills the track list's 301-item enumeration buffer with the next batch when the game reaches its end |
 | `exit_button.cpp` | `sub_8265BA38`, `sub_8265C648`, `sub_82124A38` | Main menu "Return to Game Library" becomes "EXIT GAME" and quits cleanly |
 | `achievements_hook.cpp` | `sub_82124618`, `__imp__XamShowAchievementsUI` | Opens the SDK's ImGui achievements overlay |
 

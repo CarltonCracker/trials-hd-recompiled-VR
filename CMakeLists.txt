@@ -63,6 +63,7 @@ set(TRIALSHD_SOURCES
     src/achievements_hook.cpp
     src/crt_hooks.cpp
     src/offline_warning.cpp
+    src/custom_track_list.cpp
     src/package_license.cpp
     src/virtual_pad.cpp
     src/exit_button.cpp

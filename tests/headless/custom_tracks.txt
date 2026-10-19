@@ -1,0 +1,29 @@
+# Opens User Content > Play custom track and scrolls the list: the custom tracks the
+# setup screen installed (src/installer/) are listed with name, style, difficulty
+# and date, and no medal. The game opens each track package as it fills the list
+# (in batches of 301, docs/agents/game-data.md), slowly on a software renderer.
+#   INPUT=tests/headless/custom_tracks.txt tools/headless_run.sh 80
+wait 25
+pad down 1
+wait 0.15
+pad down 0
+wait 0.5
+pad down 1
+wait 0.15
+pad down 0
+wait 0.5
+pad a 1
+wait 0.15
+pad a 0
+wait 3
+capture custom_tracks_menu
+pad a 1
+wait 0.15
+pad a 0
+wait 30
+capture custom_tracks_list
+axis ly 32767
+wait 6
+axis ly 0
+wait 0.5
+capture custom_tracks_scrolled

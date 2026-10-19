@@ -77,6 +77,35 @@ when that is a 42-digit hex ID (marketplace names are), else SHA-1 of its first 
 the older `tools/add_dlc.py` (dev), which `tests/installer/test_installer.py` checks;
 the Python tool also made an `assets/0000000000000000` copy/link that the SDK doesn't need.
 
+## Custom tracks
+
+Trials HD keeps each custom track in its own saved game (content type `00000001`, a
+`CON` package named `<track id>-<n>-<n>.x`, e.g. a save folder's
+`5841095A/00000001/`) holding `user_created_track.trk` (the level: `DEADBABE`, the
+track ID, then LZMA data), `record.bin` (408 bytes: the best run's faults, time, the
+rider's XUID, checkpoint splits) and `ghost.bin` (its LZMA replay). The player's progress
+is elsewhere, in the profile (`5841095A/profile/User/63E83FF{F,E,D}`).
+
+The setup screen (and Settings > Game > **Add DLC or tracks...**, `--install_dlc`) finds
+these packages and installs **only the level**: `installer::InstallTrack` writes
+`assets/content/B13EBABEBABEBABE/5841095A/00000001/<package name>/user_created_track.trk`
+and a saved-game header under `Headers/00000001/` with the package's display name (the
+first non-empty of its 18 language slots; console-made packages fill only the creator's
+language). `B13EBABEBABEBABE` is the SDK's one profile XUID: the game opens saved games
+under the player's XUID, so tracks under `0000000000000000` would list but not open. A
+player's own `record.bin` there is kept on reinstall. Saved games without a track file
+are ignored. Checked 2026-10-19 with a 493-track save: tracks list with the right name
+(the game strips the localized "Custom track:" prefix), style, difficulty and date, no
+medal; a track without `record.bin`/`ghost.bin` loads and rides; the profile stays
+byte-identical to a fresh start's, so the game can be completed from scratch.
+
+**No 301 limit:** the game finds custom tracks with one `XamEnumerate` of at most 301
+items into a buffer inside its track list object (`li r7,301` in `sub_825BED48`), then
+opens them one by one (state machine `sub_825BF1E0`) and stops. `src/custom_track_list.cpp`
+refills that buffer with the next 301 items when a full batch is used up, so every
+installed track is listed (2026-10-19: 493 installed, "Dummy HDD: 493/100", and a track
+from the second batch rides). The "Dummy HDD: N/100" counter goes past 100 without harm.
+
 ## Where the game looks
 
 `OnConfigurePaths` (`src/trials_hd_app.h`): `--game_data_root=PATH` if set, else the

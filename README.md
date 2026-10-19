@@ -147,13 +147,15 @@ controller). Choose your **Trials HD package** (the file in
 `<content folder>/0000000000000000/5841095A/000D0000/`) or any folder that contains it,
 with the built-in browser, the system file picker, or by dropping it onto the window.
 DLC track packs (*Big Pack*, *Big Thrills*) in the same folder are found too, as packages
-or extracted folders. **Install and play** extracts them into `assets/` and starts the
-game; later starts go straight to the game. The package must be the version this build
+or extracted folders, and so are **custom tracks** (saved games in
+`5841095A/00000001/`): only the levels are installed, without anyone's times, medals or
+ghosts, so your progress still starts fresh. **Install and play** extracts them into
+`assets/` and starts the game; later starts go straight to the game. The package must be the version this build
 was made from (the setup screen says so otherwise).
 
-To add DLC later, open the settings (**F1**, the controller's **Guide**, or **Back +
-Start**), go to the **Game** tab and choose **Add DLC...**; restart the game to play the
-new tracks.
+To add DLC or custom tracks later, open the settings (**F1**, the controller's **Guide**,
+or **Back + Start**), go to the **Game** tab and choose **Add DLC or tracks...**; restart
+the game to play them.
 
 The same from the command line, without clicking:
 

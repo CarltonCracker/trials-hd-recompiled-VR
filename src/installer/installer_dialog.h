@@ -2,7 +2,7 @@
 // (and optional DLC track packs), installs them into assets/ (game_installer.h)
 // and hands the folder back so the game can boot. Shown before the runtime
 // exists, so it brings its own controller handling (gamepad_nav.h). The same
-// screen adds DLC to the running game (settings, Game tab).
+// screen adds DLC and custom tracks to the running game (settings, Game tab).
 
 #pragma once
 
@@ -105,6 +105,9 @@ class InstallerDialog : public rex::ui::ImGuiDialog {
   std::vector<installer::Source> dlc_;
   std::vector<bool> dlc_selected_;
   std::vector<bool> dlc_installed_;  // already in install_dir: unticked at first
+  // Custom tracks install all or none (a save can hold hundreds).
+  std::vector<installer::Source> tracks_;
+  bool tracks_selected_ = true;
   std::vector<std::string> problems_;
   bool game_already_installed_ = false;
 

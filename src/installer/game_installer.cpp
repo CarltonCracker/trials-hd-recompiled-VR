@@ -6,6 +6,7 @@
 #include <cctype>
 #include <cstdio>
 #include <fstream>
+#include <iterator>
 #include <unordered_set>
 
 #include <fmt/format.h>
@@ -151,6 +152,25 @@ Source DlcFolderSource(const fs::path& dir) {
   return source;
 }
 
+// A saved game holding a custom track (others, if any, are skipped). Only the
+// level installs, so its size is the track file's.
+std::optional<Source> CheckTrackPackage(const fs::path& path) {
+  stfs::StfsPackage package;
+  if (!package.Open(path)) return std::nullopt;
+  const auto* track = package.FindEntry(kTrackFile);
+  if (!track || track->is_dir) return std::nullopt;
+  Source source;
+  source.kind = SourceKind::kCustomTrack;
+  source.path = path;
+  // The game's own file name (<track id>-<n>-<n>.x): kept as the content name.
+  source.package_id = path.filename().string();
+  source.display_name = package.display_name().empty() ? source.package_id
+                                                       : package.display_name();
+  source.license_mask = package.license_mask();
+  source.bytes = track->size;
+  return source;
+}
+
 void AddCandidate(const fs::path& path, ScanResult& result) {
   auto probe = ProbePackage(path);
   if (!probe) return;
@@ -159,8 +179,10 @@ void AddCandidate(const fs::path& path, ScanResult& result) {
     source = CheckBaseGame(path, result.problems);
   } else if (IsDlcProbe(*probe)) {
     source = CheckDlcPackage(path, result.problems);
+  } else if (probe->title_id == kTitleId && probe->content_type == kContentTypeSavedGame) {
+    source = CheckTrackPackage(path);
   } else {
-    return;  // Saves, profiles, another game's packages: not ours to install.
+    return;  // Profiles, another game's packages: not ours to install.
   }
   if (source) result.sources.push_back(std::move(*source));
 }
@@ -178,6 +200,41 @@ fs::path ContentDir(const fs::path& root) {
 
 fs::path DlcHeaderDir(const fs::path& root) {
   return ContentDir(root) / "Headers" / fmt::format("{:08X}", kContentTypeDlc);
+}
+
+// Saved games belong to a player: content/<profile xuid>/<title>/.
+fs::path PlayerContentDir(const fs::path& root) {
+  return root / "content" / fmt::format("{:016X}", kProfileXuid) /
+         fmt::format("{:08X}", kTitleId);
+}
+
+fs::path TrackDir(const fs::path& root) {
+  return PlayerContentDir(root) / fmt::format("{:08X}", kContentTypeSavedGame);
+}
+
+// One custom track: only the level, as a saved game of the player's
+// (content/<xuid>/<title>/00000001/<file name>/user_created_track.trk, header
+// under Headers/00000001/). Without the creator's record.bin and ghost.bin the
+// track shows no medal and no ghost until the player rides it; checked
+// 2026-10-19: it lists, loads and plays. An existing record.bin (the player's
+// own) is left alone.
+bool InstallTrack(const Source& source, const fs::path& root, std::string* error) {
+  const auto package_dir = TrackDir(root) / source.package_id;
+  const auto header_dir =
+      PlayerContentDir(root) / "Headers" / fmt::format("{:08X}", kContentTypeSavedGame);
+  std::error_code ec;
+  fs::create_directories(package_dir, ec);
+  if (!ec) fs::create_directories(header_dir, ec);
+  if (ec) return Fail(error, "Failed to create " + package_dir.string() + ": " + ec.message());
+  stfs::StfsPackage package;
+  if (!package.Open(source.path, error)) return false;
+  const auto* track = package.FindEntry(kTrackFile);
+  if (!track) return Fail(error, source.path.string() + ": no custom track in it");
+  if (!package.ExtractFile(*track, package_dir / std::string(kTrackFile), error)) return false;
+  auto header = MakeContentHeader(kContentTypeSavedGame, source.display_name, source.package_id,
+                                  source.license_mask);
+  return WriteBytes(header_dir / (source.package_id + ".header"), header.data(), header.size(),
+                    error);
 }
 
 // One DLC: files under content/<xuid>/<title>/00000002/<id>/, its header under
@@ -226,7 +283,8 @@ bool InstallDlc(const Source& source, const fs::path& root, uint64_t offset, Pro
     if (ec) return Fail(error, "Failed to copy " + source.path.string() + ": " + ec.message());
   }
 
-  auto header = MakeDlcHeader(source.display_name, source.package_id, source.license_mask);
+  auto header = MakeContentHeader(kContentTypeDlc, source.display_name, source.package_id,
+                                  source.license_mask);
   return WriteBytes(header_dir / (source.package_id + ".header"), header.data(), header.size(),
                     error);
 }
@@ -272,27 +330,33 @@ ScanResult Scan(const fs::path& path, std::stop_token stop) {
       AddCandidate(it->path(), result);
     }
   }
-  // One base game (the first usable one) first, then each DLC once.
+  // One base game (the first usable one) first, then each DLC once, then each
+  // track once.
   std::vector<Source> sources;
-  std::unordered_set<std::string> dlc_ids;
+  std::vector<Source> tracks;
+  std::unordered_set<std::string> ids;
   for (auto& source : result.sources) {
     if (source.kind == SourceKind::kBaseGame) {
       if (sources.empty() || sources.front().kind != SourceKind::kBaseGame) {
         sources.insert(sources.begin(), std::move(source));
       }
-    } else if (dlc_ids.insert(source.package_id).second) {
-      sources.push_back(std::move(source));
+    } else if (ids.insert(source.package_id).second) {
+      (source.kind == SourceKind::kCustomTrack ? tracks : sources).push_back(std::move(source));
     }
   }
+  std::ranges::move(tracks, std::back_inserter(sources));
   result.sources = std::move(sources);
   return result;
 }
 
 bool Install(const Plan& plan, const fs::path& assets_dir, Progress& progress,
              std::stop_token stop, std::string* error) {
-  if (!plan.base_game && plan.dlc.empty()) return Fail(error, "Nothing to install");
+  if (!plan.base_game && plan.dlc.empty() && plan.tracks.empty()) {
+    return Fail(error, "Nothing to install");
+  }
   uint64_t total = plan.base_game ? plan.base_game->bytes : 0;
   for (const auto& dlc : plan.dlc) total += dlc.bytes;
+  for (const auto& track : plan.tracks) total += track.bytes;
   progress.bytes_total = total;
   progress.bytes_done = 0;
 
@@ -344,6 +408,13 @@ bool Install(const Plan& plan, const fs::path& assets_dir, Progress& progress,
     if (!InstallDlc(dlc, work, offset, progress, stop, error)) return abandon(false);
     offset += dlc.bytes;
   }
+  for (size_t i = 0; i < plan.tracks.size(); ++i) {
+    if (stop.stop_requested()) return abandon(Fail(error, "Cancelled"));
+    progress.SetStage(fmt::format("Custom tracks: {} of {}", i + 1, plan.tracks.size()));
+    if (!InstallTrack(plan.tracks[i], work, error)) return abandon(false);
+    offset += plan.tracks[i].bytes;
+    progress.bytes_done = offset;
+  }
   if (fresh) {
     fs::rename(work, assets_dir, ec);
     if (ec) {
@@ -362,13 +433,24 @@ bool IsDlcInstalled(const fs::path& assets_dir, std::string_view package_id) {
                              ec);
 }
 
+size_t InstalledTrackCount(const fs::path& assets_dir) {
+  size_t count = 0;
+  std::error_code ec;
+  for (auto it = fs::directory_iterator(TrackDir(assets_dir), ec); !ec && it != fs::end(it);
+       it.increment(ec)) {
+    std::error_code file_ec;
+    count += fs::is_regular_file(it->path() / std::string(kTrackFile), file_ec);
+  }
+  return count;
+}
+
 std::vector<std::string> InstalledDlcNames(const fs::path& assets_dir) {
   std::vector<std::string> names;
   std::error_code ec;
   for (auto it = fs::directory_iterator(DlcHeaderDir(assets_dir), ec); !ec && it != fs::end(it);
        it.increment(ec)) {
     if (it->path().extension() != ".header") continue;
-    // Display name: UTF-16 big endian at 0x08 (MakeDlcHeader).
+    // Display name: UTF-16 big endian at 0x08 (MakeContentHeader).
     std::ifstream file(it->path(), std::ios::binary);
     uint8_t raw[256] = {};
     file.seekg(0x08);
@@ -394,14 +476,14 @@ std::vector<std::string> InstalledDlcNames(const fs::path& assets_dir) {
   return names;
 }
 
-std::array<uint8_t, 332> MakeDlcHeader(std::string_view display_name, std::string_view package_id,
-                                       uint32_t license_mask) {
+std::array<uint8_t, 332> MakeContentHeader(uint32_t content_type, std::string_view display_name,
+                                           std::string_view package_id, uint32_t license_mask) {
   std::array<uint8_t, 332> header{};
   auto be32 = [&](size_t offset, uint32_t value) {
     for (int i = 0; i < 4; ++i) header[offset + i] = uint8_t(value >> (24 - 8 * i));
   };
   be32(0x000, 1);  // device: hard drive
-  be32(0x004, kContentTypeDlc);
+  be32(0x004, content_type);
   // Display name: UTF-16 big endian, up to 127 characters plus the terminator.
   size_t out = 0x008;
   for (size_t i = 0; i < display_name.size() && out < 0x008 + 254;) {

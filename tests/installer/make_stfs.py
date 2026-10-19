@@ -3,7 +3,7 @@
 
 Usage: tests/installer/make_stfs.py <folder> <package> [--content-type 0xD0000|0x2]
                           [--title 0x5841095A] [--name "Display name"] [--license 0x1]
-                          [--exclude NAME ...]
+                          [--name-slot N] [--exclude NAME ...]
 
 Writes the block and hash-table layout src/installer/stfs_package.cpp reads
 (read-only packages: one hash block per level, next-block pointers in level 0).
@@ -67,6 +67,8 @@ def main():
     parser.add_argument('--title', type=lambda v: int(v, 0), default=0x5841095A)
     parser.add_argument('--name', default='Trials HD')
     parser.add_argument('--license', type=lambda v: int(v, 0), default=1)
+    # Language slot of the display name (0 English; a German console uses 4).
+    parser.add_argument('--name-slot', type=int, default=0)
     parser.add_argument('--exclude', nargs='*', default=[])
     args = parser.parse_args()
 
@@ -99,7 +101,8 @@ def main():
         struct.pack_into('>I', header, vd + 0x1C, total)
         struct.pack_into('>I', header, 0x3A9, 0)  # STFS, not SVOD
         name = args.name.encode('utf-16-be')[:0x7E]
-        header[0x411:0x411 + len(name)] = name
+        slot = 0x411 + args.name_slot * 0x80
+        header[slot:slot + len(name)] = name
         out.seek(0)
         out.write(header)
 

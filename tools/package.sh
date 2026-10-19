@@ -37,11 +37,12 @@ This folder contains no game data. You need your own copy of Trials HD (XBLA).
 
 2. On first start it asks for your Trials HD package: the file in
    <your content folder>/0000000000000000/5841095A/000D0000/, or a folder that
-   contains it. The Big Pack and Big Thrills DLC in the same folder are found too.
+   contains it. The Big Pack and Big Thrills DLC and custom tracks (saved games in
+   5841095A/00000001/, levels only) in the same folder are found too.
    It installs them into ./assets next to this file, then the game starts. Later
    starts go straight to the game.
 
-   Add DLC later: settings (F1, Guide, or Back + Start) > Game > Add DLC...
+   Add DLC or tracks later: settings (F1, Guide, or Back + Start) > Game > Add DLC or tracks...
 
    Without the setup screen:  ./trials_hd --install_game=/path/to/package-or-folder
                               ./trials_hd --install_dlc=/path/to/package-or-folder

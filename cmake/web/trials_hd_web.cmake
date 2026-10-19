@@ -454,6 +454,7 @@ add_executable(trials_hd
     src/achievements_hook.cpp
     src/crt_hooks.cpp
     src/offline_warning.cpp
+    src/custom_track_list.cpp
     src/package_license.cpp
     src/exit_button.cpp
     src/gamepad_nav.cpp

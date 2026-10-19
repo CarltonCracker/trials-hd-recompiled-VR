@@ -26,6 +26,15 @@ inline constexpr uint32_t kTitleId = 0x5841095A;
 inline constexpr uint32_t kDlcAltTitleId = 0x5842095A;
 inline constexpr uint32_t kContentTypeGame = 0x000D0000;  // XBLA title package
 inline constexpr uint32_t kContentTypeDlc = 0x00000002;   // marketplace content
+// Saved games: Trials HD keeps each custom track in one (record.bin, ghost.bin,
+// user_created_track.trk).
+inline constexpr uint32_t kContentTypeSavedGame = 0x00000001;
+// The SDK's one player profile (src/system/xam/user_profile.cpp). The game
+// opens saved games under it, so custom tracks install there.
+inline constexpr uint64_t kProfileXuid = 0xB13EBABEBABEBABE;
+// The level inside a custom-track package; its other files are the creator's
+// best run (record.bin) and its replay (ghost.bin), which are not installed.
+inline constexpr std::string_view kTrackFile = "user_created_track.trk";
 
 // assets/ holds the extracted game: default.xex plus the main data packs.
 // Inline: the app's path lookup uses it in the web build too, which doesn't
@@ -48,24 +57,25 @@ std::filesystem::path DefaultInstallDir();
 // empty when the build did not record one (then any version is accepted).
 std::string_view BuildXexSha1();
 
-enum class SourceKind { kBaseGame, kDlcPackage, kDlcFolder };
+enum class SourceKind { kBaseGame, kDlcPackage, kDlcFolder, kCustomTrack };
 
 struct Source {
   SourceKind kind = SourceKind::kBaseGame;
   std::filesystem::path path;
   std::string display_name;
-  std::string package_id;  // DLC: its folder name under content/
+  std::string package_id;  // DLC, track: its folder name under content/
   uint32_t license_mask = 1;
   uint64_t bytes = 0;      // what installing it writes
 };
 
 struct ScanResult {
-  std::vector<Source> sources;        // usable packages, base game first
+  std::vector<Source> sources;        // usable packages: base game, DLC, then tracks
   std::vector<std::string> problems;  // why other candidates were skipped
 };
 
-// Looks for the base game and DLC at `path`: a package file, an extracted DLC
-// folder (with pack.pak), or a folder searched recursively for packages.
+// Looks for the base game, DLC and custom tracks at `path`: a package file, an
+// extracted DLC folder (with pack.pak), or a folder searched recursively for
+// packages.
 // Checks that the base game's default.xex is the one this binary was built from.
 ScanResult Scan(const std::filesystem::path& path, std::stop_token stop = {});
 
@@ -92,6 +102,7 @@ class Progress {
 struct Plan {
   std::optional<Source> base_game;
   std::vector<Source> dlc;
+  std::vector<Source> tracks;
 };
 
 // Installs the plan into `assets_dir`. A first install is assembled in a
@@ -102,15 +113,19 @@ bool Install(const Plan& plan, const std::filesystem::path& assets_dir, Progress
              std::stop_token stop, std::string* error);
 
 // The console's content header (.header) the SDK's content manager reads for
-// an installed DLC package: 332 bytes, as tools/add_dlc.py writes it.
-std::array<uint8_t, 332> MakeDlcHeader(std::string_view display_name, std::string_view package_id,
-                                       uint32_t license_mask);
+// an installed package (its name in game lists): 332 bytes, as
+// tools/add_dlc.py writes it.
+std::array<uint8_t, 332> MakeContentHeader(uint32_t content_type, std::string_view display_name,
+                                           std::string_view package_id, uint32_t license_mask);
 
 // Whether DLC with this package ID is installed in assets_dir (its header exists).
 bool IsDlcInstalled(const std::filesystem::path& assets_dir, std::string_view package_id);
 
 // Display names of the DLC installed in assets_dir, from their headers.
 std::vector<std::string> InstalledDlcNames(const std::filesystem::path& assets_dir);
+
+// Number of custom tracks installed in assets_dir.
+size_t InstalledTrackCount(const std::filesystem::path& assets_dir);
 
 // Package folder name: the package's own name when it is already a 42-digit
 // hex ID (marketplace file names are), else a stable ID derived from it.

@@ -17,7 +17,7 @@ ctest --test-dir out/build/linux-amd64-relwithdebinfo --output-on-failure
 | `vk_gpu_profile` | Bookkeeping of the Vulkan timestamp profiler (no device) |
 | `fps_log`, `render_pose_log` | The log checkers `tests/check_fps_log.py` / `check_render_pose_log.py` against fixtures |
 | `tracy_default` | Tracy is off by default in optimized builds and can still be turned on |
-| `installer` (`tests/installer/`) | The setup screen's installer (`installer_cli` driver) on synthetic packages: game + DLC found in a console content folder, layout/IDs/headers identical to `tools/add_dlc.py`, other `default.xex` versions refused, a failed first install leaves no `assets/` or `.installing/`, DLC into an existing install. Its own `trials_hd_build_info.h` stands in for the build's xex hash |
+| `installer` (`tests/installer/`) | The setup screen's installer (`installer_cli` driver) on synthetic packages: game + DLC + a custom track found in a console content folder, layout/IDs/headers identical to `tools/add_dlc.py`, a track installs only its level (name from a non-English slot, the player's own record kept), other saves ignored, other `default.xex` versions refused, a failed first install leaves no `assets/` or `.installing/`, DLC into an existing install. Its own `trials_hd_build_info.h` stands in for the build's xex hash |
 
 ## Standalone Python tests
 
@@ -81,7 +81,7 @@ move <title> <x> <y>        place the window inside the virtual display
 set <cvar> <value>         change a cvar at runtime
 ```
 
-Scripts: menu walks (`main_menu_nav`, `keyboard_menu_nav`, `credits`), rides
+Scripts: `custom_tracks` (opens Play custom track and scrolls it), menu walks (`main_menu_nav`, `keyboard_menu_nav`, `credits`), rides
 (`ride_tutorial`, `ride_hello_world`, `ride_the_breakdown`, `ride_middle_name_danger`,
 `keyboard_ride`, `controller_ride`), settings (`settings_menu`, `controller_settings`,
 `settings_mouse`), `exit_button_test`, and `bench_fps` (the benchmark ride). The browser

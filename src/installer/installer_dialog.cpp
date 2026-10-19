@@ -191,7 +191,17 @@ void InstallerDialog::StartScan(fs::path path) {
 
 void InstallerDialog::MergeScan(installer::ScanResult result) {
   bool found = false;
+  size_t new_tracks = 0;
   for (auto& source : result.sources) {
+    if (source.kind == installer::SourceKind::kCustomTrack) {
+      const bool known = std::ranges::any_of(
+          tracks_, [&](const auto& track) { return track.package_id == source.package_id; });
+      if (!known) {
+        tracks_.push_back(std::move(source));
+        ++new_tracks;
+      }
+      continue;
+    }
     if (source.kind == installer::SourceKind::kBaseGame) {
       if (game_already_installed_ && !options_.reinstall_game) {
         REXLOG_INFO("Setup: game already installed; not reinstalling {}",
@@ -214,6 +224,10 @@ void InstallerDialog::MergeScan(installer::ScanResult result) {
       found = true;
     }
   }
+  if (new_tracks) {
+    REXLOG_INFO("Setup: {} custom tracks in {}", new_tracks, scanning_.string());
+    found = true;
+  }
   for (auto& problem : result.problems) {
     REXLOG_WARN("Setup: {}", problem);
     problems_.push_back(std::move(problem));
@@ -232,7 +246,8 @@ void InstallerDialog::MergeScan(installer::ScanResult result) {
 
 bool InstallerDialog::CanInstall() const {
   const bool any_dlc = std::ranges::find(dlc_selected_, true) != dlc_selected_.end();
-  return game_ || (game_already_installed_ && any_dlc);
+  const bool any_tracks = tracks_selected_ && !tracks_.empty();
+  return game_ || (game_already_installed_ && (any_dlc || any_tracks));
 }
 
 void InstallerDialog::StartInstall() {
@@ -241,7 +256,9 @@ void InstallerDialog::StartInstall() {
   for (size_t i = 0; i < dlc_.size(); ++i) {
     if (dlc_selected_[i]) plan.dlc.push_back(dlc_[i]);
   }
-  REXLOG_INFO("Setup: installing to {} ({} DLC)", options_.install_dir.string(), plan.dlc.size());
+  if (tracks_selected_) plan.tracks = tracks_;
+  REXLOG_INFO("Setup: installing to {} ({} DLC, {} custom tracks)",
+              options_.install_dir.string(), plan.dlc.size(), plan.tracks.size());
   screen_ = Screen::kInstalling;
   focus_next_ = true;
   installing_ = true;
@@ -277,7 +294,7 @@ void InstallerDialog::OnDraw(ImGuiIO& io) {
   const ImVec2 center(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f);
   ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
   // Sized for reading from a couch, like the settings menu.
-  const float scale = std::max(1.0f, io.DisplaySize.y / 720.0f) * 1.4f;
+  const float scale = imgui_drawer()->style().MenuScale(io.DisplaySize.y);
   ImGui::SetNextWindowSize(ImVec2(std::min(620 * scale, io.DisplaySize.x * 0.96f), 0),
                            ImGuiCond_Always);
   ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0), ImVec2(FLT_MAX, io.DisplaySize.y * 0.94f));
@@ -285,7 +302,8 @@ void InstallerDialog::OnDraw(ImGuiIO& io) {
     ImGui::SetNextWindowFocus();
   }
   ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * scale);
-  if (ImGui::Begin(options_.in_game ? "Add DLC###setup" : "Trials HD Setup###setup", nullptr,
+  if (ImGui::Begin(options_.in_game ? "Add DLC or tracks###setup" : "Trials HD Setup###setup",
+                   nullptr,
                    ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
                        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings)) {
     switch (screen_) {
@@ -328,14 +346,14 @@ void InstallerDialog::DrawChoose(float scale) {
   if (options_.in_game) {
     ImGui::TextWrapped(
         "Select Big Pack or Big Thrills DLC packages (the files in 5841095A/00000002/), "
-        "extracted DLC folders, or a folder that contains them. You can also drop them onto "
-        "this window.");
+        "custom tracks (saved games in 5841095A/00000001/), or a folder that contains them. "
+        "You can also drop them onto this window.");
   } else {
     ImGui::TextWrapped(
         "Trials HD Recompiled plays your own copy of Trials HD (Xbox Live Arcade). Select the "
         "game package (the file in 5841095A/000D0000/) or a folder that contains it. Big Pack "
-        "and Big Thrills DLC found there are added too. You can also drop files or folders onto "
-        "this window.");
+        "and Big Thrills DLC and custom tracks found there are added too (only the tracks: your "
+        "progress starts fresh). You can also drop files or folders onto this window.");
   }
   ImGui::Separator();
 
@@ -371,6 +389,17 @@ void InstallerDialog::DrawChoose(float scale) {
     ImGui::EndGroup();
   }
 
+  Label("Tracks", label_width);
+  if (tracks_.empty()) {
+    ImGui::TextDisabled(options_.in_game ? "None selected" : "None (optional)");
+  } else {
+    uint64_t bytes = 0;
+    for (const auto& track : tracks_) bytes += track.bytes;
+    const auto label =
+        fmt::format("{} custom tracks  ({})##tracks", tracks_.size(), Megabytes(bytes));
+    ImGui::Checkbox(label.c_str(), &tracks_selected_);
+  }
+
   if (busy) {
     ImGui::TextDisabled("Searching %s...",
                         scanning_.empty() ? "" : scanning_.filename().string().c_str());
@@ -385,7 +414,7 @@ void InstallerDialog::DrawChoose(float scale) {
   const bool can_install = !busy && CanInstall();
   if (!can_install) FocusHere();
   const bool want_dlc = game_ || options_.in_game;
-  if (ImGui::Button(want_dlc ? "Browse for DLC..." : "Browse for the game...")) {
+  if (ImGui::Button(want_dlc ? "Browse for DLC or tracks..." : "Browse for the game...")) {
     OpenBrowser(browse_dir_);
   }
   ImGui::SameLine();
@@ -400,10 +429,7 @@ void InstallerDialog::DrawChoose(float scale) {
   ImGui::Spacing();
   ImGui::BeginDisabled(!can_install);
   if (can_install) FocusHere();
-  const bool dlc_only = !game_ && game_already_installed_;
-  const char* install_label = options_.in_game ? "Install DLC"
-                              : dlc_only       ? "Install DLC and play"
-                                               : "Install and play";
+  const char* install_label = options_.in_game ? "Install" : "Install and play";
   if (ImGui::Button(install_label)) {
     StartInstall();
   }
@@ -554,8 +580,8 @@ void InstallerDialog::DrawInstalling(float scale) {
 }
 
 void InstallerDialog::DrawDone() {
-  ImGui::TextColored(kGood, "DLC installed.");
-  ImGui::TextWrapped("Restart the game to play the new tracks.");
+  ImGui::TextColored(kGood, "Installed.");
+  ImGui::TextWrapped("Restart the game to play the new DLC and custom tracks.");
   ImGui::Spacing();
   FocusHere();
   if (ImGui::Button("OK") || nav_.Pressed(GamepadNav::kBack)) {
