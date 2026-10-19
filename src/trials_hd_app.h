@@ -40,6 +40,7 @@
 #include "performance_overlay.h"
 #include "keyboard_controls.h"
 #include "package_license.h"
+#include "ui_theme.h"
 #include "virtual_pad.h"
 
 #if defined(__EMSCRIPTEN__)
@@ -313,6 +314,11 @@ class TrialsHdApp : public rex::ReXApp {
     if (!game_data_root().empty()) {
       trials_hd::ApplyPackageLicense(game_data_root());
     }
+  }
+
+  // ImGui colors match the main menu (src/ui_theme.cpp).
+  void OnConfigureStyle(ImGuiStyle& imgui_style, rex::ui::Style& ui_style) override {
+    trials_hd::ApplyUiTheme(imgui_style, ui_style);
   }
 
   // Settings (controls and graphics): F1, the controller's Guide button, or
