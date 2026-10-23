@@ -556,13 +556,13 @@ void GraphicsSettingsDialog::DrawGraphicsTab(float label_width) {
 #endif
 
   bool overlay = GetBool("show_performance_overlay");
-  label("Performance Overlay");
+  label("FPS Counter");
   if (ImGui::Checkbox("##performance_overlay", &overlay)) {
     rex::cvar::SetFlagByName("show_performance_overlay", overlay ? "true" : "false");
     SyncPerformanceOverlay(imgui_drawer());
   }
   if (ImGui::IsItemHovered()) {
-    ImGui::SetTooltip("Measured FPS, frame times and a frame-time graph (F2)");
+    ImGui::SetTooltip("Show the FPS counter in the top-left corner (F2)");
   }
 }
 
