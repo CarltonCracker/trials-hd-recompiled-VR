@@ -1,5 +1,7 @@
 # Trials HD Recompiled
 
+Placeholder, plan to explore windows and VR support
+
 > [!WARNING]
 > **Disclaimer:** This project was vibe coded with AI assistance. Expect rough edges and review the code before trusting it.
 
